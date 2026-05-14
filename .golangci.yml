@@ -1,0 +1,56 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    # Correctness
+    - govet          # reports suspicious constructs
+    - errcheck       # unchecked errors
+    - staticcheck    # SA/S/QF family: deep static analysis
+    - ineffassign    # ineffectual assignments
+    - bodyclose      # HTTP response body not closed
+    - noctx          # HTTP requests created without context
+    - nilerr         # returns nil despite checking non-nil error
+    - rowserrcheck   # sql.Rows.Err not checked
+    - sqlclosecheck  # sql.Rows / sql.Stmt not closed
+    - exhaustive     # missing cases in switch over enum
+    # Code quality
+    - revive         # comprehensive Go style (drop-in golint replacement)
+    - gocritic       # opinionated patterns (large rule set, high signal)
+    - unparam        # function parameters that are always the same value
+    - prealloc       # slice declarations that can be pre-allocated
+    - misspell       # common spelling mistakes in comments and strings
+    - whitespace     # unnecessary blank lines
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        arguments:
+          - "checkPrivateReceivers"
+          - "sayRepetitiveInsteadOfStutters"
+      - name: unused-parameter
+      - name: unreachable-code
+      - name: empty-block
+      - name: superfluous-else
+      - name: context-as-argument
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+      - style
+    disabled-checks:
+      - commentedOutCode
+      - whyNoLint
+
+  exhaustive:
+    default-signifies-exhaustive: true
+
+issues:
+  max-same-issues: 5
+  exclude-rules:
+    - path: "_test\\.go"
+      linters:
+        - unparam
+        - gocritic
