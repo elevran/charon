@@ -1,0 +1,4 @@
+server:
+  listen: ":0"
+storage:
+  checkpoint_interval: 10
