@@ -48,7 +48,7 @@ func mapStatus(err error) (int, string) {
 // HandleResolve handles GET /responses/{id}/context.
 func (h *Handler) HandleResolve(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	responseID, flatContext, err := h.svc.Resolve(r.Context(), id)
+	reservationID, flatContext, err := h.svc.Resolve(r.Context(), id)
 	if err != nil {
 		status, msg := mapStatus(err)
 		if status == http.StatusInternalServerError {
@@ -58,8 +58,8 @@ func (h *Handler) HandleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, model.ResolveResponse{
-		ResponseID:  responseID,
-		FlatContext: flatContext,
+		ReservationID: reservationID,
+		FlatContext:   flatContext,
 	})
 }
 

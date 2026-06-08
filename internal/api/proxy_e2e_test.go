@@ -67,7 +67,7 @@ func resolveContext(t *testing.T, client *http.Client, base, previousID string) 
 
 	var resolved model.ResolveResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&resolved))
-	require.NotEmpty(t, resolved.ResponseID, "server must mint a new response_id")
+	require.NotEmpty(t, resolved.ReservationID, "server must return a reservation_id")
 	return resolved
 }
 
@@ -146,13 +146,14 @@ func TestProxyMultiTurnChain(t *testing.T) {
 	const t0ID = "resp_multi_t0"
 	storeResponse(t, client, srv.URL, t0ID, t0req)
 
-	// Turn 1: proxy resolves from t0, stores with the minted id.
+	// Turn 1: proxy resolves from t0; inference server assigns t1ID.
 	resolved1 := resolveContext(t, client, srv.URL, t0ID)
 	assert.Len(t, resolved1.FlatContext, 2, "turn 1 context: t0 input + t0 output")
 
-	t1ID := resolved1.ResponseID
+	const t1ID = "resp_multi_t1"
 	prevID := t0ID
 	t1req := model.StoreRequest{
+		ReservationID:      resolved1.ReservationID,
 		PreviousResponseID: &prevID,
 		Input:              responses.ResponseInputParam{inputItem("user", "turn 1")},
 		Output:             []json.RawMessage{item("assistant", "turn 1 reply")},
@@ -161,13 +162,14 @@ func TestProxyMultiTurnChain(t *testing.T) {
 	}
 	storeResponse(t, client, srv.URL, t1ID, t1req)
 
-	// Turn 2: proxy resolves from t1.
+	// Turn 2: proxy resolves from t1; inference server assigns t2ID.
 	resolved2 := resolveContext(t, client, srv.URL, t1ID)
 	assert.Len(t, resolved2.FlatContext, 4, "turn 2 context: t0 + t1 (2 items each)")
 
-	t2ID := resolved2.ResponseID
+	const t2ID = "resp_multi_t2"
 	prev1ID := t1ID
 	t2req := model.StoreRequest{
+		ReservationID:      resolved2.ReservationID,
 		PreviousResponseID: &prev1ID,
 		Input:              responses.ResponseInputParam{inputItem("user", "turn 2")},
 		Output:             []json.RawMessage{item("assistant", "turn 2 reply")},
@@ -201,9 +203,10 @@ func TestProxyFailedInferenceAndBrokenChain(t *testing.T) {
 	})
 
 	res1 := resolveContext(t, client, srv.URL, t0ID)
-	t1ID := res1.ResponseID
+	const t1ID = "resp_broken_t1"
 	prev0 := t0ID
 	storeResponse(t, client, srv.URL, t1ID, model.StoreRequest{
+		ReservationID:      res1.ReservationID,
 		PreviousResponseID: &prev0,
 		Input:              responses.ResponseInputParam{inputItem("user", "turn 1")},
 		Output:             []json.RawMessage{item("assistant", "turn 1 reply")},
@@ -211,9 +214,10 @@ func TestProxyFailedInferenceAndBrokenChain(t *testing.T) {
 	})
 
 	res2 := resolveContext(t, client, srv.URL, t1ID)
-	t2ID := res2.ResponseID
+	const t2ID = "resp_broken_t2"
 	prev1 := t1ID
 	storeResponse(t, client, srv.URL, t2ID, model.StoreRequest{
+		ReservationID:      res2.ReservationID,
 		PreviousResponseID: &prev1,
 		Input:              responses.ResponseInputParam{inputItem("user", "turn 2")},
 		Output:             []json.RawMessage{item("assistant", "turn 2 reply")},
@@ -222,9 +226,10 @@ func TestProxyFailedInferenceAndBrokenChain(t *testing.T) {
 
 	// Scenario A: failed inference stored after t2.
 	res3 := resolveContext(t, client, srv.URL, t2ID)
-	t3FailedID := res3.ResponseID
+	const t3FailedID = "resp_broken_t3_failed"
 	prev2 := t2ID
 	storeResponse(t, client, srv.URL, t3FailedID, model.StoreRequest{
+		ReservationID:      res3.ReservationID,
 		PreviousResponseID: &prev2,
 		Input:              responses.ResponseInputParam{inputItem("user", "turn 3")},
 		Output:             nil,
