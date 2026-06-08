@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -15,10 +16,95 @@ import (
 var _ storage.IndexStore = (*IndexStore)(nil)
 
 // IndexStore implements storage.IndexStore backed by SQLite.
-type IndexStore struct{ db *sqlx.DB }
+// Prepared statements are cached at construction time, eliminating
+// sqlite3_prepare_v2 overhead on every query.
+type IndexStore struct {
+	db    *sqlx.DB
+	stmts indexStmts
+}
 
-// NewIndexStore creates an IndexStore using an already-open database.
-func NewIndexStore(db *sqlx.DB) *IndexStore { return &IndexStore{db: db} }
+type indexStmts struct {
+	getResp         *sqlx.Stmt // SELECT * FROM responses WHERE id = ?
+	putResp         *sql.Stmt  // INSERT OR REPLACE INTO responses
+	deleteResp      *sql.Stmt  // DELETE FROM responses WHERE id = ?
+	listExpired     *sqlx.Stmt // SELECT * FROM responses WHERE expires_at < ?
+	insertIntent    *sql.Stmt  // INSERT INTO write_intents
+	updateIntent    *sql.Stmt  // UPDATE write_intents SET phase=?, updated_at=? WHERE intent_id=?
+	listStaleIntents *sqlx.Stmt // SELECT * FROM write_intents WHERE phase NOT IN ... AND updated_at < ?
+	deleteIntent    *sql.Stmt  // DELETE FROM write_intents WHERE intent_id=?
+}
+
+const (
+	sqlGetResp = `SELECT * FROM responses WHERE id = ?`
+
+	sqlPutResp = `INSERT OR REPLACE INTO responses
+		(id, previous_response_id, chain_root_id, position, is_checkpoint,
+		 owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+
+	sqlDeleteResp = `DELETE FROM responses WHERE id = ?`
+
+	sqlListExpired = `SELECT * FROM responses WHERE expires_at IS NOT NULL AND expires_at < ?`
+
+	sqlInsertIntent = `INSERT INTO write_intents
+		(intent_id, response_id, reservation_id, payload_key, phase, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?)`
+
+	sqlUpdateIntent = `UPDATE write_intents SET phase = ?, updated_at = ? WHERE intent_id = ?`
+
+	sqlListStaleIntents = `SELECT * FROM write_intents
+		WHERE phase NOT IN ('committed','failed') AND updated_at < ?`
+
+	sqlDeleteIntent = `DELETE FROM write_intents WHERE intent_id = ?`
+)
+
+// NewIndexStore creates an IndexStore and prepares all SQL statements.
+func NewIndexStore(db *sqlx.DB) (*IndexStore, error) {
+	s := &IndexStore{db: db}
+
+	var err error
+	prepare := func(q string) *sql.Stmt {
+		if err != nil {
+			return nil
+		}
+		st, e := db.Prepare(q)
+		if e != nil {
+			err = fmt.Errorf("prepare %q: %w", q[:min(len(q), 40)], e)
+		}
+		return st
+	}
+	preparex := func(q string) *sqlx.Stmt {
+		if err != nil {
+			return nil
+		}
+		st, e := db.Preparex(q)
+		if e != nil {
+			err = fmt.Errorf("preparex %q: %w", q[:min(len(q), 40)], e)
+		}
+		return st
+	}
+
+	s.stmts.getResp = preparex(sqlGetResp)
+	s.stmts.putResp = prepare(sqlPutResp)
+	s.stmts.deleteResp = prepare(sqlDeleteResp)
+	s.stmts.listExpired = preparex(sqlListExpired)
+	s.stmts.insertIntent = prepare(sqlInsertIntent)
+	s.stmts.updateIntent = prepare(sqlUpdateIntent)
+	s.stmts.listStaleIntents = preparex(sqlListStaleIntents)
+	s.stmts.deleteIntent = prepare(sqlDeleteIntent)
+
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 // --- response metadata ---
 
@@ -27,11 +113,7 @@ func (s *IndexStore) Put(_ context.Context, meta model.ResponseMeta) error {
 	if meta.CheckpointKey != nil {
 		isCheckpoint = 1
 	}
-	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO responses
-			(id, previous_response_id, chain_root_id, position, is_checkpoint,
-			 owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.stmts.putResp.Exec(
 		meta.ID, meta.PreviousResponseID, meta.ChainRootID, meta.Position, isCheckpoint,
 		meta.OwnerPrincipal, meta.Model, string(meta.Status), meta.CreatedAt,
 		meta.ExpiresAt, meta.PayloadKey, meta.CheckpointKey,
@@ -54,7 +136,7 @@ func (s *IndexStore) Get(_ context.Context, id string) (model.ResponseMeta, erro
 		PayloadKey         string  `db:"payload_key"`
 		CheckpointKey      *string `db:"checkpoint_key"`
 	}
-	err := s.db.Get(&row, `SELECT * FROM responses WHERE id = ?`, id)
+	err := s.stmts.getResp.Get(&row, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.ResponseMeta{}, storage.ErrNotFound
 	}
@@ -78,11 +160,12 @@ func (s *IndexStore) Get(_ context.Context, id string) (model.ResponseMeta, erro
 
 // Delete removes a response record. Idempotent — no error if the record did not exist.
 func (s *IndexStore) Delete(_ context.Context, id string) error {
-	_, err := s.db.Exec(`DELETE FROM responses WHERE id = ?`, id)
+	_, err := s.stmts.deleteResp.Exec(id)
 	return err
 }
 
 func (s *IndexStore) List(_ context.Context, opts storage.ListOptions) ([]model.ResponseMeta, error) {
+	// List uses dynamic filtering so it cannot use a single prepared statement.
 	query := `SELECT * FROM responses`
 	args := []any{}
 
@@ -129,7 +212,7 @@ func (s *IndexStore) List(_ context.Context, opts storage.ListOptions) ([]model.
 			PreviousResponseID: row.PreviousResponseID,
 			ChainRootID:        row.ChainRootID,
 			Position:           row.Position,
-				OwnerPrincipal:     row.OwnerPrincipal,
+			OwnerPrincipal:     row.OwnerPrincipal,
 			Model:              row.Model,
 			Status:             model.ResponseStatus(row.Status),
 			CreatedAt:          row.CreatedAt,
@@ -145,9 +228,7 @@ func (s *IndexStore) List(_ context.Context, opts storage.ListOptions) ([]model.
 }
 
 func (s *IndexStore) ListExpired(_ context.Context, before int64) ([]model.ResponseMeta, error) {
-	rows, err := s.db.Queryx(
-		`SELECT * FROM responses WHERE expires_at IS NOT NULL AND expires_at < ?`, before,
-	)
+	rows, err := s.stmts.listExpired.Queryx(before)
 	if err != nil {
 		return nil, err
 	}
@@ -158,9 +239,7 @@ func (s *IndexStore) ListExpired(_ context.Context, before int64) ([]model.Respo
 // --- write-intent tracking ---
 
 func (s *IndexStore) InsertWriteIntent(_ context.Context, intent model.WriteIntent) error {
-	_, err := s.db.Exec(`
-		INSERT INTO write_intents (intent_id, response_id, reservation_id, payload_key, phase, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?)`,
+	_, err := s.stmts.insertIntent.Exec(
 		intent.IntentID, intent.ResponseID, intent.ReservationID,
 		intent.PayloadKey, string(intent.Phase), intent.CreatedAt, intent.UpdatedAt,
 	)
@@ -171,10 +250,7 @@ func (s *IndexStore) InsertWriteIntent(_ context.Context, intent model.WriteInte
 }
 
 func (s *IndexStore) UpdateWriteIntent(_ context.Context, intentID string, phase model.WriteIntentPhase) error {
-	res, err := s.db.Exec(
-		`UPDATE write_intents SET phase = ?, updated_at = ? WHERE intent_id = ?`,
-		string(phase), time.Now().Unix(), intentID,
-	)
+	res, err := s.stmts.updateIntent.Exec(string(phase), time.Now().Unix(), intentID)
 	if err != nil {
 		return err
 	}
@@ -187,10 +263,7 @@ func (s *IndexStore) UpdateWriteIntent(_ context.Context, intentID string, phase
 
 func (s *IndexStore) ListStaleWriteIntents(_ context.Context, olderThan time.Duration) ([]model.WriteIntent, error) {
 	threshold := time.Now().Add(-olderThan).Unix()
-	rows, err := s.db.Queryx(`
-		SELECT * FROM write_intents
-		WHERE phase NOT IN ('committed','failed') AND updated_at < ?`, threshold,
-	)
+	rows, err := s.stmts.listStaleIntents.Queryx(threshold)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +272,7 @@ func (s *IndexStore) ListStaleWriteIntents(_ context.Context, olderThan time.Dur
 }
 
 func (s *IndexStore) DeleteWriteIntent(_ context.Context, intentID string) error {
-	_, err := s.db.Exec(`DELETE FROM write_intents WHERE intent_id = ?`, intentID)
+	_, err := s.stmts.deleteIntent.Exec(intentID)
 	return err
 }
 
@@ -230,7 +303,7 @@ func scanMetaRows(rows *sqlx.Rows) ([]model.ResponseMeta, error) {
 			PreviousResponseID: row.PreviousResponseID,
 			ChainRootID:        row.ChainRootID,
 			Position:           row.Position,
-				OwnerPrincipal:     row.OwnerPrincipal,
+			OwnerPrincipal:     row.OwnerPrincipal,
 			Model:              row.Model,
 			Status:             model.ResponseStatus(row.Status),
 			CreatedAt:          row.CreatedAt,
@@ -271,7 +344,6 @@ func scanIntentRows(rows *sqlx.Rows) ([]model.WriteIntent, error) {
 }
 
 func isUniqueConstraint(err error) bool {
-	// modernc.org/sqlite wraps constraint errors; check the message.
 	return err != nil && (errors.Is(err, sql.ErrNoRows) == false) &&
 		containsAny(err.Error(), "UNIQUE constraint failed", "constraint failed")
 }
