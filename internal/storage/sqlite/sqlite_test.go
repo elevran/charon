@@ -20,7 +20,11 @@ func openDB(t *testing.T) *sqlite.IndexStore {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { sqlite.Close(db) })
-	return sqlite.NewIndexStore(db)
+	idx, err := sqlite.NewIndexStore(db)
+	if err != nil {
+		t.Fatalf("NewIndexStore: %v", err)
+	}
+	return idx
 }
 
 func sampleMeta(id string) model.ResponseMeta {

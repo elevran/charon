@@ -67,7 +67,12 @@ func main() {
 			log.Error("open filesystem store", "dir", payDir, "err", err)
 			os.Exit(1)
 		}
-		idx = sqlitestore.NewIndexStore(db)
+		sqlIdx, err := sqlitestore.NewIndexStore(db)
+		if err != nil {
+			log.Error("prepare sqlite statements", "err", err)
+			os.Exit(1)
+		}
+		idx = sqlIdx
 		pay = fsStore
 	default: // "memory"
 		idx = memory.NewIndexStore()
