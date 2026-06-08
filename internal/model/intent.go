@@ -11,10 +11,11 @@ const (
 )
 
 type WriteIntent struct {
-	IntentID   string
-	ResponseID string
-	PayloadKey string
-	Phase      WriteIntentPhase
-	CreatedAt  int64
-	UpdatedAt  int64
+	IntentID      string
+	ResponseID    string // canonical ID from the inference server
+	ReservationID string // rsrv_... from the preceding resolve call; empty for new chains
+	PayloadKey    string
+	Phase         WriteIntentPhase
+	CreatedAt     int64
+	UpdatedAt     int64
 }
