@@ -38,7 +38,9 @@ func TestSQLiteBackendSurvivesRestart(t *testing.T) {
 		pay, err := filesystem.New(payDir)
 		require.NoError(t, err)
 
-		svc := store.New(sqlitestore.NewIndexStore(db), pay, store.Config{}, log)
+		sqlIdx, err := sqlitestore.NewIndexStore(db)
+		require.NoError(t, err)
+		svc := store.New(sqlIdx, pay, store.Config{}, log)
 		req := model.StoreRequest{
 			Input:  responses.ResponseInputParam{inp},
 			Output: []json.RawMessage{},
@@ -57,7 +59,9 @@ func TestSQLiteBackendSurvivesRestart(t *testing.T) {
 		pay, err := filesystem.New(payDir)
 		require.NoError(t, err)
 
-		svc := store.New(sqlitestore.NewIndexStore(db), pay, store.Config{}, log)
+		sqlIdx2, err := sqlitestore.NewIndexStore(db)
+		require.NoError(t, err)
+		svc := store.New(sqlIdx2, pay, store.Config{}, log)
 		meta, _, err := svc.Retrieve(ctx, "resp_persist1")
 		require.NoError(t, err, "response must survive store close and reopen")
 		assert.Equal(t, "resp_persist1", meta.ID)
