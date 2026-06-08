@@ -10,9 +10,28 @@ import (
 
 // Config is the top-level application configuration.
 type Config struct {
-	Server  ServerConfig  `json:"server"`
-	Storage StorageConfig `json:"storage"`
-	Workers WorkerConfig  `json:"workers"`
+	Server    ServerConfig    `json:"server"`
+	Charon    CharonConfig    `json:"charon"`
+	Storage   StorageConfig   `json:"storage"`
+	Workers   WorkerConfig    `json:"workers"`
+	Inference InferenceConfig `json:"inference"`
+}
+
+// CharonConfig controls both the port Charon listens on and the URL the
+// proxy uses to reach it. In single-binary mode these point to localhost;
+// in multi-binary mode they point to the remote Charon instance.
+type CharonConfig struct {
+	Listen  string `json:"listen"`   // default ":8081"
+	BaseURL string `json:"base_url"` // default "http://127.0.0.1:8081"
+}
+
+// InferenceConfig is the stateless Responses API inference backend.
+// The backend receives a full flat_context as input and returns a
+// ResponseResource with its own assigned id.
+type InferenceConfig struct {
+	BaseURL        string `json:"base_url"`        // default "http://localhost:11434"
+	APIKey         string `json:"api_key"`
+	TimeoutSeconds int    `json:"timeout_seconds"` // default 120
 }
 
 // ServerConfig holds HTTP server settings.
@@ -85,6 +104,18 @@ func applyDefaults(cfg *Config) {
 		cfg.Storage.SQLite.BusyTimeoutMs = 5000
 	}
 	// WALMode defaults to false (DELETE journal); set wal_mode: true in config to enable WAL.
+	if cfg.Charon.Listen == "" {
+		cfg.Charon.Listen = ":8081"
+	}
+	if cfg.Charon.BaseURL == "" {
+		cfg.Charon.BaseURL = "http://127.0.0.1:8081"
+	}
+	if cfg.Inference.BaseURL == "" {
+		cfg.Inference.BaseURL = "http://localhost:11434"
+	}
+	if cfg.Inference.TimeoutSeconds <= 0 {
+		cfg.Inference.TimeoutSeconds = 120
+	}
 	if cfg.Workers.TTLInterval <= 0 {
 		cfg.Workers.TTLInterval = time.Hour
 	}

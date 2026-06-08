@@ -32,6 +32,19 @@ func RegisterHandlers(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("DELETE /responses/{id}", h.HandleDelete)
 }
 
+// NewServerFromMux builds a Server wrapping a pre-configured mux with the
+// standard middleware stack (recovery, request logging, timeout).
+func NewServerFromMux(addr string, mux *http.ServeMux, log *slog.Logger) *Server {
+	handler := Chain(mux, Recovery(log), RequestLogger(log), Timeout(30*time.Second))
+	return &Server{srv: &http.Server{
+		Addr:         addr,
+		Handler:      handler,
+		ReadTimeout:  35 * time.Second,
+		WriteTimeout: 35 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}}
+}
+
 // NewServerWithRegistry builds a Server with a custom prometheus Gatherer for /metrics.
 func NewServerWithRegistry(addr string, h *Handler, log *slog.Logger, reg prometheus.Gatherer) *Server {
 	mux := http.NewServeMux()
