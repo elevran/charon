@@ -9,7 +9,9 @@ GOARCH ?= $(shell go env GOARCH)
 
 OUT := $(BUILD_DIR)/$(GOOS)/$(GOARCH)/$(BINARY)
 
-.PHONY: all fmt lint test tidy update build image clean
+OPENRESPONSES_DIR ?= ../openresponses
+
+.PHONY: all fmt lint test test-compliance-bun tidy update build image clean
 
 all: fmt tidy lint test build
 
@@ -21,6 +23,15 @@ lint:
 
 test:
 	go test ./... -race
+
+# Runs the canonical openresponses.org compliance suite via bun.
+# Requires: bun (https://bun.sh) and OPENRESPONSES_DIR set to a clone of
+# https://github.com/openresponses/openresponses
+# Note: build tag uses underscores because Go does not allow hyphens in tags.
+test-compliance-bun:
+	OPENRESPONSES_DIR=$(OPENRESPONSES_DIR) \
+	go test -tags openresponses_bun_compliance -v -count=1 \
+	  ./test/compliance/... -run TestBunComplianceSuite
 
 tidy:
 	go mod tidy
