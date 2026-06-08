@@ -6,26 +6,78 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/openai/openai-go/responses"
+	"github.com/stretchr/testify/require"
 
 	"github.com/elevran/charon/internal/model"
 	"github.com/elevran/charon/internal/storage"
+	"github.com/elevran/charon/internal/storage/filesystem"
 	"github.com/elevran/charon/internal/storage/memory"
+	sqlitestore "github.com/elevran/charon/internal/storage/sqlite"
 	"github.com/elevran/charon/internal/store"
 )
 
 var ctx = context.Background()
 
-func newSvc(cfg store.Config) (*store.ContextStore, *memory.IndexStore, *memory.PayloadStore) {
+// storeFactory creates a fresh ContextStore and its underlying stores.
+// Cleanup (closing databases, removing temp files) must be registered via
+// t.Cleanup inside the factory so each sub-test is self-contained.
+type storeFactory func(cfg store.Config) (svc *store.ContextStore, idx storage.IndexStore, pay storage.PayloadStore)
+
+// runConformanceSuite runs all 12 conformance scenarios against any backend
+// provided by factory.
+func runConformanceSuite(t *testing.T, factory storeFactory) {
+	t.Helper()
+	t.Run("resolve-new-chain", func(t *testing.T) { testResolveNewChainNotFound(t, factory) })
+	t.Run("resolve-multi-turn", func(t *testing.T) { testResolveMultiTurn(t, factory) })
+	t.Run("resolve-with-checkpoint", func(t *testing.T) { testResolveWithCheckpoint(t, factory) })
+	t.Run("store-and-retrieve", func(t *testing.T) { testStoreAndRetrieve(t, factory) })
+	t.Run("write-intent-pending", func(t *testing.T) { testWriteIntentPendingRecovery(t, factory) })
+	t.Run("write-intent-file-written", func(t *testing.T) { testWriteIntentFileWrittenRecovery(t, factory) })
+	t.Run("ttl-expiry", func(t *testing.T) { testTTLExpiry(t, factory) })
+	t.Run("delete-no-cascade", func(t *testing.T) { testDeleteNoCascade(t, factory) })
+	t.Run("encrypted-content-roundtrip", func(t *testing.T) { testEncryptedContentRoundtrip(t, factory) })
+	t.Run("instructions-not-in-context", func(t *testing.T) { testInstructionsNotInContext(t, factory) })
+	t.Run("phase-field-preserved", func(t *testing.T) { testPhaseFieldPreserved(t, factory) })
+	t.Run("resolve-efficiency", func(t *testing.T) { testResolveEfficiency(t, factory) })
+}
+
+func memoryFactory(cfg store.Config) (*store.ContextStore, storage.IndexStore, storage.PayloadStore) {
 	idx := memory.NewIndexStore()
 	pay := memory.NewPayloadStore()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	return store.New(idx, pay, cfg, log), idx, pay
 }
+
+// TestMemoryBackendConformance runs all scenarios against the in-memory backend.
+func TestMemoryBackendConformance(t *testing.T) {
+	runConformanceSuite(t, memoryFactory)
+}
+
+// TestSQLiteBackendConformance runs the identical suite against SQLite + filesystem.
+// Each sub-test gets its own isolated temp directory via t.TempDir() inside the factory.
+func TestSQLiteBackendConformance(t *testing.T) {
+	runConformanceSuite(t, func(cfg store.Config) (*store.ContextStore, storage.IndexStore, storage.PayloadStore) {
+		dataDir := t.TempDir()
+		db, err := sqlitestore.Open(filepath.Join(dataDir, "responses.db"), sqlitestore.Config{WALMode: false})
+		require.NoError(t, err)
+		t.Cleanup(func() { sqlitestore.Close(db) })
+
+		pay, err := filesystem.New(filepath.Join(dataDir, "payloads"))
+		require.NoError(t, err)
+
+		idx := sqlitestore.NewIndexStore(db)
+		log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+		return store.New(idx, pay, cfg, log), idx, pay
+	})
+}
+
+// --- helpers ---
 
 func rawJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
@@ -52,8 +104,9 @@ func storeRequest(prevID *string, input, output []json.RawMessage) model.StoreRe
 
 // --- Scenario 1: resolve-new-chain ---
 
-func TestResolveNewChainNotFound(t *testing.T) {
-	svc, _, _ := newSvc(store.Config{})
+func testResolveNewChainNotFound(t *testing.T, factory storeFactory) {
+	t.Helper()
+	svc, _, _ := factory(store.Config{})
 	_, _, err := svc.Resolve(ctx, "resp_doesnotexist")
 	if err != storage.ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
@@ -62,19 +115,17 @@ func TestResolveNewChainNotFound(t *testing.T) {
 
 // --- Scenario 2: resolve-multi-turn ---
 
-func TestResolveMultiTurn(t *testing.T) {
-	svc, _, _ := newSvc(store.Config{CheckpointInterval: 100}) // disable checkpoints
+func testResolveMultiTurn(t *testing.T, factory storeFactory) {
+	t.Helper()
+	svc, _, _ := factory(store.Config{CheckpointInterval: 100})
 
 	var prevID *string
 	var lastID string
-	items := make([]json.RawMessage, 0, 10)
 
 	for i := range 5 {
 		inp := rawJSON(map[string]any{"type": "message", "role": "user", "content": fmt.Sprintf("turn %d", i)})
 		out := rawJSON(map[string]any{"type": "message", "role": "assistant", "content": fmt.Sprintf("turn %d", i)})
-		items = append(items, inp, out)
 
-		// For test simplicity, use Store directly and track IDs manually.
 		responseID := fmt.Sprintf("resp_%05d", i)
 		req := storeRequest(prevID, []json.RawMessage{inp}, []json.RawMessage{out})
 		if err := svc.Store(ctx, responseID, req); err != nil {
@@ -88,11 +139,9 @@ func TestResolveMultiTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	// 5 turns × (1 input + 1 output) = 10 items
 	if len(flatContext) != 10 {
 		t.Fatalf("expected 10 items, got %d", len(flatContext))
 	}
-	// Verify chronological order: first item is turn 0 input (role=user, content="turn 0").
 	var first map[string]any
 	_ = json.Unmarshal(flatContext[0], &first)
 	if first["content"] != "turn 0" {
@@ -102,8 +151,9 @@ func TestResolveMultiTurn(t *testing.T) {
 
 // --- Scenario 3: resolve-with-checkpoint ---
 
-func TestResolveWithCheckpoint(t *testing.T) {
-	svc, _, _ := newSvc(store.Config{CheckpointInterval: 10})
+func testResolveWithCheckpoint(t *testing.T, factory storeFactory) {
+	t.Helper()
+	svc, _, _ := factory(store.Config{CheckpointInterval: 10})
 
 	var prevID *string
 	for i := range 12 {
@@ -117,12 +167,10 @@ func TestResolveWithCheckpoint(t *testing.T) {
 		prevID = &responseID
 	}
 
-	lastID := "resp_00011"
-	_, flatContext, err := svc.Resolve(ctx, lastID)
+	_, flatContext, err := svc.Resolve(ctx, "resp_00011")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	// 12 turns × 2 items = 24 items
 	if len(flatContext) != 24 {
 		t.Fatalf("expected 24 items, got %d", len(flatContext))
 	}
@@ -130,8 +178,9 @@ func TestResolveWithCheckpoint(t *testing.T) {
 
 // --- Scenario 4: store-and-retrieve ---
 
-func TestStoreAndRetrieve(t *testing.T) {
-	svc, _, _ := newSvc(store.Config{})
+func testStoreAndRetrieve(t *testing.T, factory storeFactory) {
+	t.Helper()
+	svc, _, _ := factory(store.Config{})
 
 	inp := rawJSON(map[string]string{"type": "message", "role": "user", "text": "hello"})
 	out := rawJSON(map[string]string{"type": "message", "role": "assistant", "text": "hi"})
@@ -142,7 +191,6 @@ func TestStoreAndRetrieve(t *testing.T) {
 	if err := svc.Store(ctx, "resp_test1", req); err != nil {
 		t.Fatal(err)
 	}
-
 	meta, payload, err := svc.Retrieve(ctx, "resp_test1")
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +201,7 @@ func TestStoreAndRetrieve(t *testing.T) {
 	if meta.Model != "gpt-4o" {
 		t.Errorf("meta.Model = %q, want gpt-4o", meta.Model)
 	}
-	if meta.Status != "completed" {
+	if string(meta.Status) != "completed" {
 		t.Errorf("meta.Status = %q, want completed", meta.Status)
 	}
 	if len(payload.InputItems) != 1 || len(payload.OutputItems) != 1 {
@@ -163,10 +211,10 @@ func TestStoreAndRetrieve(t *testing.T) {
 
 // --- Scenario 5: write-intent-pending-recovery ---
 
-func TestWriteIntentPendingRecovery(t *testing.T) {
-	_, idx, _ := newSvc(store.Config{})
+func testWriteIntentPendingRecovery(t *testing.T, factory storeFactory) {
+	t.Helper()
+	_, idx, _ := factory(store.Config{})
 
-	// Simulate a crash after InsertWriteIntent but before payload write.
 	oldTime := time.Now().Add(-10 * time.Minute).Unix()
 	intent := model.WriteIntent{
 		IntentID:   "intent_crash1",
@@ -180,7 +228,6 @@ func TestWriteIntentPendingRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Recovery: pending intent means payload was never written — mark failed.
 	stale, _ := idx.ListStaleWriteIntents(ctx, 5*time.Minute)
 	for _, si := range stale {
 		if si.Phase == model.WriteIntentPending {
@@ -190,7 +237,6 @@ func TestWriteIntentPendingRecovery(t *testing.T) {
 		}
 	}
 
-	// Verify it's now marked failed (not in stale list anymore).
 	staleAfter, _ := idx.ListStaleWriteIntents(ctx, 5*time.Minute)
 	for _, si := range staleAfter {
 		if si.IntentID == "intent_crash1" {
@@ -201,10 +247,10 @@ func TestWriteIntentPendingRecovery(t *testing.T) {
 
 // --- Scenario 6: write-intent-file-written-recovery ---
 
-func TestWriteIntentFileWrittenRecovery(t *testing.T) {
-	_, idx, pay := newSvc(store.Config{})
+func testWriteIntentFileWrittenRecovery(t *testing.T, factory storeFactory) {
+	t.Helper()
+	_, idx, pay := factory(store.Config{})
 
-	// Simulate a crash after payload write but before index commit.
 	responseID := "resp_filewritten"
 	payloadKey := fmt.Sprintf("root/%08d_%s.json", 1, responseID)
 
@@ -227,7 +273,6 @@ func TestWriteIntentFileWrittenRecovery(t *testing.T) {
 	}
 	_ = idx.InsertWriteIntent(ctx, intent)
 
-	// Recovery: file_written intent — payload exists, commit the index row.
 	stale, _ := idx.ListStaleWriteIntents(ctx, 5*time.Minute)
 	for _, si := range stale {
 		if si.Phase == model.WriteIntentFileWritten {
@@ -238,7 +283,6 @@ func TestWriteIntentFileWrittenRecovery(t *testing.T) {
 			}
 			var p model.ResponsePayload
 			_ = json.Unmarshal(data, &p)
-			// Reconstruct meta (simplified for memory-only recovery test).
 			meta := model.ResponseMeta{
 				ID:         si.ResponseID,
 				PayloadKey: si.PayloadKey,
@@ -250,12 +294,10 @@ func TestWriteIntentFileWrittenRecovery(t *testing.T) {
 		}
 	}
 
-	// Verify index row now exists.
 	if _, err := idx.Get(ctx, responseID); err != nil {
 		t.Fatalf("expected index row after recovery, got %v", err)
 	}
 
-	// Verify intent is now committed (not stale).
 	staleAfter, _ := idx.ListStaleWriteIntents(ctx, 5*time.Minute)
 	for _, si := range staleAfter {
 		if si.IntentID == "intent_fw1" {
@@ -266,8 +308,9 @@ func TestWriteIntentFileWrittenRecovery(t *testing.T) {
 
 // --- Scenario 7: ttl-expiry ---
 
-func TestTTLExpiry(t *testing.T) {
-	svc, idx, _ := newSvc(store.Config{TTLDays: 1})
+func testTTLExpiry(t *testing.T, factory storeFactory) {
+	t.Helper()
+	svc, idx, _ := factory(store.Config{TTLDays: 1})
 
 	inp := rawJSON(map[string]string{"type": "message"})
 	req := storeRequest(nil, []json.RawMessage{inp}, nil)
@@ -275,13 +318,11 @@ func TestTTLExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Manually expire it.
 	meta, _ := idx.Get(ctx, "resp_ttl1")
 	pastExp := time.Now().Add(-time.Hour).Unix()
 	meta.ExpiresAt = &pastExp
 	_ = idx.Put(ctx, meta)
 
-	// Simulate TTL worker: list expired, delete them.
 	expired, _ := idx.ListExpired(ctx, time.Now().Unix())
 	for _, m := range expired {
 		_ = idx.Delete(ctx, m.ID)
@@ -294,8 +335,9 @@ func TestTTLExpiry(t *testing.T) {
 
 // --- Scenario 8: delete-no-cascade ---
 
-func TestDeleteNoCascade(t *testing.T) {
-	svc, _, _ := newSvc(store.Config{CheckpointInterval: 100})
+func testDeleteNoCascade(t *testing.T, factory storeFactory) {
+	t.Helper()
+	svc, _, _ := factory(store.Config{CheckpointInterval: 100})
 
 	var prevID *string
 	for i := range 3 {
@@ -308,12 +350,10 @@ func TestDeleteNoCascade(t *testing.T) {
 		prevID = &responseID
 	}
 
-	// Delete the middle response (turn 1).
 	if err := svc.Delete(ctx, "resp_00001"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	// Adjacent responses (turn 0, turn 2) should still be retrievable.
 	if _, _, err := svc.Retrieve(ctx, "resp_00000"); err != nil {
 		t.Fatalf("turn 0 still retrievable: %v", err)
 	}
@@ -321,7 +361,6 @@ func TestDeleteNoCascade(t *testing.T) {
 		t.Fatalf("turn 2 still retrievable: %v", err)
 	}
 
-	// Resolve from turn 2 (the head) should fail: chain walks through deleted turn 1.
 	_, _, err := svc.Resolve(ctx, "resp_00002")
 	if err != storage.ErrChainCorrupted {
 		t.Fatalf("expected ErrChainCorrupted due to gap, got %v", err)
@@ -330,20 +369,19 @@ func TestDeleteNoCascade(t *testing.T) {
 
 // --- Scenario 9: encrypted-content-roundtrip ---
 
-func TestEncryptedContentRoundtrip(t *testing.T) {
-	svc, _, _ := newSvc(store.Config{CheckpointInterval: 100})
+func testEncryptedContentRoundtrip(t *testing.T, factory storeFactory) {
+	t.Helper()
+	svc, _, _ := factory(store.Config{CheckpointInterval: 100})
 
 	encryptedBlob := `{"type":"reasoning","encrypted_content":"OPAQUE_BLOB_12345==","summary":[]}`
 	reasoningItem := json.RawMessage(encryptedBlob)
 
-	// Store turn 0 with a reasoning item in output.
 	inp0 := rawJSON(map[string]string{"type": "message", "role": "user"})
 	req0 := storeRequest(nil, []json.RawMessage{inp0}, []json.RawMessage{reasoningItem})
 	if err := svc.Store(ctx, "resp_enc0", req0); err != nil {
 		t.Fatal(err)
 	}
 
-	// Store turn 1 referencing turn 0.
 	prevID := "resp_enc0"
 	inp1 := rawJSON(map[string]string{"type": "message", "role": "user"})
 	req1 := storeRequest(&prevID, []json.RawMessage{inp1}, nil)
@@ -351,7 +389,6 @@ func TestEncryptedContentRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Resolve from turn 1 should include the reasoning item verbatim.
 	_, flatContext, err := svc.Resolve(ctx, "resp_enc1")
 	if err != nil {
 		t.Fatal(err)
@@ -371,8 +408,9 @@ func TestEncryptedContentRoundtrip(t *testing.T) {
 
 // --- Scenario 10: instructions-not-in-context ---
 
-func TestInstructionsNotInContext(t *testing.T) {
-	svc, _, _ := newSvc(store.Config{CheckpointInterval: 100})
+func testInstructionsNotInContext(t *testing.T, factory storeFactory) {
+	t.Helper()
+	svc, _, _ := factory(store.Config{CheckpointInterval: 100})
 
 	inp := rawJSON(map[string]string{"type": "message", "role": "user", "text": "hello"})
 	out := rawJSON(map[string]string{"type": "message", "role": "assistant", "text": "hi"})
@@ -399,7 +437,7 @@ func TestInstructionsNotInContext(t *testing.T) {
 		if role, ok := m["role"]; ok && role == "system" {
 			t.Fatalf("instructions (system role) found in flat_context: %s", item)
 		}
-		if t2, ok := m["type"]; ok && t2 == "instructions" {
+		if typ, ok := m["type"]; ok && typ == "instructions" {
 			t.Fatalf("instructions item found in flat_context: %s", item)
 		}
 	}
@@ -407,10 +445,10 @@ func TestInstructionsNotInContext(t *testing.T) {
 
 // --- Scenario 11: phase-field-preserved ---
 
-func TestPhaseFieldPreserved(t *testing.T) {
-	svc, _, _ := newSvc(store.Config{CheckpointInterval: 100})
+func testPhaseFieldPreserved(t *testing.T, factory storeFactory) {
+	t.Helper()
+	svc, _, _ := factory(store.Config{CheckpointInterval: 100})
 
-	// Assistant message with phase field.
 	msgWithPhase := `{"type":"message","role":"assistant","content":[],"phase":"final_answer"}`
 	out := json.RawMessage(msgWithPhase)
 
@@ -444,7 +482,9 @@ func TestPhaseFieldPreserved(t *testing.T) {
 	}
 }
 
-// --- Efficiency: 100-turn chain with K=10 makes ≤10 PayloadStore.Get calls ---
+// --- Scenario 12: resolve-efficiency ---
+// Wraps the payload store with a counter so we can assert ≤10 Get calls
+// for a 100-turn chain with K=10.
 
 type countingPayloadStore struct {
 	storage.PayloadStore
@@ -456,10 +496,11 @@ func (c *countingPayloadStore) Get(ctx context.Context, key string) ([]byte, err
 	return c.PayloadStore.Get(ctx, key)
 }
 
-func TestResolveEfficiency(t *testing.T) {
-	idx := memory.NewIndexStore()
-	base := memory.NewPayloadStore()
-	counter := &countingPayloadStore{PayloadStore: base}
+func testResolveEfficiency(t *testing.T, factory storeFactory) {
+	t.Helper()
+	// Get the raw stores from the factory so we can wrap the payload store.
+	_, idx, basePay := factory(store.Config{CheckpointInterval: 10})
+	counter := &countingPayloadStore{PayloadStore: basePay}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	svc := store.New(idx, counter, store.Config{CheckpointInterval: 10}, log)
 
@@ -475,16 +516,13 @@ func TestResolveEfficiency(t *testing.T) {
 		prevID = &responseID
 	}
 
-	// Reset counter before Resolve.
 	counter.gets.Store(0)
-
 	_, _, err := svc.Resolve(ctx, "resp_00099")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	gets := counter.gets.Load()
-	if gets > 10 {
+	if gets := counter.gets.Load(); gets > 10 {
 		t.Fatalf("Resolve on 100-turn chain made %d PayloadStore.Get calls, want ≤10", gets)
 	}
 }

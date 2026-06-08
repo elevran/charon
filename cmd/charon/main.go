@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -15,7 +16,10 @@ import (
 	"github.com/elevran/charon/internal/api"
 	"github.com/elevran/charon/internal/config"
 	"github.com/elevran/charon/internal/metrics"
+	"github.com/elevran/charon/internal/storage"
+	"github.com/elevran/charon/internal/storage/filesystem"
 	"github.com/elevran/charon/internal/storage/memory"
+	sqlitestore "github.com/elevran/charon/internal/storage/sqlite"
 	"github.com/elevran/charon/internal/store"
 	"github.com/elevran/charon/internal/worker"
 )
@@ -32,8 +36,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	idx := memory.NewIndexStore()
-	pay := memory.NewPayloadStore()
+	var (
+		idx storage.IndexStore
+		pay storage.PayloadStore
+	)
+
+	switch cfg.Storage.Backend {
+	case "sqlite":
+		if err := os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
+			log.Error("create data dir", "err", err)
+			os.Exit(1)
+		}
+		dbPath := filepath.Join(cfg.Storage.DataDir, "responses.db")
+		db, err := sqlitestore.Open(dbPath, sqlitestore.Config{
+			WALMode:       cfg.Storage.SQLite.WALMode,
+			BusyTimeoutMs: cfg.Storage.SQLite.BusyTimeoutMs,
+		})
+		if err != nil {
+			log.Error("open sqlite", "path", dbPath, "err", err)
+			os.Exit(1)
+		}
+		defer sqlitestore.Close(db)
+
+		payDir := filepath.Join(cfg.Storage.DataDir, "payloads")
+		fsStore, err := filesystem.New(payDir)
+		if err != nil {
+			log.Error("open filesystem store", "dir", payDir, "err", err)
+			os.Exit(1)
+		}
+		idx = sqlitestore.NewIndexStore(db)
+		pay = fsStore
+	default: // "memory"
+		idx = memory.NewIndexStore()
+		pay = memory.NewPayloadStore()
+	}
 
 	svcCfg := store.Config{
 		CheckpointInterval: cfg.Storage.CheckpointInterval,
@@ -70,7 +106,6 @@ func main() {
 	log.Info("shutting down")
 	cancel()
 
-	// Give in-flight requests up to 10s to complete before force-closing connections.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
