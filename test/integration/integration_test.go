@@ -90,6 +90,6 @@ func TestFullStoreCycle(t *testing.T) {
 	require.Equal(t, http.StatusOK, resolveResp.StatusCode)
 	var resolved model.ResolveResponse
 	require.NoError(t, json.NewDecoder(resolveResp.Body).Decode(&resolved))
-	assert.NotEmpty(t, resolved.ResponseID)
+	assert.NotEmpty(t, resolved.ReservationID)
 	assert.Len(t, resolved.FlatContext, 2)
 }

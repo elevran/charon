@@ -76,8 +76,8 @@ func (s *ContextStore) Resolve(ctx context.Context, previousID string) (string, 
 		return "", nil, err
 	}
 
-	responseID := mintID("resp")
-	return responseID, flatContext, nil
+	reservationID := mintID("rsrv")
+	return reservationID, flatContext, nil
 }
 
 // Store commits a completed inference response using the two-phase write-intent protocol.
@@ -107,12 +107,13 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 	now := time.Now().Unix()
 
 	intent := model.WriteIntent{
-		IntentID:   intentID,
-		ResponseID: responseID,
-		PayloadKey: pKey,
-		Phase:      model.WriteIntentPending,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		IntentID:      intentID,
+		ResponseID:    responseID,
+		ReservationID: req.ReservationID,
+		PayloadKey:    pKey,
+		Phase:         model.WriteIntentPending,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 
 	if err := s.index.InsertWriteIntent(ctx, intent); err != nil {

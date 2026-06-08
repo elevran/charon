@@ -41,6 +41,7 @@ type ResponsePayload struct {
 
 // StoreRequest is the body of POST /responses/{id}.
 type StoreRequest struct {
+	ReservationID      string                           `json:"reservation_id,omitempty"`   // from preceding resolve; omitted for new chains
 	PreviousResponseID *string                          `json:"previous_response_id,omitempty"`
 	Input              responses.ResponseInputParam     `json:"input"`
 	Output             []json.RawMessage                `json:"output"`
@@ -51,8 +52,8 @@ type StoreRequest struct {
 
 // ResolveResponse is the body returned by GET /responses/{id}/context.
 type ResolveResponse struct {
-	ResponseID  string            `json:"response_id"`
-	FlatContext []json.RawMessage `json:"flat_context"`
+	ReservationID string            `json:"reservation_id"`
+	FlatContext   []json.RawMessage `json:"flat_context"`
 }
 
 // RetrieveResponse is the body returned by GET /responses/{id}.
