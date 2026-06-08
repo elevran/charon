@@ -1,6 +1,8 @@
 package store
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -64,9 +66,9 @@ func (s *ContextStore) buildContext(ctx context.Context, prevID string) ([]json.
 			if err != nil {
 				return nil, storage.ErrChainCorrupted
 			}
-			var ckItems []json.RawMessage
-			if err := json.Unmarshal(data, &ckItems); err != nil {
-				return nil, fmt.Errorf("unmarshal checkpoint: %w", err)
+			ckItems, err := parseCheckpoint(data)
+			if err != nil {
+				return nil, fmt.Errorf("parse checkpoint: %w", err)
 			}
 			flatContext = append(flatContext, ckItems...)
 			continue
@@ -85,4 +87,36 @@ func (s *ContextStore) buildContext(ctx context.Context, prevID string) ([]json.
 	}
 
 	return flatContext, nil
+}
+
+// parseCheckpoint reads a checkpoint blob written by marshalNDJSON (ndjson) or,
+// for backward compatibility, a legacy JSON array written by json.Marshal.
+// The ndjson path copies lines directly without re-validating JSON — safe
+// because items were validated on ingestion.
+func parseCheckpoint(data []byte) ([]json.RawMessage, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	// Legacy format: starts with '['.
+	if data[0] == '[' {
+		var items []json.RawMessage
+		if err := json.Unmarshal(data, &items); err != nil {
+			return nil, err
+		}
+		return items, nil
+	}
+	// ndjson format: one JSON value per line, no re-validation needed.
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 4096), 1<<20) // grow up to 1 MB if a single item is large
+	var items []json.RawMessage
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		cp := make([]byte, len(line))
+		copy(cp, line)
+		items = append(items, json.RawMessage(cp))
+	}
+	return items, scanner.Err()
 }

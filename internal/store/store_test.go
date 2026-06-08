@@ -71,7 +71,8 @@ func TestSQLiteBackendConformance(t *testing.T) {
 		pay, err := filesystem.New(filepath.Join(dataDir, "payloads"))
 		require.NoError(t, err)
 
-		idx := sqlitestore.NewIndexStore(db)
+		idx, err := sqlitestore.NewIndexStore(db)
+		require.NoError(t, err)
 		log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 		return store.New(idx, pay, cfg, log), idx, pay
 	})
