@@ -14,8 +14,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/elevran/charon/internal/api"
+	charonpkg "github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/config"
+	"github.com/elevran/charon/internal/inference"
 	"github.com/elevran/charon/internal/metrics"
+	"github.com/elevran/charon/internal/proxy"
 	"github.com/elevran/charon/internal/storage"
 	"github.com/elevran/charon/internal/storage/filesystem"
 	"github.com/elevran/charon/internal/storage/memory"
@@ -83,8 +86,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	h := api.NewHandler(svc, log)
-	srv := api.NewServerWithRegistry(cfg.Server.Listen, h, log, reg)
+	// ── Charon internal API server (port 8081 by default) ──────────────────
+	charonH := api.NewHandler(svc, log)
+	charonSrv := api.NewServerWithRegistry(cfg.Charon.Listen, charonH, log, reg)
+
+	// ── Proxy server (port 8080 by default) ────────────────────────────────
+	timeout := time.Duration(cfg.Inference.TimeoutSeconds) * time.Second
+	infClient := inference.New(cfg.Inference.BaseURL, cfg.Inference.APIKey, timeout)
+	charonClient := charonpkg.New(cfg.Charon.BaseURL, timeout)
+	proxyH := proxy.NewHandler(charonClient, infClient, log)
+	proxyMux := http.NewServeMux()
+	proxy.RegisterHandlers(proxyMux, proxyH)
+	proxySrv := api.NewServerFromMux(cfg.Server.Listen, proxyMux, log)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -93,9 +106,15 @@ func main() {
 	go worker.NewReconciler(idx, pay, log, cfg.Storage.WriteIntentStaleThreshold, cfg.Workers.RecoveryInterval).Run(ctx)
 
 	go func() {
-		log.Info("starting server", "addr", cfg.Server.Listen)
-		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
-			log.Error("server error", "err", err)
+		log.Info("starting charon internal API", "addr", cfg.Charon.Listen)
+		if err := charonSrv.Start(); err != nil && err != http.ErrServerClosed {
+			log.Error("charon server error", "err", err)
+		}
+	}()
+	go func() {
+		log.Info("starting proxy server", "addr", cfg.Server.Listen)
+		if err := proxySrv.Start(); err != nil && err != http.ErrServerClosed {
+			log.Error("proxy server error", "err", err)
 		}
 	}()
 
@@ -108,7 +127,10 @@ func main() {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown error", "err", err)
+	if err := charonSrv.Shutdown(shutdownCtx); err != nil {
+		log.Error("charon shutdown error", "err", err)
+	}
+	if err := proxySrv.Shutdown(shutdownCtx); err != nil {
+		log.Error("proxy shutdown error", "err", err)
 	}
 }
