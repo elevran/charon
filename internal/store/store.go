@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -159,10 +160,7 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 		flatCtx = append(flatCtx, rawInput...)
 		flatCtx = append(flatCtx, req.Output...)
 
-		ckBytes, err := json.Marshal(flatCtx)
-		if err != nil {
-			return fmt.Errorf("marshal checkpoint: %w", err)
-		}
+		ckBytes := marshalNDJSON(flatCtx)
 		ck := checkpointKey(chainRootID, position, responseID)
 		ckKey = &ck
 		if err := s.payloads.Put(ctx, ck, ckBytes); err != nil {
@@ -263,4 +261,17 @@ func payloadKey(chainRootID string, position int, responseID string) string {
 
 func checkpointKey(chainRootID string, position int, responseID string) string {
 	return fmt.Sprintf("%s/checkpoint_%08d_%s.json", chainRootID, position, responseID)
+}
+
+// marshalNDJSON serialises a []json.RawMessage as newline-delimited JSON.
+// Each item occupies one line. This avoids the json.checkValid + array-skip
+// cost that json.Marshal([]json.RawMessage{…}) pays when the slice is large.
+func marshalNDJSON(items []json.RawMessage) []byte {
+	var buf bytes.Buffer
+	buf.Grow(len(items) * 128)
+	for _, item := range items {
+		buf.Write(item)
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes()
 }
