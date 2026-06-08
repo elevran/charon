@@ -22,9 +22,18 @@ type ServerConfig struct {
 
 // StorageConfig holds store-level settings.
 type StorageConfig struct {
-	CheckpointInterval          int           `json:"checkpoint_interval"`
-	TTLDays                     int           `json:"ttl_days"`
-	WriteIntentStaleThreshold   time.Duration `json:"write_intent_stale_threshold"`
+	CheckpointInterval        int           `json:"checkpoint_interval"`
+	TTLDays                   int           `json:"ttl_days"`
+	WriteIntentStaleThreshold time.Duration `json:"write_intent_stale_threshold"`
+	Backend                   string        `json:"backend"`  // "memory" (default) | "sqlite"
+	DataDir                   string        `json:"data_dir"` // default "./data"
+	SQLite                    SQLiteConfig  `json:"sqlite"`
+}
+
+// SQLiteConfig holds SQLite-specific tuning knobs.
+type SQLiteConfig struct {
+	WALMode       bool `json:"wal_mode"`
+	BusyTimeoutMs int  `json:"busy_timeout_ms"`
 }
 
 // WorkerConfig holds background worker settings.
@@ -66,6 +75,16 @@ func applyDefaults(cfg *Config) {
 	if cfg.Storage.WriteIntentStaleThreshold <= 0 {
 		cfg.Storage.WriteIntentStaleThreshold = 5 * time.Minute
 	}
+	if cfg.Storage.Backend == "" {
+		cfg.Storage.Backend = "memory"
+	}
+	if cfg.Storage.DataDir == "" {
+		cfg.Storage.DataDir = "./data"
+	}
+	if cfg.Storage.SQLite.BusyTimeoutMs <= 0 {
+		cfg.Storage.SQLite.BusyTimeoutMs = 5000
+	}
+	// WALMode defaults to false (DELETE journal); set wal_mode: true in config to enable WAL.
 	if cfg.Workers.TTLInterval <= 0 {
 		cfg.Workers.TTLInterval = time.Hour
 	}

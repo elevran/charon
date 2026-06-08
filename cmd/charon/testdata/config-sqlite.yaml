@@ -1,0 +1,10 @@
+server:
+  listen: ":0"
+storage:
+  backend: sqlite
+  data_dir: ""  # overridden per-test
+  sqlite:
+    wal_mode: true
+    busy_timeout_ms: 5000
+  checkpoint_interval: 10
+  ttl_days: 30
