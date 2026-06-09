@@ -43,7 +43,7 @@ func (m *MockServer) handle(w http.ResponseWriter, r *http.Request) {
 		Stream bool `json:"stream"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	r.Body.Close()
+	_ = r.Body.Close()
 
 	id := m.nextID()
 	outputItem := json.RawMessage(`{"type":"message","id":"msg_ok","role":"assistant","status":"completed","content":[{"type":"output_text","text":"OK."}]}`)
@@ -74,7 +74,7 @@ func (m *MockServer) writeComplete(w http.ResponseWriter, id string, item json.R
 func NewPartialMockServer() *MockServer {
 	m := &MockServer{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /responses", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /responses", func(w http.ResponseWriter, _ *http.Request) {
 		id := m.nextID()
 		m.writePartialStream(w, id)
 	})
@@ -91,7 +91,7 @@ func (m *MockServer) writePartialStream(w http.ResponseWriter, id string) {
 	inProgressResp := Response{ID: id, Status: "in_progress", Model: "mock", Output: []json.RawMessage{}}
 	evt := SSEEvent{Type: "response.created", SequenceNumber: 0, Response: &inProgressResp}
 	b, _ := json.Marshal(evt)
-	fmt.Fprintf(w, "data: %s\n\n", b)
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
 	f.Flush()
 	// Return without response.completed — handler exit closes the response body,
 	// which signals the inference client's SSE reader goroutine to stop.
@@ -111,7 +111,7 @@ func (m *MockServer) writeStream(w http.ResponseWriter, id string, item json.Raw
 		evt.SequenceNumber = idx
 		idx++
 		b, _ := json.Marshal(evt)
-		fmt.Fprintf(w, "data: %s\n\n", b)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
 		f.Flush()
 	}
 

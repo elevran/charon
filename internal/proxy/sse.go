@@ -22,7 +22,7 @@ type sseEvent struct {
 // writeSSE writes a single SSE event and flushes.
 func writeSSE(w http.ResponseWriter, evt sseEvent) {
 	b, _ := json.Marshal(evt)
-	fmt.Fprintf(w, "data: %s\n\n", b)
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -116,7 +116,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 
 	flushToCharon := func() {
 		if !req.ShouldStore() || canonicalID == "" {
-			buf.drain() // discard; store:false
+			buf.drain() // store:false — discard staged chunks
 			return
 		}
 		items := buf.drain()

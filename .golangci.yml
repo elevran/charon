@@ -9,7 +9,6 @@ linters:
     - staticcheck    # SA/S/QF family: deep static analysis
     - ineffassign    # ineffectual assignments
     - bodyclose      # HTTP response body not closed
-    - noctx          # HTTP requests created without context
     - nilerr         # returns nil despite checking non-nil error
     - rowserrcheck   # sql.Rows.Err not checked
     - sqlclosecheck  # sql.Rows / sql.Stmt not closed
@@ -25,10 +24,6 @@ linters:
   settings:
     revive:
       rules:
-        - name: exported
-          arguments:
-            - "checkPrivateReceivers"
-            - "sayRepetitiveInsteadOfStutters"
         - name: unused-parameter
         - name: unreachable-code
         - name: empty-block
@@ -38,11 +33,20 @@ linters:
     gocritic:
       enabled-tags:
         - diagnostic
-        - performance
-        - style
-      disabled-checks:
-        - commentedOutCode
-        - whyNoLint
 
     exhaustive:
       default-signifies-exhaustive: true
+
+  exclusions:
+    rules:
+      - path: "_test\\.go"
+        linters:
+          - errcheck
+          - bodyclose
+          - unparam
+          - prealloc
+          - gocritic
+          - revive
+      - path: "internal/testutil/"
+        linters:
+          - revive

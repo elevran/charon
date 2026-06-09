@@ -142,7 +142,7 @@ func (w *StreamWriter) patch(body interface{}) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return w.client.checkStatus(resp)
 }
 
@@ -197,7 +197,7 @@ func (c *Client) Resolve(ctx context.Context, previousID string) (string, []json
 	if err != nil {
 		return "", nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := c.checkStatus(resp); err != nil {
 		return "", nil, err
@@ -225,7 +225,7 @@ func (c *Client) Store(ctx context.Context, id string, req StoreRequest) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return c.checkStatus(resp)
 }
 
@@ -240,7 +240,7 @@ func (c *Client) Retrieve(ctx context.Context, id string) (*RetrieveResponse, er
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := c.checkStatus(resp); err != nil {
 		return nil, err
@@ -263,7 +263,7 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return c.checkStatus(resp)
 }
 

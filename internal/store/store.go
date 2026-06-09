@@ -170,7 +170,7 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 	var ckKey *string
 
 	if isCheckpoint {
-		var flatCtx []json.RawMessage
+		flatCtx := make([]json.RawMessage, 0, len(rawInput)+len(req.Output))
 		if req.PreviousResponseID != nil {
 			flatCtx, err = s.buildContext(ctx, *req.PreviousResponseID)
 			if err != nil {
@@ -382,16 +382,16 @@ func (s *ContextStore) CommitStream(ctx context.Context, responseID string, req 
 	isCheckpoint := position > 0 && position%s.cfg.CheckpointInterval == 0
 	var ckKey *string
 	if isCheckpoint {
-		var flatCtx []json.RawMessage
+		flatCtx2 := make([]json.RawMessage, 0, len(rawInput)+len(allOutput))
 		if req.PreviousResponseID != nil {
-			flatCtx, err = s.buildContext(ctx, *req.PreviousResponseID)
+			flatCtx2, err = s.buildContext(ctx, *req.PreviousResponseID)
 			if err != nil {
 				return fmt.Errorf("build checkpoint context: %w", err)
 			}
 		}
-		flatCtx = append(flatCtx, rawInput...)
-		flatCtx = append(flatCtx, allOutput...)
-		ckBytes := marshalNDJSON(flatCtx)
+		flatCtx2 = append(flatCtx2, rawInput...)
+		flatCtx2 = append(flatCtx2, allOutput...)
+		ckBytes := marshalNDJSON(flatCtx2)
 		ck := checkpointKey(chainRootID, position, responseID)
 		ckKey = &ck
 		if err := s.payloads.Put(ctx, ck, ckBytes); err != nil {

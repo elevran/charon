@@ -65,6 +65,10 @@ func (w *Reconciler) sweep(ctx context.Context) {
 
 func (w *Reconciler) recover(ctx context.Context, intent model.WriteIntent) {
 	switch intent.Phase {
+	case model.WriteIntentCommitted, model.WriteIntentFailed:
+		// Already in a terminal state; ListStaleWriteIntents should not return these,
+		// but guard against any race with the Reconciler's own UpdateWriteIntent calls.
+
 	case model.WriteIntentStreamOpen:
 		// Proxy crashed mid-stream; in-memory staged chunks are lost.
 		w.log.Warn("recovery: stream_open intent lost (proxy crashed mid-stream)", "response_id", intent.ResponseID)
