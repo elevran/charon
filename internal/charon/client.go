@@ -172,10 +172,24 @@ type Client struct {
 }
 
 // New creates a Client targeting baseURL (e.g. "http://127.0.0.1:8081").
+//
+// The transport is tuned for the proxy→Charon pattern: N concurrent streaming
+// clients each make sequential requests (resolve, store/chunk, commit), so
+// up to N connections may be live simultaneously. Go's default
+// MaxIdleConnsPerHost of 2 would close and re-open connections on every burst;
+// 64 retains enough idle connections to serve typical concurrency without
+// reconnection overhead. Raise MaxIdleConnsPerHost if sustained concurrency
+// exceeds this value.
 func New(baseURL string, timeout time.Duration) *Client {
+	transport := &http.Transport{
+		MaxIdleConns:        512,
+		MaxIdleConnsPerHost: 64, // retain idle connections across concurrent streaming clients
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true, // internal traffic; no value in gzip
+	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		http:    &http.Client{Timeout: timeout},
+		http:    &http.Client{Transport: transport, Timeout: timeout},
 	}
 }
 

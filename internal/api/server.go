@@ -38,11 +38,13 @@ func RegisterHandlers(mux *http.ServeMux, h *Handler) {
 // newServer is the shared constructor.
 func newServer(addr string, handler http.Handler) *Server {
 	return &Server{srv: &http.Server{
-		Addr:         addr,
-		Handler:      handler,
-		ReadTimeout:  35 * time.Second,
-		WriteTimeout: 35 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,  // bound slow-header goroutine leaks
+		ReadTimeout:       35 * time.Second,
+		WriteTimeout:      35 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 16, // 64 KB; internal API headers are small
 	}}
 }
 
