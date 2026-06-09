@@ -46,11 +46,13 @@ func (w *Cleaner) sweep(ctx context.Context) {
 		if meta.PayloadKey != "" {
 			if err := w.payloads.Delete(ctx, meta.PayloadKey); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				w.log.Error("ttl: delete payload", "id", meta.ID, "err", err)
+				continue // payload blob still exists; skip index delete to keep the record findable
 			}
 		}
 		if meta.CheckpointKey != nil {
 			if err := w.payloads.Delete(ctx, *meta.CheckpointKey); err != nil && !errors.Is(err, storage.ErrNotFound) {
 				w.log.Error("ttl: delete checkpoint", "id", meta.ID, "err", err)
+				continue // checkpoint blob still exists; skip index delete
 			}
 		}
 		if err := w.index.Delete(ctx, meta.ID); err != nil {
