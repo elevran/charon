@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/openai/openai-go/responses"
 
+	"github.com/elevran/charon/internal/metrics"
 	"github.com/elevran/charon/internal/model"
 	"github.com/elevran/charon/internal/storage"
 )
@@ -84,6 +85,13 @@ func (s *ContextStore) resolveChainPosition(ctx context.Context, prevID *string,
 		return "", 0, fmt.Errorf("previous response: %w", err)
 	}
 	return prevMeta.ChainRootID, prevMeta.Position + 1, nil
+}
+
+// Ping performs a lightweight read against the index to verify storage is reachable.
+// Returns nil when the store is healthy.
+func (s *ContextStore) Ping(ctx context.Context) error {
+	_, err := s.index.List(ctx, storage.ListOptions{Limit: 1})
+	return err
 }
 
 // computeExpiresAt returns the expiry timestamp based on TTLDays config.
@@ -186,6 +194,8 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 		if err := s.payloads.Put(ctx, ck, ckBytes); err != nil {
 			return fmt.Errorf("write checkpoint: %w", err)
 		}
+		metrics.CheckpointWritesTotal.Inc()
+		metrics.CheckpointSizeBytes.Observe(float64(len(ckBytes)))
 	}
 
 	if err := s.payloads.Put(ctx, pKey, payloadBytes); err != nil {

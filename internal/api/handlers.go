@@ -183,7 +183,13 @@ func (h *Handler) HandleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // HandleReadyz handles GET /readyz (readiness probe).
-func (h *Handler) HandleReadyz(w http.ResponseWriter, _ *http.Request) {
+// Returns 503 if the storage backend is unreachable.
+func (h *Handler) HandleReadyz(w http.ResponseWriter, r *http.Request) {
+	if err := h.svc.Ping(r.Context()); err != nil {
+		h.log.Error("readyz: storage ping failed", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "storage unavailable"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
