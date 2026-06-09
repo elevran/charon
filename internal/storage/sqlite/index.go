@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -12,6 +13,23 @@ import (
 	"github.com/elevran/charon/internal/model"
 	"github.com/elevran/charon/internal/storage"
 )
+
+// responseRow is the on-disk shape of a responses table row.
+// IsCheckpoint is stored as 0/1 and mapped to CheckpointKey != nil on read.
+type responseRow struct {
+	ID                 string  `db:"id"`
+	PreviousResponseID *string `db:"previous_response_id"`
+	ChainRootID        string  `db:"chain_root_id"`
+	Position           int     `db:"position"`
+	IsCheckpoint       int     `db:"is_checkpoint"` // unused on read; CheckpointKey is the canonical indicator
+	OwnerPrincipal     string  `db:"owner_principal"`
+	Model              string  `db:"model"`
+	Status             string  `db:"status"`
+	CreatedAt          int64   `db:"created_at"`
+	ExpiresAt          *int64  `db:"expires_at"`
+	PayloadKey         string  `db:"payload_key"`
+	CheckpointKey      *string `db:"checkpoint_key"`
+}
 
 var _ storage.IndexStore = (*IndexStore)(nil)
 
@@ -122,20 +140,7 @@ func (s *IndexStore) Put(_ context.Context, meta model.ResponseMeta) error {
 }
 
 func (s *IndexStore) Get(_ context.Context, id string) (model.ResponseMeta, error) {
-	var row struct {
-		ID                 string  `db:"id"`
-		PreviousResponseID *string `db:"previous_response_id"`
-		ChainRootID        string  `db:"chain_root_id"`
-		Position           int     `db:"position"`
-		IsCheckpoint       int     `db:"is_checkpoint"`
-		OwnerPrincipal     string  `db:"owner_principal"`
-		Model              string  `db:"model"`
-		Status             string  `db:"status"`
-		CreatedAt          int64   `db:"created_at"`
-		ExpiresAt          *int64  `db:"expires_at"`
-		PayloadKey         string  `db:"payload_key"`
-		CheckpointKey      *string `db:"checkpoint_key"`
-	}
+	var row responseRow
 	err := s.stmts.getResp.Get(&row, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.ResponseMeta{}, storage.ErrNotFound
@@ -143,19 +148,7 @@ func (s *IndexStore) Get(_ context.Context, id string) (model.ResponseMeta, erro
 	if err != nil {
 		return model.ResponseMeta{}, err
 	}
-	return model.ResponseMeta{
-		ID:                 row.ID,
-		PreviousResponseID: row.PreviousResponseID,
-		ChainRootID:        row.ChainRootID,
-		Position:           row.Position,
-		OwnerPrincipal:     row.OwnerPrincipal,
-		Model:              row.Model,
-		Status:             model.ResponseStatus(row.Status),
-		CreatedAt:          row.CreatedAt,
-		ExpiresAt:          row.ExpiresAt,
-		PayloadKey:         row.PayloadKey,
-		CheckpointKey:      row.CheckpointKey,
-	}, nil
+	return rowToMeta(row), nil
 }
 
 // Delete removes a response record. Idempotent — no error if the record did not exist.
@@ -184,20 +177,7 @@ func (s *IndexStore) List(_ context.Context, opts storage.ListOptions) ([]model.
 	var results []model.ResponseMeta
 	pastCursor := opts.Cursor == ""
 	for rows.Next() {
-		var row struct {
-			ID                 string  `db:"id"`
-			PreviousResponseID *string `db:"previous_response_id"`
-			ChainRootID        string  `db:"chain_root_id"`
-			Position           int     `db:"position"`
-			IsCheckpoint       int     `db:"is_checkpoint"`
-			OwnerPrincipal     string  `db:"owner_principal"`
-			Model              string  `db:"model"`
-			Status             string  `db:"status"`
-			CreatedAt          int64   `db:"created_at"`
-			ExpiresAt          *int64  `db:"expires_at"`
-			PayloadKey         string  `db:"payload_key"`
-			CheckpointKey      *string `db:"checkpoint_key"`
-		}
+		var row responseRow
 		if err := rows.StructScan(&row); err != nil {
 			return nil, err
 		}
@@ -207,19 +187,7 @@ func (s *IndexStore) List(_ context.Context, opts storage.ListOptions) ([]model.
 			}
 			continue
 		}
-		results = append(results, model.ResponseMeta{
-			ID:                 row.ID,
-			PreviousResponseID: row.PreviousResponseID,
-			ChainRootID:        row.ChainRootID,
-			Position:           row.Position,
-			OwnerPrincipal:     row.OwnerPrincipal,
-			Model:              row.Model,
-			Status:             model.ResponseStatus(row.Status),
-			CreatedAt:          row.CreatedAt,
-			ExpiresAt:          row.ExpiresAt,
-			PayloadKey:         row.PayloadKey,
-			CheckpointKey:      row.CheckpointKey,
-		})
+		results = append(results, rowToMeta(row))
 		if opts.Limit > 0 && len(results) >= opts.Limit {
 			break
 		}
@@ -281,38 +249,29 @@ func (s *IndexStore) DeleteWriteIntent(_ context.Context, intentID string) error
 func scanMetaRows(rows *sqlx.Rows) ([]model.ResponseMeta, error) {
 	var results []model.ResponseMeta
 	for rows.Next() {
-		var row struct {
-			ID                 string  `db:"id"`
-			PreviousResponseID *string `db:"previous_response_id"`
-			ChainRootID        string  `db:"chain_root_id"`
-			Position           int     `db:"position"`
-			IsCheckpoint       int     `db:"is_checkpoint"`
-			OwnerPrincipal     string  `db:"owner_principal"`
-			Model              string  `db:"model"`
-			Status             string  `db:"status"`
-			CreatedAt          int64   `db:"created_at"`
-			ExpiresAt          *int64  `db:"expires_at"`
-			PayloadKey         string  `db:"payload_key"`
-			CheckpointKey      *string `db:"checkpoint_key"`
-		}
+		var row responseRow
 		if err := rows.StructScan(&row); err != nil {
 			return nil, err
 		}
-		results = append(results, model.ResponseMeta{
-			ID:                 row.ID,
-			PreviousResponseID: row.PreviousResponseID,
-			ChainRootID:        row.ChainRootID,
-			Position:           row.Position,
-			OwnerPrincipal:     row.OwnerPrincipal,
-			Model:              row.Model,
-			Status:             model.ResponseStatus(row.Status),
-			CreatedAt:          row.CreatedAt,
-			ExpiresAt:          row.ExpiresAt,
-			PayloadKey:         row.PayloadKey,
-			CheckpointKey:      row.CheckpointKey,
-		})
+		results = append(results, rowToMeta(row))
 	}
 	return results, rows.Err()
+}
+
+func rowToMeta(row responseRow) model.ResponseMeta {
+	return model.ResponseMeta{
+		ID:                 row.ID,
+		PreviousResponseID: row.PreviousResponseID,
+		ChainRootID:        row.ChainRootID,
+		Position:           row.Position,
+		OwnerPrincipal:     row.OwnerPrincipal,
+		Model:              row.Model,
+		Status:             model.ResponseStatus(row.Status),
+		CreatedAt:          row.CreatedAt,
+		ExpiresAt:          row.ExpiresAt,
+		PayloadKey:         row.PayloadKey,
+		CheckpointKey:      row.CheckpointKey,
+	}
 }
 
 func scanIntentRows(rows *sqlx.Rows) ([]model.WriteIntent, error) {
@@ -344,19 +303,9 @@ func scanIntentRows(rows *sqlx.Rows) ([]model.WriteIntent, error) {
 }
 
 func isUniqueConstraint(err error) bool {
-	return err != nil && !errors.Is(err, sql.ErrNoRows) &&
-		containsAny(err.Error(), "UNIQUE constraint failed", "constraint failed")
-}
-
-func containsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if len(s) >= len(sub) {
-			for i := 0; i <= len(s)-len(sub); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
-		}
+	if err == nil || errors.Is(err, sql.ErrNoRows) {
+		return false
 	}
-	return false
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") || strings.Contains(msg, "constraint failed")
 }
