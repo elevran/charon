@@ -30,7 +30,7 @@ func startCharonServer(t *testing.T) (*charon.Client, *store.ContextStore) {
 	h := api.NewHandler(svc, log)
 	mux := http.NewServeMux()
 	api.RegisterHandlers(mux, h)
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(api.WrapH2c(mux))
 	t.Cleanup(srv.Close)
 	client := charon.New(srv.URL, 5*time.Second)
 	return client, svc

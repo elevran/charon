@@ -3,13 +3,18 @@ package charon
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 // StoreRequest is the body of POST /responses/{id} on Charon's internal API.
@@ -39,10 +44,16 @@ type CommitRequest struct {
 // StreamWriter sends output item batches to Charon incrementally via PATCH,
 // then commits with all metadata via a final PATCH.
 // Obtain via Client.NewStreamWriter; call Append for each batch; call Commit once.
+//
+// Each Append call automatically assigns the next sequence number, enabling
+// the proxy to dispatch multiple concurrent Append goroutines: assign seqs
+// before spawning, then call AppendAt with the pre-assigned seq.
 type StreamWriter struct {
-	client *Client
-	id     string
-	ctx    context.Context //nolint:containedctx
+	client  *Client
+	id      string
+	ctx     context.Context //nolint:containedctx
+	nextSeq int
+	mu      sync.Mutex
 }
 
 // NewStreamWriter creates a StreamWriter for the given response ID.
@@ -50,20 +61,50 @@ func (c *Client) NewStreamWriter(ctx context.Context, id string) *StreamWriter {
 	return &StreamWriter{client: c, id: id, ctx: ctx}
 }
 
-// Append sends a batch of output items to Charon's in-memory stage.
-// Sends PATCH /responses/{id} with {"type":"chunk","items":[...]}.
+// Append sends a batch of output items to Charon, auto-assigning the next
+// sequence number. Safe for sequential use; for concurrent use, prefer
+// AppendAt with pre-assigned sequence numbers.
 func (w *StreamWriter) Append(items []json.RawMessage) error {
 	if len(items) == 0 {
 		return nil
 	}
-	return w.patch(map[string]interface{}{"type": "chunk", "items": items})
+	w.mu.Lock()
+	seq := w.nextSeq
+	w.nextSeq++
+	w.mu.Unlock()
+	return w.appendAt(seq, items)
+}
+
+// AppendAt sends a batch with a caller-assigned sequence number.
+// Use this when dispatching concurrent goroutines: assign seqs 0,1,2,...
+// before spawning, call AppendAt from each goroutine, then Commit.
+func (w *StreamWriter) AppendAt(seq int, items []json.RawMessage) error {
+	if len(items) == 0 {
+		return nil
+	}
+	w.mu.Lock()
+	if seq >= w.nextSeq {
+		w.nextSeq = seq + 1
+	}
+	w.mu.Unlock()
+	return w.appendAt(seq, items)
+}
+
+func (w *StreamWriter) appendAt(seq int, items []json.RawMessage) error {
+	return w.patch(map[string]interface{}{"type": "chunk", "seq": seq, "items": items})
 }
 
 // Commit finalises the streaming store.
-// Sends PATCH /responses/{id} with {"type":"commit",...}.
+// Sends PATCH /responses/{id} with {"type":"commit","seq":N,...} where N
+// is the commit's sequence number (= number of preceding Append batches).
 func (w *StreamWriter) Commit(req CommitRequest) error {
+	w.mu.Lock()
+	seq := w.nextSeq
+	w.mu.Unlock()
+
 	body := map[string]interface{}{
 		"type":   "commit",
+		"seq":    seq,
 		"items":  req.FinalItems,
 		"input":  req.Input,
 		"status": req.Status,
@@ -126,10 +167,20 @@ type Client struct {
 }
 
 // New creates a Client targeting baseURL (e.g. "http://127.0.0.1:8081").
+// The client uses an HTTP/2 cleartext (H2c) transport so that concurrent
+// PATCH chunk requests multiplex over a single TCP connection without
+// head-of-line blocking. Falls back to HTTP/1.1 automatically if the server
+// does not support H2c.
 func New(baseURL string, timeout time.Duration) *Client {
+	h2transport := &http2.Transport{
+		AllowHTTP: true, // allow H2c (cleartext, no TLS)
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			return (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, addr)
+		},
+	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		http:    &http.Client{Timeout: timeout},
+		http:    &http.Client{Transport: h2transport, Timeout: timeout},
 	}
 }
 

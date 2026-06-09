@@ -123,7 +123,7 @@ func startRealStack(t *testing.T) string {
 	apihandler.RegisterHandlers(charonMux, charonH)
 
 	charonLn := mustListen(t)
-	charonSrv := &http.Server{Handler: charonMux}
+	charonSrv := &http.Server{Handler: apihandler.WrapH2c(charonMux)}
 	go charonSrv.Serve(charonLn) //nolint:errcheck
 	charonURL := fmt.Sprintf("http://127.0.0.1:%d", charonLn.Addr().(*net.TCPAddr).Port)
 	t.Cleanup(func() { charonSrv.Close() })

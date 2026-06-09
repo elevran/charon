@@ -143,7 +143,7 @@ func (h *Handler) HandleAppendChunk(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch req.Type {
 	case "chunk":
-		err = h.svc.AppendChunk(r.Context(), id, req.Items)
+		err = h.svc.AppendChunk(r.Context(), id, req.Seq, req.Items)
 	case "commit":
 		err = h.svc.CommitStream(r.Context(), id, req)
 	default:

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,12 +34,19 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+// seqChunk is one sequenced batch of output items from a single AppendChunk call.
+type seqChunk struct {
+	seq   int
+	items []json.RawMessage
+}
+
 // streamStage holds in-memory state for a streaming store in progress.
+// Chunks are indexed by their sequence number so concurrent PATCH requests
+// can arrive out of order and still be reassembled correctly at commit time.
 type streamStage struct {
-	intentID           string
-	reservationID      string
-	previousResponseID *string
-	chunks             []json.RawMessage // accumulated output items from AppendChunk calls
+	intentID string
+	chunks   []seqChunk // unsorted; sorted by seq at commit
+	mu       sync.Mutex // per-stage lock for concurrent AppendChunk calls
 }
 
 // ContextStore owns all business logic: chain construction,
@@ -250,16 +258,20 @@ func (s *ContextStore) Delete(ctx context.Context, responseID string) error {
 	return s.index.Delete(ctx, responseID)
 }
 
-// AppendChunk adds output items to the in-memory stream stage for responseID.
+// AppendChunk adds a sequenced batch of output items to the in-memory stream
+// stage for responseID. seq is a 0-based sequence number assigned by the
+// caller before the request is sent; concurrent calls with different seq
+// values may arrive in any order.
+//
 // On the first call a write-intent is created at WriteIntentStreamOpen.
 // Items accumulate in memory until CommitStream is called.
-func (s *ContextStore) AppendChunk(ctx context.Context, responseID string, items []json.RawMessage) error {
+func (s *ContextStore) AppendChunk(ctx context.Context, responseID string, seq int, items []json.RawMessage) error {
 	if len(items) == 0 {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
+	// Ensure the stage exists (create write-intent on first call).
+	s.mu.Lock()
 	stage, exists := s.streams[responseID]
 	if !exists {
 		intentID := mintID("intent")
@@ -267,18 +279,26 @@ func (s *ContextStore) AppendChunk(ctx context.Context, responseID string, items
 		intent := model.WriteIntent{
 			IntentID:   intentID,
 			ResponseID: responseID,
-			PayloadKey: "", // not known yet; set at commit time
+			PayloadKey: "",
 			Phase:      model.WriteIntentStreamOpen,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
 		if err := s.index.InsertWriteIntent(ctx, intent); err != nil {
+			s.mu.Unlock()
 			return fmt.Errorf("insert stream intent: %w", err)
 		}
 		stage = &streamStage{intentID: intentID}
 		s.streams[responseID] = stage
 	}
-	stage.chunks = append(stage.chunks, items...)
+	s.mu.Unlock()
+
+	// Append this batch to the per-stage chunk list (separate lock allows
+	// concurrent appends to different stages, and concurrent appends to the
+	// same stage from parallel PATCH goroutines).
+	stage.mu.Lock()
+	stage.chunks = append(stage.chunks, seqChunk{seq: seq, items: items})
+	stage.mu.Unlock()
 	return nil
 }
 
@@ -292,10 +312,18 @@ func (s *ContextStore) CommitStream(ctx context.Context, responseID string, req 
 	delete(s.streams, responseID)
 	s.mu.Unlock()
 
-	// Assemble all output items: staged chunks + final batch.
+	// Assemble all output items: sort staged chunks by seq, then append the
+	// final batch at req.Seq (which equals the number of preceding batches).
 	var allOutput []json.RawMessage
 	if stage != nil {
-		allOutput = append(allOutput, stage.chunks...)
+		stage.mu.Lock()
+		sort.Slice(stage.chunks, func(i, j int) bool {
+			return stage.chunks[i].seq < stage.chunks[j].seq
+		})
+		for _, c := range stage.chunks {
+			allOutput = append(allOutput, c.items...)
+		}
+		stage.mu.Unlock()
 	}
 	allOutput = append(allOutput, req.Items...)
 

@@ -29,7 +29,7 @@ type CharonConfig struct {
 // The backend receives a full flat_context as input and returns a
 // ResponseResource with its own assigned id.
 type InferenceConfig struct {
-	BaseURL          string `json:"base_url"`           // default "http://localhost:11434"
+	BaseURL          string `json:"base_url"` // default "http://localhost:11434"
 	APIKey           string `json:"api_key"`
 	TimeoutSeconds   int    `json:"timeout_seconds"`    // default 120
 	StoreBufferBytes int    `json:"store_buffer_bytes"` // 0 = no buffering; default 65536
