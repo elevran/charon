@@ -163,6 +163,7 @@ type RetrieveResponse struct {
 var (
 	ErrNotFound       = errors.New("not found")
 	ErrChainCorrupted = errors.New("chain corrupted")
+	ErrStoreFull      = errors.New("store full")
 )
 
 // Client calls Charon's internal HTTP API.
@@ -310,6 +311,8 @@ func (c *Client) checkStatus(resp *http.Response) error {
 			return ErrChainCorrupted
 		}
 		return fmt.Errorf("conflict: %s", msg)
+	case http.StatusInsufficientStorage:
+		return ErrStoreFull
 	default:
 		return fmt.Errorf("charon %d: %s", resp.StatusCode, msg)
 	}

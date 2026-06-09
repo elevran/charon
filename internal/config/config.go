@@ -48,6 +48,9 @@ type StorageConfig struct {
 	Backend                   string        `json:"backend"`  // "memory" (default) | "sqlite"
 	DataDir                   string        `json:"data_dir"` // default "./data"
 	SQLite                    SQLiteConfig  `json:"sqlite"`
+	// Caps — 0 means unbounded. Both are enforced independently; set one, the other is unconstrained.
+	MaxResponses    int64 `json:"max_responses"`     // max total responses in the index
+	MaxPayloadBytes int64 `json:"max_payload_bytes"` // max size of a single response payload blob
 }
 
 // SQLiteConfig holds SQLite-specific tuning knobs.
