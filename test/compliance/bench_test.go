@@ -274,4 +274,3 @@ func TestScaleConcurrentNewChains(t *testing.T) {
 		t.Error(err)
 	}
 }
-

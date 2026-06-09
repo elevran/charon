@@ -38,9 +38,9 @@ type UsageInfo struct {
 
 // SSEEvent is a single event from the inference server's streaming response.
 type SSEEvent struct {
-	Type           string            `json:"type"`
-	SequenceNumber int               `json:"sequence_number"`
-	Response       *Response         `json:"response,omitempty"`
-	OutputIndex    *int              `json:"output_index,omitempty"`
-	Item           json.RawMessage   `json:"item,omitempty"`
+	Type           string          `json:"type"`
+	SequenceNumber int             `json:"sequence_number"`
+	Response       *Response       `json:"response,omitempty"`
+	OutputIndex    *int            `json:"output_index,omitempty"`
+	Item           json.RawMessage `json:"item,omitempty"`
 }

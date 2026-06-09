@@ -29,6 +29,9 @@ func pastTime() int64 {
 // --- TTL Worker ---
 
 func TestTTLWorkerDeletesExpired(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timer-based worker test under -short")
+	}
 	idx := memory.NewIndexStore()
 	pay := memory.NewPayloadStore()
 
@@ -67,6 +70,9 @@ func TestTTLWorkerDeletesExpired(t *testing.T) {
 }
 
 func TestTTLWorkerStopsCleanly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timer-based worker test under -short")
+	}
 	idx := memory.NewIndexStore()
 	pay := memory.NewPayloadStore()
 	w := worker.NewCleaner(idx, pay, logger, 10*time.Second)
@@ -88,6 +94,9 @@ func TestTTLWorkerStopsCleanly(t *testing.T) {
 // --- Recovery Worker ---
 
 func TestRecoveryWorkerPendingMarkedFailed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timer-based worker test under -short")
+	}
 	idx := memory.NewIndexStore()
 	pay := memory.NewPayloadStore()
 
@@ -115,6 +124,9 @@ func TestRecoveryWorkerPendingMarkedFailed(t *testing.T) {
 }
 
 func TestRecoveryWorkerFileWrittenCommitted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timer-based worker test under -short")
+	}
 	idx := memory.NewIndexStore()
 	pay := memory.NewPayloadStore()
 
@@ -156,6 +168,9 @@ func TestRecoveryWorkerFileWrittenCommitted(t *testing.T) {
 }
 
 func TestRecoveryWorkerStopsCleanly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timer-based worker test under -short")
+	}
 	idx := memory.NewIndexStore()
 	pay := memory.NewPayloadStore()
 	w := worker.NewReconciler(idx, pay, logger, 5*time.Minute, 10*time.Second)

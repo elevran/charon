@@ -144,6 +144,16 @@ func (h *Handler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// HandleHealthz handles GET /healthz (liveness probe).
+func (h *Handler) HandleHealthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleReadyz handles GET /readyz (readiness probe).
+func (h *Handler) HandleReadyz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func unmarshalInputItems(items []json.RawMessage) (responses.ResponseInputParam, error) {
 	params := make(responses.ResponseInputParam, len(items))
 	for i, raw := range items {
