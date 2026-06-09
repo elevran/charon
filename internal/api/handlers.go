@@ -68,9 +68,11 @@ func (h *Handler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req model.StoreRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = r.Body.Close()
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	_ = r.Body.Close()
 	if err := h.svc.Store(r.Context(), id, req); err != nil {
 		status, msg := mapStatus(err)
 		if status == http.StatusInternalServerError {
