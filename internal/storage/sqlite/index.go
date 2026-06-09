@@ -45,6 +45,7 @@ type indexStmts struct {
 	getResp          *sqlx.Stmt // SELECT * FROM responses WHERE id = ?
 	putResp          *sql.Stmt  // INSERT OR REPLACE INTO responses
 	deleteResp       *sql.Stmt  // DELETE FROM responses WHERE id = ?
+	countResp        *sql.Stmt  // SELECT COUNT(*) FROM responses
 	listExpired      *sqlx.Stmt // SELECT * FROM responses WHERE expires_at < ?
 	insertIntent     *sql.Stmt  // INSERT INTO write_intents
 	updateIntent     *sql.Stmt  // UPDATE write_intents SET phase=?, updated_at=? WHERE intent_id=?
@@ -61,6 +62,8 @@ const (
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
 
 	sqlDeleteResp = `DELETE FROM responses WHERE id = ?`
+
+	sqlCountResp = `SELECT COUNT(*) FROM responses`
 
 	sqlListExpired = `SELECT * FROM responses WHERE expires_at IS NOT NULL AND expires_at < ?`
 
@@ -105,6 +108,7 @@ func NewIndexStore(db *sqlx.DB) (*IndexStore, error) {
 	s.stmts.getResp = preparex(sqlGetResp)
 	s.stmts.putResp = prepare(sqlPutResp)
 	s.stmts.deleteResp = prepare(sqlDeleteResp)
+	s.stmts.countResp = prepare(sqlCountResp)
 	s.stmts.listExpired = preparex(sqlListExpired)
 	s.stmts.insertIntent = prepare(sqlInsertIntent)
 	s.stmts.updateIntent = prepare(sqlUpdateIntent)
@@ -155,6 +159,12 @@ func (s *IndexStore) Get(_ context.Context, id string) (model.ResponseMeta, erro
 func (s *IndexStore) Delete(_ context.Context, id string) error {
 	_, err := s.stmts.deleteResp.Exec(id)
 	return err
+}
+
+func (s *IndexStore) Count(_ context.Context) (int64, error) {
+	var n int64
+	err := s.stmts.countResp.QueryRow().Scan(&n)
+	return n, err
 }
 
 func (s *IndexStore) List(_ context.Context, opts storage.ListOptions) ([]model.ResponseMeta, error) {
