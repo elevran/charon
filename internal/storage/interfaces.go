@@ -31,6 +31,9 @@ type IndexStore interface {
 
 	// TTL
 	ListExpired(ctx context.Context, before int64) ([]model.ResponseMeta, error)
+
+	// Count returns the total number of response records. Used to enforce MaxResponses caps.
+	Count(ctx context.Context) (int64, error)
 }
 
 // PayloadStore manages serialised response content blobs.
