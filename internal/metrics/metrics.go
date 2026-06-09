@@ -27,6 +27,28 @@ var (
 	ActiveWriteIntents = prometheus.NewGauge(
 		prometheus.GaugeOpts{Name: "active_write_intents"},
 	)
+
+	// Phase 5: extended operational metrics.
+
+	CheckpointWritesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "checkpoint_writes_total"},
+	)
+	CheckpointSizeBytes = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "checkpoint_size_bytes",
+			Buckets: prometheus.ExponentialBuckets(1024, 4, 8), // 1 KB → 16 MB
+		},
+	)
+	TTLExpirationsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "ttl_expirations_total"},
+	)
+	WorkerSweepDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "worker_sweep_duration_seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"worker"}, // "cleaner" or "reconciler"
+	)
 )
 
 // Register registers all metrics into reg under the given namespace prefix.
@@ -46,6 +68,10 @@ func Register(reg prometheus.Registerer, namespace string) error {
 		WriteIntentFailuresTotal,
 		ChainDepthAtResolve,
 		ActiveWriteIntents,
+		CheckpointWritesTotal,
+		CheckpointSizeBytes,
+		TTLExpirationsTotal,
+		WorkerSweepDuration,
 	} {
 		if err := wrapped.Register(c); err != nil {
 			var are prometheus.AlreadyRegisteredError
