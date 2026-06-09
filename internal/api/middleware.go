@@ -47,7 +47,7 @@ func Recovery(log *slog.Logger) Middleware {
 				if v := recover(); v != nil {
 					log.Error("panic recovered", "panic", fmt.Sprintf("%v", v))
 					if rec.status == 0 {
-						http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+						http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError) //nolint:gocritic // returnAfterHttpError: inside defer recovery, no further handler executes
 					}
 				}
 			}()

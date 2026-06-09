@@ -47,7 +47,7 @@ func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("inference %d", resp.StatusCode)
@@ -77,19 +77,22 @@ func (c *Client) Stream(ctx context.Context, req Request) (<-chan SSEEvent, erro
 	}
 	c.setHeaders(hreq)
 
-	resp, err := c.http.Do(hreq)
+	resp, err := c.http.Do(hreq) //nolint:bodyclose // body is closed in the reader goroutine below
 	if err != nil {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("inference stream %d", resp.StatusCode)
 	}
 
 	ch := make(chan SSEEvent, 16)
 	go func() {
 		defer close(ch)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
 			line := scanner.Text()

@@ -103,5 +103,5 @@ func TestClientResolveAfterStore(t *testing.T) {
 	rsrvID, flatCtx, err := client.Resolve(ctx, "resp_res0")
 	require.NoError(t, err)
 	assert.NotEmpty(t, rsrvID)
-	assert.True(t, len(flatCtx) >= 0) // may be empty for a root with no input
+	assert.NotNil(t, flatCtx) // may be empty for a root with no input
 }

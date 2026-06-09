@@ -45,9 +45,31 @@ type StoreRequest struct {
 	PreviousResponseID *string                      `json:"previous_response_id,omitempty"`
 	Input              responses.ResponseInputParam `json:"input"`
 	Output             []json.RawMessage            `json:"output"`
-	Usage              *responses.ResponseUsage     `json:"usage,omitempty"`
+	Usage              json.RawMessage              `json:"usage,omitempty"` // raw JSON; avoids SDK type coupling
 	Status             responses.ResponseStatus     `json:"status"`
 	Model              string                       `json:"model,omitempty"`
+}
+
+// ChunkRequest is the body of PATCH /responses/{id}.
+// Type "chunk" appends output items to the in-progress stream stage.
+// Type "commit" finalises the stream, writing the full payload and committing the index.
+//
+// Seq is a 0-based sequence number assigned by the proxy before the PATCH is
+// sent. Charon sorts received chunks by Seq before assembling the output,
+// which allows the proxy to dispatch multiple PATCH requests concurrently
+// without requiring them to arrive in order. The commit Seq must equal the
+// number of preceding chunk batches (i.e. the next unused seq value).
+type ChunkRequest struct {
+	Type  string            `json:"type"` // "chunk" | "commit"
+	Seq   int               `json:"seq"`  // 0-based; enables out-of-order reassembly
+	Items []json.RawMessage `json:"items,omitempty"`
+	// Commit-only fields (same semantics as StoreRequest):
+	ReservationID      string            `json:"reservation_id,omitempty"`
+	PreviousResponseID *string           `json:"previous_response_id,omitempty"`
+	Input              []json.RawMessage `json:"input,omitempty"`
+	Usage              json.RawMessage   `json:"usage,omitempty"`
+	Status             string            `json:"status,omitempty"`
+	Model              string            `json:"model,omitempty"`
 }
 
 // ResolveResponse is the body returned by GET /responses/{id}/context.

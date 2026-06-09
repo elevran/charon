@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,8 +21,129 @@ type StoreRequest struct {
 	PreviousResponseID *string           `json:"previous_response_id,omitempty"`
 	Input              []json.RawMessage `json:"input"`
 	Output             []json.RawMessage `json:"output"`
+	Usage              json.RawMessage   `json:"usage,omitempty"`
 	Status             string            `json:"status"`
 	Model              string            `json:"model,omitempty"`
+}
+
+// CommitRequest is passed to StreamWriter.Commit to finalise a streaming store.
+type CommitRequest struct {
+	ReservationID      string
+	PreviousResponseID *string
+	Input              []json.RawMessage
+	FinalItems         []json.RawMessage // merged with staged items by Charon
+	Usage              json.RawMessage
+	Status             string
+	Model              string
+}
+
+// StreamWriter sends output item batches to Charon incrementally via PATCH,
+// then commits with all metadata via a final PATCH.
+// Obtain via Client.NewStreamWriter; call Append for each batch; call Commit once.
+//
+// Each Append call automatically assigns the next sequence number, enabling
+// the proxy to dispatch multiple concurrent Append goroutines: assign seqs
+// before spawning, then call AppendAt with the pre-assigned seq.
+type StreamWriter struct {
+	client  *Client
+	id      string
+	ctx     context.Context //nolint:containedctx
+	nextSeq int
+	mu      sync.Mutex
+}
+
+// NewStreamWriter creates a StreamWriter for the given response ID.
+//
+// H2c note: each concurrent streaming client produces sequential PATCH
+// requests for its own response. With N concurrent clients the proxy opens N
+// HTTP/1.1 connections to Charon (amortised via keep-alive). If N exceeds
+// ~500 on a separate-host deployment, replacing this client's http.Client
+// with an http2.Transport{AllowHTTP:true} and wrapping the Charon server
+// with h2c.NewHandler collapses N connections to 1 multiplexed connection,
+// reducing socket pressure. At lower concurrencies the complexity is not
+// justified.
+func (c *Client) NewStreamWriter(ctx context.Context, id string) *StreamWriter {
+	return &StreamWriter{client: c, id: id, ctx: ctx}
+}
+
+// Append sends a batch of output items to Charon, auto-assigning the next
+// sequence number. Safe for sequential use; for concurrent use, prefer
+// AppendAt with pre-assigned sequence numbers.
+func (w *StreamWriter) Append(items []json.RawMessage) error {
+	if len(items) == 0 {
+		return nil
+	}
+	w.mu.Lock()
+	seq := w.nextSeq
+	w.nextSeq++
+	w.mu.Unlock()
+	return w.appendAt(seq, items)
+}
+
+// AppendAt sends a batch with a caller-assigned sequence number.
+// Use this when dispatching concurrent goroutines: assign seqs 0,1,2,...
+// before spawning, call AppendAt from each goroutine, then Commit.
+func (w *StreamWriter) AppendAt(seq int, items []json.RawMessage) error {
+	if len(items) == 0 {
+		return nil
+	}
+	w.mu.Lock()
+	if seq >= w.nextSeq {
+		w.nextSeq = seq + 1
+	}
+	w.mu.Unlock()
+	return w.appendAt(seq, items)
+}
+
+func (w *StreamWriter) appendAt(seq int, items []json.RawMessage) error {
+	return w.patch(map[string]interface{}{"type": "chunk", "seq": seq, "items": items})
+}
+
+// Commit finalises the streaming store.
+// Sends PATCH /responses/{id} with {"type":"commit","seq":N,...} where N
+// is the commit's sequence number (= number of preceding Append batches).
+func (w *StreamWriter) Commit(req CommitRequest) error {
+	w.mu.Lock()
+	seq := w.nextSeq
+	w.mu.Unlock()
+
+	body := map[string]interface{}{
+		"type":   "commit",
+		"seq":    seq,
+		"items":  req.FinalItems,
+		"input":  req.Input,
+		"status": req.Status,
+		"model":  req.Model,
+	}
+	if req.ReservationID != "" {
+		body["reservation_id"] = req.ReservationID
+	}
+	if req.PreviousResponseID != nil {
+		body["previous_response_id"] = *req.PreviousResponseID
+	}
+	if len(req.Usage) > 0 {
+		body["usage"] = req.Usage
+	}
+	return w.patch(body)
+}
+
+func (w *StreamWriter) patch(body interface{}) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(w.ctx, http.MethodPatch,
+		w.client.baseURL+"/responses/"+w.id, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := w.client.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return w.client.checkStatus(resp)
 }
 
 // RetrieveResponse is the body returned by GET /responses/{id}.
@@ -75,7 +197,7 @@ func (c *Client) Resolve(ctx context.Context, previousID string) (string, []json
 	if err != nil {
 		return "", nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := c.checkStatus(resp); err != nil {
 		return "", nil, err
@@ -103,7 +225,7 @@ func (c *Client) Store(ctx context.Context, id string, req StoreRequest) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return c.checkStatus(resp)
 }
 
@@ -118,7 +240,7 @@ func (c *Client) Retrieve(ctx context.Context, id string) (*RetrieveResponse, er
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := c.checkStatus(resp); err != nil {
 		return nil, err
@@ -141,7 +263,7 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return c.checkStatus(resp)
 }
 

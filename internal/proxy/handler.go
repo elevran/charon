@@ -13,14 +13,22 @@ import (
 
 // Handler is the client-facing Responses API proxy handler.
 type Handler struct {
-	charon *charon.Client
-	inf    *inference.Client
-	log    *slog.Logger
+	charon           *charon.Client
+	inf              *inference.Client
+	log              *slog.Logger
+	storeBufferBytes int // 0 = default(64K); -1 = no buffering; N>0 = N byte threshold
 }
 
 // NewHandler creates a Handler.
-func NewHandler(ch *charon.Client, inf *inference.Client, log *slog.Logger) *Handler {
-	return &Handler{charon: ch, inf: inf, log: log}
+// storeBufferBytes controls when the proxy flushes buffered output items to Charon:
+//   - 0  → use default (65536 = 64 KB)
+//   - -1 → no buffering: flush every output item immediately
+//   - N>0 → flush when accumulated item JSON reaches N bytes
+func NewHandler(ch *charon.Client, inf *inference.Client, log *slog.Logger, storeBufferBytes int) *Handler {
+	if storeBufferBytes == 0 {
+		storeBufferBytes = 65536
+	}
+	return &Handler{charon: ch, inf: inf, log: log, storeBufferBytes: storeBufferBytes}
 }
 
 // RegisterHandlers mounts Responses API routes on mux.
