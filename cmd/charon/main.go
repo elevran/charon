@@ -40,6 +40,7 @@ func main() {
 	// Re-parse flags after stripping the optional subcommand.
 	fs := flag.NewFlagSet("charon", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to config file")
+	proxyFlag := fs.Bool("proxy", true, "start the proxy layer (default true; --proxy=false for Charon-only mode)")
 	_ = fs.Parse(args)
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -54,6 +55,9 @@ func main() {
 		log.Error("load config", "err", err)
 		os.Exit(1)
 	}
+	// --proxy flag overrides config when explicitly set (default is true, matching config default).
+	// Both must be true to run the proxy; false on either disables it.
+	proxyEnabled := *proxyFlag && (cfg.Server.ProxyEnabled == nil || *cfg.Server.ProxyEnabled)
 
 	var (
 		idx     storage.IndexStore
@@ -90,14 +94,17 @@ func main() {
 	charonH := api.NewHandler(svc, log)
 	charonSrv := api.NewServerWithRegistry(cfg.Charon.Listen, charonH, log, reg)
 
-	// ── Proxy server (port 8080 by default) ────────────────────────────────
-	timeout := time.Duration(cfg.Inference.TimeoutSeconds) * time.Second
-	infClient := inference.New(cfg.Inference.BaseURL, cfg.Inference.APIKey, timeout)
-	charonClient := charonpkg.New(cfg.Charon.BaseURL, timeout)
-	proxyH := proxy.NewHandler(charonClient, infClient, log, cfg.Inference.StoreBufferBytes)
-	proxyMux := http.NewServeMux()
-	proxy.RegisterHandlers(proxyMux, proxyH)
-	proxySrv := api.NewServerFromMux(cfg.Server.Listen, proxyMux, log)
+	// ── Proxy server (port 8080 by default; optional) ──────────────────────
+	var proxySrv *api.Server
+	if proxyEnabled {
+		timeout := time.Duration(cfg.Inference.TimeoutSeconds) * time.Second
+		infClient := inference.New(cfg.Inference.BaseURL, cfg.Inference.APIKey, timeout)
+		charonClient := charonpkg.New(cfg.Charon.BaseURL, timeout)
+		proxyH := proxy.NewHandler(charonClient, infClient, log, cfg.Inference.StoreBufferBytes)
+		proxyMux := http.NewServeMux()
+		proxy.RegisterHandlers(proxyMux, proxyH)
+		proxySrv = api.NewServerFromMux(cfg.Server.Listen, proxyMux, log)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -116,12 +123,16 @@ func main() {
 			log.Error("charon server error", "err", err)
 		}
 	}()
-	go func() {
-		log.Info("starting proxy server", "addr", cfg.Server.Listen)
-		if err := proxySrv.Start(); err != nil && err != http.ErrServerClosed {
-			log.Error("proxy server error", "err", err)
-		}
-	}()
+	if proxyEnabled {
+		go func() {
+			log.Info("starting proxy server", "addr", cfg.Server.Listen)
+			if err := proxySrv.Start(); err != nil && err != http.ErrServerClosed {
+				log.Error("proxy server error", "err", err)
+			}
+		}()
+	} else {
+		log.Info("proxy layer disabled — running in Charon-only mode")
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
@@ -135,8 +146,10 @@ func main() {
 	if err := charonSrv.Shutdown(shutdownCtx); err != nil {
 		log.Error("charon shutdown error", "err", err)
 	}
-	if err := proxySrv.Shutdown(shutdownCtx); err != nil {
-		log.Error("proxy shutdown error", "err", err)
+	if proxyEnabled {
+		if err := proxySrv.Shutdown(shutdownCtx); err != nil {
+			log.Error("proxy shutdown error", "err", err)
+		}
 	}
 
 	// Wait for background workers to finish their current sweep.
