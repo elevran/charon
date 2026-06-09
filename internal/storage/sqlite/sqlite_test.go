@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elevran/charon/internal/config"
 	"github.com/elevran/charon/internal/model"
 	"github.com/elevran/charon/internal/storage"
 	"github.com/elevran/charon/internal/storage/sqlite"
@@ -15,16 +16,16 @@ var ctx = context.Background()
 
 func openDB(t *testing.T) *sqlite.IndexStore {
 	t.Helper()
-	db, err := sqlite.Open(":memory:", sqlite.Config{})
+	cfg := config.StorageConfig{
+		DataDir: t.TempDir(),
+		SQLite:  config.SQLiteConfig{},
+	}
+	idx, _, cleanup, err := sqlite.Open(cfg, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { sqlite.Close(db) })
-	idx, err := sqlite.NewIndexStore(db)
-	if err != nil {
-		t.Fatalf("NewIndexStore: %v", err)
-	}
-	return idx
+	t.Cleanup(func() { _ = cleanup() })
+	return idx.(*sqlite.IndexStore)
 }
 
 func sampleMeta(id string) model.ResponseMeta {

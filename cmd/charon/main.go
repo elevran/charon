@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -20,7 +19,6 @@ import (
 	"github.com/elevran/charon/internal/metrics"
 	"github.com/elevran/charon/internal/proxy"
 	"github.com/elevran/charon/internal/storage"
-	"github.com/elevran/charon/internal/storage/filesystem"
 	"github.com/elevran/charon/internal/storage/memory"
 	sqlitestore "github.com/elevran/charon/internal/storage/sqlite"
 	"github.com/elevran/charon/internal/store"
@@ -40,44 +38,22 @@ func main() {
 	}
 
 	var (
-		idx storage.IndexStore
-		pay storage.PayloadStore
+		idx     storage.IndexStore
+		pay     storage.PayloadStore
+		cleanup func() error
 	)
 
 	switch cfg.Storage.Backend {
 	case "sqlite":
-		if err := os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
-			log.Error("create data dir", "err", err)
-			os.Exit(1)
-		}
-		dbPath := filepath.Join(cfg.Storage.DataDir, "responses.db")
-		db, err := sqlitestore.Open(dbPath, sqlitestore.Config{
-			WALMode:       cfg.Storage.SQLite.WALMode,
-			BusyTimeoutMs: cfg.Storage.SQLite.BusyTimeoutMs,
-		})
+		var err error
+		idx, pay, cleanup, err = sqlitestore.Open(cfg.Storage, log)
 		if err != nil {
-			log.Error("open sqlite", "path", dbPath, "err", err)
+			log.Error("open sqlite storage", "err", err)
 			os.Exit(1)
 		}
-		payDir := filepath.Join(cfg.Storage.DataDir, "payloads")
-		fsStore, err := filesystem.New(payDir)
-		if err != nil {
-			_ = sqlitestore.Close(db)
-			log.Error("open filesystem store", "dir", payDir, "err", err)
-			os.Exit(1)
-		}
-		sqlIdx, err := sqlitestore.NewIndexStore(db)
-		if err != nil {
-			_ = sqlitestore.Close(db)
-			log.Error("prepare sqlite statements", "err", err)
-			os.Exit(1)
-		}
-		defer func() { _ = sqlitestore.Close(db) }()
-		idx = sqlIdx
-		pay = fsStore
+		defer func() { _ = cleanup() }()
 	default: // "memory"
-		idx = memory.NewIndexStore()
-		pay = memory.NewPayloadStore()
+		idx, pay = memory.Open()
 	}
 
 	svcCfg := store.Config{

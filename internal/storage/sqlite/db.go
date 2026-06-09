@@ -13,9 +13,9 @@ type Config struct {
 	BusyTimeoutMs int // default 5000
 }
 
-// Open opens (or creates) a SQLite database at path, applies pragmas, and
+// openDB opens (or creates) a SQLite database at path, applies pragmas, and
 // ensures all tables exist. Returns a *sqlx.DB ready for use.
-func Open(path string, cfg Config) (*sqlx.DB, error) {
+func openDB(path string, cfg Config) (*sqlx.DB, error) {
 	db, err := sqlx.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite open: %w", err)
