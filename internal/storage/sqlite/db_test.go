@@ -5,7 +5,7 @@ import (
 )
 
 func TestOpenCreatesSchema(t *testing.T) {
-	db, err := Open(":memory:", Config{})
+	db, err := openDB(":memory:", Config{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -31,13 +31,13 @@ func TestOpenIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/test.db"
 
-	db1, err := Open(path, Config{WALMode: true})
+	db1, err := openDB(path, Config{WALMode: true})
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
 	Close(db1)
 
-	db2, err := Open(path, Config{WALMode: true})
+	db2, err := openDB(path, Config{WALMode: true})
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}
