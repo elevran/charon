@@ -145,3 +145,9 @@ func (s *IndexStore) ListExpired(_ context.Context, before int64) ([]model.Respo
 	s.mu.RUnlock()
 	return expired, nil
 }
+
+func (s *IndexStore) Count(_ context.Context) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return int64(len(s.records)), nil
+}

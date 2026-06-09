@@ -40,6 +40,8 @@ func mapStatus(err error) (int, string) {
 		return http.StatusNotFound, "not found"
 	case errors.Is(err, storage.ErrChainCorrupted):
 		return http.StatusConflict, "chain corrupted"
+	case errors.Is(err, storage.ErrStoreFull):
+		return http.StatusInsufficientStorage, "store full"
 	default:
 		return http.StatusInternalServerError, "internal server error"
 	}
