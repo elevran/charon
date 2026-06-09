@@ -1,201 +1,146 @@
 # Charon
 
-**Response history service for LLM inference proxies.**
+Charon is an internal context-store service for the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses). It bridges the gap between the stateful Responses API and stateless LLM inference:
 
-Charon stores and retrieves conversation history so stateless inference backends (vLLM, Ollama, any OpenAI-compatible endpoint) can serve multi-turn requests without maintaining state themselves. It sits between a reverse proxy and one or more inference servers, reconstructing flat context from a chain of prior responses before each inference call.
+- Resolves `previous_response_id` chains into the flat context an inference backend needs
+- Persists response payloads (input items, output items) to durable storage
+- Manages write-intent safety and background TTL/recovery workers
 
----
-
-## Architecture
-
-```
-Client
-  |  OpenAI Responses API (HTTP / SSE / WebSocket)
-  v
-Proxy ──────────────────────────────────────► Charon
-  |  GET  /responses/{id}/context (resolve)    (chain resolution + storage)
-  |  POST /responses/{id}         (store)
-  |
-  v  stateless (full flat_context as input)
-Inference Backend (vLLM / Ollama / OpenAI-compatible)
-```
-
-The proxy calls Charon to resolve prior context before inference and to store the completed response after inference. Charon is never in the inference call path.
-
-**Colocation:** For development and single-binary deployments, the proxy and Charon run in the same process (proxy on `:8080`, Charon internal API on `:8081`). In production they run as separate services.
+Charon is **not** the client-facing API layer. A proxy sits in front of Charon, owns the Responses API surface (REST, SSE, WebSocket), and calls Charon to resolve context before inference and to store results after.
 
 ---
 
-## Features
+## Running
 
-- **Multi-turn context reconstruction** — walks the `previous_response_id` chain and returns a flat `[]Item` ready for the inference backend
-- **Checkpoint strategy** — creates a full-context snapshot every N turns (default: 10) so chain-walk cost is O(K), not O(N), regardless of conversation length
-- **Write-intent two-phase commit** — atomic store with crash recovery; a background worker detects stale write-intents and completes or fails them
-- **TTL expiry** — a background worker purges responses older than a configurable number of days
-- **Prometheus metrics** — request counts, latencies, write-intent failures, chain-depth histograms, active write-intents gauge
-- **Optional proxy mode** — run without the built-in proxy (`--proxy=false`) to use Charon as a standalone storage service behind your own proxy
-
----
-
-## Getting Started
-
-### Build
-
-```sh
-make build
-# binary at ./build/<GOOS>/<GOARCH>/charon
 ```
-
-### Run
-
-```sh
-# With embedded proxy (default)
 ./charon --config config.yaml
-
-# Storage service only (no proxy)
-./charon --proxy=false --config config.yaml
 ```
 
-### Minimal config (SQLite + filesystem)
+Without a config file, Charon starts with all defaults: in-memory storage, Charon internal API on `:8081`, proxy layer **disabled**.
+
+### Subcommands
+
+```
+./charon reconcile --config config.yaml   # one-shot write-intent recovery sweep
+```
+
+---
+
+## Configuration
+
+All settings are grouped under two top-level keys:
+
+| Key | What it configures |
+|-----|--------------------|
+| `charon` | Charon internal API, storage backends, background workers |
+| `proxy` | Client-facing Responses API proxy (disabled by default) |
+
+### Minimal example — Charon only (no proxy)
 
 ```yaml
-server:
-  listen: ":8080"
-
 charon:
   listen: ":8081"
+  storage:
+    backend: sqlite
+    data_dir: /var/lib/charon
+```
 
-inference:
-  base_url: "http://localhost:11434"
+### Full example — Charon + proxy enabled
 
-storage:
-  backend: sqlite
-  data_dir: ./data
-  checkpoint_interval: 10
-  ttl_days: 30
+```yaml
+charon:
+  listen: ":8081"
+  storage:
+    backend: sqlite
+    data_dir: /var/lib/charon
+    checkpoint_interval: 10   # checkpoint every N turns (default 10)
+    ttl_days: 30              # response TTL (default 30)
+    write_intent_stale_threshold: 5m
+  workers:
+    ttl_interval: 1h
+    recovery_interval: 5m
+
+proxy:
+  enabled: true               # proxy is OFF by default; set true to enable
+  listen: ":8080"
+  charon_url: ""              # auto-derived from charon.listen when empty
+  inference:
+    base_url: "http://localhost:11434"
+    api_key: ""
+    timeout_seconds: 120
+    store_buffer_bytes: 65536 # 0 -> 64 KB default; -1 -> flush every item
 ```
 
 ---
 
-## Configuration Reference
+## Configuration reference
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `server.listen` | `:8080` | Proxy listen address (client-facing) |
-| `charon.listen` | `:8081` | Charon internal API listen address |
-| `charon.base_url` | `""` | Base URL Charon advertises to the proxy (empty = use listen address) |
-| `inference.base_url` | — | Upstream inference endpoint (vLLM, Ollama, etc.) |
-| `inference.timeout_seconds` | `120` | Per-request timeout for inference calls |
-| `storage.backend` | `sqlite` | Storage backend: `sqlite`, `filesystem`, or `memory` |
-| `storage.data_dir` | `./data` | Root directory for SQLite DB and payload files |
-| `storage.checkpoint_interval` | `10` | Create a context checkpoint every N turns |
-| `storage.ttl_days` | `30` | Responses expire after N days (0 = no expiry) |
-| `storage.sqlite.wal_mode` | `true` | Enable SQLite WAL mode (recommended) |
-| `storage.sqlite.busy_timeout_ms` | `5000` | SQLite busy timeout in milliseconds |
+### `charon`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `listen` | `:8081` | Address for the Charon internal HTTP API |
+| `storage.backend` | `memory` | Storage backend: `memory` or `sqlite` |
+| `storage.data_dir` | `./data` | Root directory for SQLite database and payload files |
+| `storage.checkpoint_interval` | `10` | Write a full-context checkpoint every N turns |
+| `storage.ttl_days` | `30` | Responses expire after this many days |
+| `storage.write_intent_stale_threshold` | `5m` | Write intents older than this are recovered on startup |
 | `workers.ttl_interval` | `1h` | How often the TTL expiry worker runs |
 | `workers.recovery_interval` | `5m` | How often the write-intent recovery worker runs |
-| `workers.stale_threshold` | `5m` | Age at which a pending write-intent is considered stale |
+
+### `proxy`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Start the proxy layer. **Off by default.** |
+| `listen` | `:8080` | Address for the client-facing Responses API |
+| `charon_url` | auto | URL the proxy uses to reach Charon. Auto-derived from `charon.listen` when empty (wildcard hosts become `127.0.0.1`). |
+| `inference.base_url` | `http://localhost:11434` | Stateless Responses API inference backend |
+| `inference.api_key` | `` | Bearer token for the inference backend (empty = no auth) |
+| `inference.timeout_seconds` | `120` | Inference request timeout |
+| `inference.store_buffer_bytes` | `65536` | Proxy-to-Charon chunk buffer size. `0` -> 64 KB default; `-1` -> flush every output item immediately |
 
 ---
 
-## API
+## Storage backends
 
-Charon exposes an internal HTTP API consumed by the proxy. It is not the client-facing Responses API.
+### `memory` (default)
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/responses/{id}/context` | **Resolve** — walk the chain from `{id}`, return `{reservation_id, flat_context[]}`. Called before inference for continuation turns. |
-| `POST` | `/responses/{id}` | **Store** — persist a completed response with write-intent safety. `{id}` is the canonical ID assigned by the inference server. |
-| `PATCH` | `/responses/{id}` | **Append chunk** — append a streaming chunk to an open write-intent (chunked store mode). |
-| `GET` | `/responses/{id}` | **Retrieve** — return the stored record for a single response (no chain walk). |
-| `DELETE` | `/responses/{id}` | **Delete** — point-delete a response. No cascade. |
-| `GET` | `/healthz` | Liveness probe — returns `200 OK` when the process is alive. |
-| `GET` | `/readyz` | Readiness probe — returns `200 OK` when storage backends are ready to serve. |
-| `GET` | `/metrics` | Prometheus metrics scrape endpoint. |
+In-memory stores. No persistence across restarts. Use for conformance/compliance testing and lightweight local development.
 
-### Response ID conventions
+### `sqlite`
 
-- `resp_<32-char hex>` — canonical ID, assigned by the inference server
-- `rsrv_<32-char hex>` — reservation ID, minted by Charon at resolve time for write-intent correlation; never exposed to clients
+Embedded SQLite (pure Go, no CGo). Persists to `data_dir/responses.db` (index) and `data_dir/payloads/` (payload blobs). WAL journal mode is always enabled. Suitable for single-instance production deployments.
+
+For multi-instance deployments, use PostgreSQL + MinIO/S3 (see [architecture docs](docs/architecture.md)).
 
 ---
 
-## Storage Backends
+## Deployment modes
 
-| Backend | Index store | Payload store | Use case |
-|---------|------------|---------------|----------|
-| `sqlite` | SQLite (embedded, no CGo) | Local filesystem | Single-binary deployment; no external dependencies |
-| `memory` | In-memory | In-memory | Tests and compliance suite; no persistence |
-| PostgreSQL + S3/MinIO | PostgreSQL | Object store | Multi-instance production (planned — Phase 2) |
+| Mode | `charon.storage.backend` | `proxy.enabled` | Use for |
+|------|--------------------------|-----------------|---------|
+| Memory only | `memory` | `false` | Conformance testing, CI |
+| Single binary | `sqlite` | `false` (Charon only) | Development |
+| Single binary + proxy | `sqlite` | `true` | Compliance testing, single-node production |
+| Separate services | `sqlite` / `postgres` | Proxy in its own process | Production |
 
-The binary is identical across all backends. Only configuration changes.
+---
 
-**Data directory layout (sqlite backend):**
+## Compliance testing
 
+To run the [openresponses.org](https://www.openresponses.org/compliance) compliance suite locally:
+
+```bash
+# Start Charon with proxy enabled
+./charon --config config.yaml   # proxy.enabled: true, inference.base_url pointing at vLLM
+
+# In another terminal (requires bun and a clone of openresponses/openresponses)
+OPENRESPONSES_DIR=/path/to/openresponses make test-compliance-bun
 ```
-{data_dir}/
-  responses.db                                         # SQLite index
-  payloads/
-    {chain_root_id}/
-      {position:08d}_{response_id}.json.zst            # individual payloads
-      checkpoint_{position:08d}_{response_id}.json.zst # checkpoint blobs
-```
 
----
+The Go compliance suite (no external tools required) runs as part of `make test`:
 
-## Development
-
-```sh
-# Fast local gate: format check, vet, and short tests (<5s with warm cache)
-make presubmit
-
-# Full test suite with race detector (matches CI)
-make test
-
-# Unit tests only
-make test-unit
-
-# Integration tests (full in-process stack)
-make test-integration
-
-# Go compliance suite (mock inference, no external deps)
+```bash
 make test-compliance
-
-# Lint
-make lint
-
-# Build container image
-make image
 ```
-
-### Compliance testing against the openresponses.org suite
-
-Requires [bun](https://bun.sh) and a local clone of [github.com/openresponses/openresponses](https://github.com/openresponses/openresponses):
-
-```sh
-OPENRESPONSES_DIR=../openresponses make test-system
-```
-
----
-
-## `charon reconcile` subcommand
-
-Runs the write-intent recovery and storage reconciliation job on demand, outside the normal background worker schedule. Useful for operational recovery after a crash or for verifying storage consistency.
-
-```sh
-./charon reconcile --config config.yaml
-```
-
-The reconciler finds write-intents in `pending` or `file_written` phase that are older than the stale threshold, attempts to complete them (re-write is safe — the payload key is deterministic), and marks irrecoverable intents as `failed`.
-
----
-
-## Project Status
-
-| Phase | Status | Description |
-|-------|--------|-------------|
-| Phase 1 | Complete | Single binary: SQLite + filesystem, full API, TTL, write-intent recovery |
-| Phase 2 | Planned | PostgreSQL + S3/MinIO backends for multi-instance deployments |
-| Phase 3 | Planned | Proxy layer, SSE/WebSocket, compliance suite integration |
-| Phase 4 | Planned | Multi-tenant access control (ABAC) |
-| Phase 5 | Planned | Extended observability, graceful shutdown hardening |

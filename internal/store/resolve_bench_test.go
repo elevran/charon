@@ -87,7 +87,6 @@ func benchResolveSQLite(b *testing.B, depth int) {
 	b.Helper()
 	storageCfg := config.StorageConfig{
 		DataDir: b.TempDir(),
-		SQLite:  config.SQLiteConfig{WALMode: true},
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	idx, pay, cleanup, err := sqlitestore.Open(storageCfg, log)

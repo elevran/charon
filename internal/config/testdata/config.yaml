@@ -1,4 +1,6 @@
-server:
+proxy:
   listen: ":0"
-storage:
-  checkpoint_interval: 10
+charon:
+  listen: ":9090"
+  storage:
+    checkpoint_interval: 10
