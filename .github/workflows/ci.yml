@@ -88,3 +88,18 @@ jobs:
 
       - name: Run compliance tests
         run: make test-compliance
+
+  # ── Disruptive tests ─────────────────────────────────────────────────────────
+  test-disruptive:
+    name: Disruptive Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run disruptive tests
+        run: make test-disruptive
