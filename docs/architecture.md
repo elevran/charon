@@ -147,9 +147,9 @@ The proxy appends the new request's `input[]` to the flat context before forward
 | Full-snapshot-per-response | O(N) | O(1) — single fetch | O(N²) total | Write amplification; simplest reads |
 | Checkpoint every K turns | O(1) amortized | O(K) — 1 checkpoint + ≤K deltas | O(N²/K) total | Trades storage for bounded read latency |
 
-Read cost for the checkpoint strategy is O(K), not O(log N): the nearest checkpoint is always within K steps of the head by construction, regardless of total chain length N. Only the K-step tail walk is needed; the checkpoint itself is a single self-contained fetch.
+Each checkpoint blob is **cumulative** — it contains all turns from chain root to its position. The checkpoint at position nK holds nK payloads. Total checkpoint storage across a chain of length N grows as K + 2K + ... + (N/K)·K ≈ N²/(2K). With K=10 and a 1000-turn chain, checkpoint storage is roughly 50× the delta storage — the cost paid for O(K) reads with a single self-contained checkpoint fetch and no chaining.
 
-Each checkpoint blob is **cumulative** — it contains all turns from chain root to its position. The checkpoint at position nK holds nK payloads, not just the K new turns since the last checkpoint. There is no back-reference between checkpoints. This means total checkpoint storage grows as K + 2K + ... + (N/K)·K ≈ N²/(2K). With K=10 and a 1000-turn chain, checkpoint storage is roughly 50× the delta storage — the cost paid for O(K) reads without chaining checkpoint blobs.
+An alternative **incremental checkpoint** design stores only the K new turns at each checkpoint position and keeps a back-reference to the prior checkpoint. This reduces storage to O(N) but requires loading ⌈N/K⌉ checkpoint blobs in sequence to reconstruct the full context — O(N/K) chained reads instead of O(K) reads. For read-heavy workloads the current cumulative design is preferable; for write-heavy workloads with very long chains the incremental design trades read latency for storage efficiency.
 
 Charon uses the checkpoint strategy. See [storage design](storage.md) for details.
 
