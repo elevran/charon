@@ -5,7 +5,7 @@ import "encoding/json"
 // ResponseResource is the full OpenAI Responses API response returned to clients.
 type ResponseResource struct {
 	ID                 string            `json:"id"`
-	Object             string            `json:"object"`  // always "response"
+	Object             string            `json:"object"` // always "response"
 	CreatedAt          int64             `json:"created_at"`
 	CompletedAt        *int64            `json:"completed_at,omitempty"`
 	Status             string            `json:"status"`
@@ -38,11 +38,11 @@ type ResponseError struct {
 
 // UsageResource holds token usage counters.
 type UsageResource struct {
-	InputTokens         int                      `json:"input_tokens"`
-	OutputTokens        int                      `json:"output_tokens"`
-	TotalTokens         int                      `json:"total_tokens"`
-	InputTokensDetails  inputTokensDetails       `json:"input_tokens_details"`
-	OutputTokensDetails outputTokensDetails      `json:"output_tokens_details"`
+	InputTokens         int                 `json:"input_tokens"`
+	OutputTokens        int                 `json:"output_tokens"`
+	TotalTokens         int                 `json:"total_tokens"`
+	InputTokensDetails  inputTokensDetails  `json:"input_tokens_details"`
+	OutputTokensDetails outputTokensDetails `json:"output_tokens_details"`
 }
 
 type inputTokensDetails struct {

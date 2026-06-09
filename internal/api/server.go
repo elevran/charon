@@ -26,6 +26,8 @@ func RegisterHandlers(mux *http.ServeMux, h *Handler) {
 	if mux == nil {
 		mux = http.DefaultServeMux
 	}
+	mux.HandleFunc("GET /healthz", h.HandleHealthz)
+	mux.HandleFunc("GET /readyz", h.HandleReadyz)
 	mux.HandleFunc("GET /responses/{id}/context", h.HandleResolve)
 	mux.HandleFunc("POST /responses/{id}", h.HandleStore)
 	mux.HandleFunc("GET /responses/{id}", h.HandleRetrieve)

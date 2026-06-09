@@ -41,7 +41,6 @@ func rawItem(role, content string) json.RawMessage {
 	return b
 }
 
-
 func TestClientStoreAndRetrieve(t *testing.T) {
 	client, _ := startCharonServer(t)
 

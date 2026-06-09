@@ -45,7 +45,7 @@ func (w *wsConn) readUntilCompleted(t *testing.T, timeout time.Duration) (finalR
 			return
 		}
 		var evt struct {
-			Type     string                 `json:"type"`
+			Type     string                  `json:"type"`
 			Response *proxy.ResponseResource `json:"response,omitempty"`
 			Error    *struct {
 				Code string `json:"code"`

@@ -61,7 +61,11 @@ func TestMemoryBackendConformance(t *testing.T) {
 
 // TestSQLiteBackendConformance runs the identical suite against SQLite + filesystem.
 // Each sub-test gets its own isolated temp directory via t.TempDir() inside the factory.
+// Skipped under -short because SQLite disk I/O adds ~2s; covered fully in CI.
 func TestSQLiteBackendConformance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping SQLite conformance under -short")
+	}
 	runConformanceSuite(t, func(cfg store.Config) (*store.ContextStore, storage.IndexStore, storage.PayloadStore) {
 		dataDir := t.TempDir()
 		db, err := sqlitestore.Open(filepath.Join(dataDir, "responses.db"), sqlitestore.Config{WALMode: false})

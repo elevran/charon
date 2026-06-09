@@ -110,8 +110,8 @@ func TestCreatePreviousNotFound(t *testing.T) {
 	s := startStack(t)
 	prevID := "resp_unknown"
 	body := map[string]interface{}{
-		"model":               "test",
-		"input":               "hi",
+		"model":                "test",
+		"input":                "hi",
 		"previous_response_id": prevID,
 	}
 	resp := doRequest(t, s.proxySrv.URL, "POST", "/responses", body)
@@ -134,8 +134,8 @@ func TestCreateContinuation(t *testing.T) {
 	// Turn 1 continuing from turn 0
 	r1 := doRequest(t, s.proxySrv.URL, "POST", "/responses",
 		map[string]interface{}{
-			"model":               "test",
-			"input":               "follow up",
+			"model":                "test",
+			"input":                "follow up",
 			"previous_response_id": resource0.ID,
 		})
 	resource1 := decodeBody[proxy.ResponseResource](t, r1)
@@ -195,9 +195,9 @@ func TestStoreEquality(t *testing.T) {
 	// store:false — should NOT be retrievable from Charon
 	storeFalse := false
 	body := map[string]interface{}{
-		"model":  "test",
-		"input":  "hello",
-		"store":  storeFalse,
+		"model": "test",
+		"input": "hello",
+		"store": storeFalse,
 	}
 	r0 := doRequest(t, s.proxySrv.URL, "POST", "/responses", body)
 	resource0 := decodeBody[proxy.ResponseResource](t, r0)

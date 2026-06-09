@@ -11,27 +11,64 @@ OUT := $(BUILD_DIR)/$(GOOS)/$(GOARCH)/$(BINARY)
 
 OPENRESPONSES_DIR ?= ../openresponses
 
-.PHONY: all fmt lint test test-compliance-bun tidy update build image clean
+.PHONY: all fmt fmt-check vet lint presubmit test test-unit test-integration test-compliance test-system test-compliance-bun tidy update build image clean
 
 all: fmt tidy lint test build
+
+# ── Formatting ────────────────────────────────────────────────────────────────
 
 fmt:
 	go fmt ./...
 
+# fmt-check reports unformatted files without modifying them (used in CI and presubmit).
+fmt-check:
+	@out=$$(gofmt -l .); [ -z "$$out" ] || (printf "unformatted files:\n$$out\nrun 'go fmt ./...' to fix\n" && exit 1)
+
+# ── Static analysis ───────────────────────────────────────────────────────────
+
+vet:
+	go vet ./...
+
 lint:
 	golangci-lint run ./...
 
-test:
-	go test ./... -race
+# ── Presubmit (fast local gate, target <5s with warm cache) ───────────────────
+#
+# Covers: format check, vet, build, and all tests that do not require real
+# timers or disk-heavy backends (-short skips those; they run in full CI).
+presubmit: fmt-check vet
+	go test -short -count=1 ./...
 
-# Runs the canonical openresponses.org compliance suite via bun.
+# ── Test targets ──────────────────────────────────────────────────────────────
+
+# test: full suite including race detector (matches CI).
+test:
+	go test -race ./...
+
+# test-unit: all non-integration, non-compliance tests with race detector.
+test-unit:
+	go test -race $$(go list ./... | grep -v '^github.com/elevran/charon/test/')
+
+# test-integration: wires up the full stack in-process and checks end-to-end paths.
+test-integration:
+	go test -race ./test/integration/...
+
+# test-compliance: Go compliance suite (mock inference, no external deps).
+test-compliance:
+	go test -race ./test/compliance/...
+
+# test-system: canonical openresponses.org suite via bun.
 # Requires: bun (https://bun.sh) and OPENRESPONSES_DIR set to a clone of
 # https://github.com/openresponses/openresponses
 # Note: build tag uses underscores because Go does not allow hyphens in tags.
+test-system: test-compliance-bun
+
 test-compliance-bun:
 	OPENRESPONSES_DIR=$(OPENRESPONSES_DIR) \
 	go test -tags openresponses_bun_compliance -v -count=1 \
 	  ./test/compliance/... -run TestBunComplianceSuite
+
+# ── Dependency management ─────────────────────────────────────────────────────
 
 tidy:
 	go mod tidy
@@ -39,6 +76,8 @@ tidy:
 update:
 	go get -u ./...
 	go mod tidy
+
+# ── Build & package ───────────────────────────────────────────────────────────
 
 build:
 	mkdir -p $(BUILD_DIR)/$(GOOS)/$(GOARCH)
