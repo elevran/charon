@@ -49,9 +49,10 @@ linters:
 
 issues:
   max-issues-per-linter: 5
-  exclusions:
-    rules:
-      - path: "_test\\.go"
-        linters:
-          - unparam
-          - gocritic
+
+exclusions:
+  rules:
+    - path: "_test\\.go"
+      linters:
+        - unparam
+        - gocritic
