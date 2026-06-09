@@ -23,7 +23,7 @@ func TestSQLiteBackendSurvivesRestart(t *testing.T) {
 	dataDir := t.TempDir()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	ctx := context.Background()
-	storageCfg := config.StorageConfig{DataDir: dataDir, SQLite: config.SQLiteConfig{WALMode: true}}
+	storageCfg := config.StorageConfig{DataDir: dataDir}
 
 	inpRaw := json.RawMessage(`{"type":"message","role":"user","content":"hello"}`)
 	var inp responses.ResponseInputItemUnionParam
