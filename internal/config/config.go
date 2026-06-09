@@ -29,9 +29,10 @@ type CharonConfig struct {
 // The backend receives a full flat_context as input and returns a
 // ResponseResource with its own assigned id.
 type InferenceConfig struct {
-	BaseURL        string `json:"base_url"` // default "http://localhost:11434"
-	APIKey         string `json:"api_key"`
-	TimeoutSeconds int    `json:"timeout_seconds"` // default 120
+	BaseURL          string `json:"base_url"`           // default "http://localhost:11434"
+	APIKey           string `json:"api_key"`
+	TimeoutSeconds   int    `json:"timeout_seconds"`    // default 120
+	StoreBufferBytes int    `json:"store_buffer_bytes"` // 0 = no buffering; default 65536
 }
 
 // ServerConfig holds HTTP server settings.
@@ -115,6 +116,13 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Inference.TimeoutSeconds <= 0 {
 		cfg.Inference.TimeoutSeconds = 120
+	}
+	// StoreBufferBytes:
+	//   0  (unset/default) → 65536 (64 KB flush threshold)
+	//  -1                  → no buffering: flush every output item immediately
+	//   N > 0              → flush when accumulated item JSON reaches N bytes
+	if cfg.Inference.StoreBufferBytes == 0 {
+		cfg.Inference.StoreBufferBytes = 65536
 	}
 	if cfg.Workers.TTLInterval <= 0 {
 		cfg.Workers.TTLInterval = time.Hour

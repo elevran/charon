@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,6 +33,14 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+// streamStage holds in-memory state for a streaming store in progress.
+type streamStage struct {
+	intentID           string
+	reservationID      string
+	previousResponseID *string
+	chunks             []json.RawMessage // accumulated output items from AppendChunk calls
+}
+
 // ContextStore owns all business logic: chain construction,
 // checkpoint decisions, write-intent sequencing, and ID minting.
 type ContextStore struct {
@@ -39,12 +48,21 @@ type ContextStore struct {
 	payloads storage.PayloadStore
 	cfg      Config
 	log      *slog.Logger
+
+	mu      sync.Mutex
+	streams map[string]*streamStage // key: canonical response ID
 }
 
 // New creates a ContextStore.
 func New(index storage.IndexStore, payloads storage.PayloadStore, cfg Config, log *slog.Logger) *ContextStore {
 	cfg.applyDefaults()
-	return &ContextStore{index: index, payloads: payloads, cfg: cfg, log: log}
+	return &ContextStore{
+		index:    index,
+		payloads: payloads,
+		cfg:      cfg,
+		log:      log,
+		streams:  make(map[string]*streamStage),
+	}
 }
 
 // resolveChainPosition derives ChainRootID and Position for a new response.
@@ -126,13 +144,7 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 		return fmt.Errorf("marshal input items: %w", err)
 	}
 
-	var usageRaw json.RawMessage
-	if req.Usage != nil {
-		usageRaw, err = json.Marshal(req.Usage)
-		if err != nil {
-			return fmt.Errorf("marshal usage: %w", err)
-		}
-	}
+	usageRaw := req.Usage // already json.RawMessage; nil/empty if not provided
 
 	payload := model.ResponsePayload{
 		ID:                 responseID,
@@ -236,6 +248,164 @@ func (s *ContextStore) Delete(ctx context.Context, responseID string) error {
 		}
 	}
 	return s.index.Delete(ctx, responseID)
+}
+
+// AppendChunk adds output items to the in-memory stream stage for responseID.
+// On the first call a write-intent is created at WriteIntentStreamOpen.
+// Items accumulate in memory until CommitStream is called.
+func (s *ContextStore) AppendChunk(ctx context.Context, responseID string, items []json.RawMessage) error {
+	if len(items) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stage, exists := s.streams[responseID]
+	if !exists {
+		intentID := mintID("intent")
+		now := time.Now().Unix()
+		intent := model.WriteIntent{
+			IntentID:   intentID,
+			ResponseID: responseID,
+			PayloadKey: "", // not known yet; set at commit time
+			Phase:      model.WriteIntentStreamOpen,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		if err := s.index.InsertWriteIntent(ctx, intent); err != nil {
+			return fmt.Errorf("insert stream intent: %w", err)
+		}
+		stage = &streamStage{intentID: intentID}
+		s.streams[responseID] = stage
+	}
+	stage.chunks = append(stage.chunks, items...)
+	return nil
+}
+
+// CommitStream finalises a streaming store: merges all staged chunks with the
+// final batch in req, writes the payload, and commits the index record.
+// If no prior AppendChunk calls were made, it behaves like Store() using
+// req.Items as the full output.
+func (s *ContextStore) CommitStream(ctx context.Context, responseID string, req model.ChunkRequest) error {
+	s.mu.Lock()
+	stage := s.streams[responseID]
+	delete(s.streams, responseID)
+	s.mu.Unlock()
+
+	// Assemble all output items: staged chunks + final batch.
+	var allOutput []json.RawMessage
+	if stage != nil {
+		allOutput = append(allOutput, stage.chunks...)
+	}
+	allOutput = append(allOutput, req.Items...)
+
+	// Derive chain position.
+	chainRootID, position, err := s.resolveChainPosition(ctx, req.PreviousResponseID, responseID)
+	if err != nil {
+		return err
+	}
+
+	pKey := payloadKey(chainRootID, position, responseID)
+	now := time.Now().Unix()
+
+	// If we have a staged intent (from AppendChunk), advance it.
+	// Otherwise create a fresh one — this handles the case where CommitStream
+	// is called directly without prior AppendChunk calls.
+	var intentID string
+	if stage != nil {
+		intentID = stage.intentID
+		// Update payload_key now that we know it, and advance phase.
+		if err := s.index.UpdateWriteIntent(ctx, intentID, model.WriteIntentPending); err != nil {
+			return fmt.Errorf("advance stream intent to pending: %w", err)
+		}
+	} else {
+		intentID = mintID("intent")
+		intent := model.WriteIntent{
+			IntentID:      intentID,
+			ResponseID:    responseID,
+			ReservationID: req.ReservationID,
+			PayloadKey:    pKey,
+			Phase:         model.WriteIntentPending,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}
+		if err := s.index.InsertWriteIntent(ctx, intent); err != nil {
+			return fmt.Errorf("insert commit intent: %w", err)
+		}
+	}
+
+	rawInput, err := inputItemsToRaw(req.Input)
+	if err != nil {
+		return fmt.Errorf("marshal input items: %w", err)
+	}
+
+	payload := model.ResponsePayload{
+		ID:                 responseID,
+		PreviousResponseID: req.PreviousResponseID,
+		InputItems:         rawInput,
+		OutputItems:        allOutput,
+		Usage:              req.Usage,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+
+	isCheckpoint := position > 0 && position%s.cfg.CheckpointInterval == 0
+	var ckKey *string
+	if isCheckpoint {
+		var flatCtx []json.RawMessage
+		if req.PreviousResponseID != nil {
+			flatCtx, err = s.buildContext(ctx, *req.PreviousResponseID)
+			if err != nil {
+				return fmt.Errorf("build checkpoint context: %w", err)
+			}
+		}
+		flatCtx = append(flatCtx, rawInput...)
+		flatCtx = append(flatCtx, allOutput...)
+		ckBytes := marshalNDJSON(flatCtx)
+		ck := checkpointKey(chainRootID, position, responseID)
+		ckKey = &ck
+		if err := s.payloads.Put(ctx, ck, ckBytes); err != nil {
+			return fmt.Errorf("write checkpoint: %w", err)
+		}
+	}
+
+	if err := s.payloads.Put(ctx, pKey, payloadBytes); err != nil {
+		return fmt.Errorf("write payload: %w", err)
+	}
+
+	if err := s.index.UpdateWriteIntent(ctx, intentID, model.WriteIntentFileWritten); err != nil {
+		return fmt.Errorf("update intent to file_written: %w", err)
+	}
+
+	status := model.ResponseStatus(req.Status)
+	if status == "" {
+		status = model.StatusCompleted
+	}
+	meta := model.ResponseMeta{
+		ID:                 responseID,
+		PreviousResponseID: req.PreviousResponseID,
+		ChainRootID:        chainRootID,
+		Position:           position,
+		PayloadKey:         pKey,
+		CheckpointKey:      ckKey,
+		Status:             status,
+		Model:              req.Model,
+		CreatedAt:          now,
+		ExpiresAt:          s.computeExpiresAt(),
+	}
+	if err := s.index.Put(ctx, meta); err != nil {
+		return fmt.Errorf("commit index: %w", err)
+	}
+
+	return s.index.UpdateWriteIntent(ctx, intentID, model.WriteIntentCommitted)
+}
+
+// inputItemsToRaw converts []json.RawMessage input items (used by CommitStream)
+// into the canonical []json.RawMessage form for payload storage.
+func inputItemsToRaw(items []json.RawMessage) ([]json.RawMessage, error) {
+	return items, nil
 }
 
 func marshalInputItems(items responses.ResponseInputParam) ([]json.RawMessage, error) {

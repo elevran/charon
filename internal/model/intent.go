@@ -8,6 +8,10 @@ const (
 	WriteIntentFileWritten WriteIntentPhase = "file_written" // object written, index not yet committed
 	WriteIntentCommitted   WriteIntentPhase = "committed"
 	WriteIntentFailed      WriteIntentPhase = "failed"
+	// WriteIntentStreamOpen is set when the first chunk of a streaming store arrives.
+	// The stream is in progress; subsequent chunks append to the in-memory stage.
+	// Advances to file_written then committed when CommitStream is called.
+	WriteIntentStreamOpen WriteIntentPhase = "stream_open"
 )
 
 type WriteIntent struct {

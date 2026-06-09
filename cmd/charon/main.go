@@ -99,7 +99,7 @@ func main() {
 	timeout := time.Duration(cfg.Inference.TimeoutSeconds) * time.Second
 	infClient := inference.New(cfg.Inference.BaseURL, cfg.Inference.APIKey, timeout)
 	charonClient := charonpkg.New(cfg.Charon.BaseURL, timeout)
-	proxyH := proxy.NewHandler(charonClient, infClient, log)
+	proxyH := proxy.NewHandler(charonClient, infClient, log, cfg.Inference.StoreBufferBytes)
 	proxyMux := http.NewServeMux()
 	proxy.RegisterHandlers(proxyMux, proxyH)
 	proxySrv := api.NewServerFromMux(cfg.Server.Listen, proxyMux, log)
