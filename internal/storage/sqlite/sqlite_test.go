@@ -18,7 +18,6 @@ func openDB(t *testing.T) *sqlite.IndexStore {
 	t.Helper()
 	cfg := config.StorageConfig{
 		DataDir: t.TempDir(),
-		SQLite:  config.SQLiteConfig{},
 	}
 	idx, _, cleanup, err := sqlite.Open(cfg, nil)
 	if err != nil {
