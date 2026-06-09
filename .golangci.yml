@@ -22,35 +22,36 @@ linters:
     - misspell       # common spelling mistakes in comments and strings
     - whitespace     # unnecessary blank lines
 
-linters-settings:
-  revive:
-    rules:
-      - name: exported
-        arguments:
-          - "checkPrivateReceivers"
-          - "sayRepetitiveInsteadOfStutters"
-      - name: unused-parameter
-      - name: unreachable-code
-      - name: empty-block
-      - name: superfluous-else
-      - name: context-as-argument
+  settings:
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - "checkPrivateReceivers"
+            - "sayRepetitiveInsteadOfStutters"
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: empty-block
+        - name: superfluous-else
+        - name: context-as-argument
 
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - performance
-      - style
-    disabled-checks:
-      - commentedOutCode
-      - whyNoLint
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+      disabled-checks:
+        - commentedOutCode
+        - whyNoLint
 
-  exhaustive:
-    default-signifies-exhaustive: true
+    exhaustive:
+      default-signifies-exhaustive: true
 
 issues:
-  max-same-issues: 5
-  exclude-rules:
-    - path: "_test\\.go"
-      linters:
-        - unparam
-        - gocritic
+  max-issues-per-linter: 5
+  exclusions:
+    rules:
+      - path: "_test\\.go"
+        linters:
+          - unparam
+          - gocritic
