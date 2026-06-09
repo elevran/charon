@@ -68,7 +68,6 @@ func TestSQLiteBackendConformance(t *testing.T) {
 	runConformanceSuite(t, func(cfg store.Config) (*store.ContextStore, storage.IndexStore, storage.PayloadStore) {
 		storageCfg := config.StorageConfig{
 			DataDir: t.TempDir(),
-			SQLite:  config.SQLiteConfig{WALMode: false},
 		}
 		log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 		idx, pay, cleanup, err := sqlitestore.Open(storageCfg, log)

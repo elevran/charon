@@ -12,11 +12,9 @@ import (
 )
 
 // Open creates (or opens) the SQLite index store and a filesystem payload store
-// rooted under cfg.DataDir, applying all SQLite tuning from cfg.SQLite.
-// It returns the index store, payload store, a cleanup function that closes the
-// database, and any initialisation error.
-// The caller should defer the cleanup function; it is safe to call even if Open
-// returns an error (it will be a no-op in that case).
+// rooted under cfg.DataDir. WAL journal mode and a 5s busy timeout are always
+// applied — they are not user-configurable because the defaults are correct for
+// all supported deployment modes.
 func Open(cfg config.StorageConfig, log *slog.Logger) (storage.IndexStore, storage.PayloadStore, func() error, error) {
 	noop := func() error { return nil }
 
@@ -26,8 +24,8 @@ func Open(cfg config.StorageConfig, log *slog.Logger) (storage.IndexStore, stora
 
 	dbPath := filepath.Join(cfg.DataDir, "responses.db")
 	db, err := openDB(dbPath, Config{
-		WALMode:       cfg.SQLite.WALMode,
-		BusyTimeoutMs: cfg.SQLite.BusyTimeoutMs,
+		WALMode:       true, // WAL is always on; better concurrency than DELETE journal
+		BusyTimeoutMs: 5000,
 	})
 	if err != nil {
 		return nil, nil, noop, fmt.Errorf("sqlite open %q: %w", dbPath, err)

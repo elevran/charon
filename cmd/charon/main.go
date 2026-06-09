@@ -37,7 +37,6 @@ func main() {
 		subcmd = args[0]
 		args = args[1:]
 	}
-	// Re-parse flags after stripping the optional subcommand.
 	fs := flag.NewFlagSet("charon", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to config file")
 	_ = fs.Parse(args)
@@ -49,7 +48,7 @@ func main() {
 		return
 	}
 
-	cfg, err := config.Load(*configPath) //nolint:gocritic // the flag var is from fs, not the removed global flag
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Error("load config", "err", err)
 		os.Exit(1)
@@ -61,10 +60,10 @@ func main() {
 		cleanup func() error
 	)
 
-	switch cfg.Storage.Backend {
+	switch cfg.Charon.Storage.Backend {
 	case "sqlite":
 		var err error
-		idx, pay, cleanup, err = sqlitestore.Open(cfg.Storage, log)
+		idx, pay, cleanup, err = sqlitestore.Open(cfg.Charon.Storage, log)
 		if err != nil {
 			log.Error("open sqlite storage", "err", err)
 			os.Exit(1)
@@ -75,41 +74,49 @@ func main() {
 	}
 
 	svcCfg := store.Config{
-		CheckpointInterval: cfg.Storage.CheckpointInterval,
-		TTLDays:            cfg.Storage.TTLDays,
-		MaxResponses:       cfg.Storage.MaxResponses,
-		MaxPayloadBytes:    cfg.Storage.MaxPayloadBytes,
+		CheckpointInterval: cfg.Charon.Storage.CheckpointInterval,
+		TTLDays:            cfg.Charon.Storage.TTLDays,
+		MaxResponses:       cfg.Charon.Storage.MaxResponses,
+		MaxPayloadBytes:    cfg.Charon.Storage.MaxPayloadBytes,
 	}
 	svc := store.New(idx, pay, svcCfg, log)
 
 	reg := prometheus.NewRegistry()
 	if err := metrics.Register(reg, ""); err != nil {
 		log.Error("register metrics", "err", err)
-		os.Exit(1) //nolint:gocritic // exitAfterDefer: SQLite close is intentionally skipped on startup failure
+		os.Exit(1) //nolint:gocritic
 	}
 
-	// ── Charon internal API server (port 8081 by default) ──────────────────
+	// ── Charon internal API server (always starts) ─────────────────────────
 	charonH := api.NewHandler(svc, log)
 	charonSrv := api.NewServerWithRegistry(cfg.Charon.Listen, charonH, log, reg)
 
-	// ── Proxy server (port 8080 by default) ────────────────────────────────
-	timeout := time.Duration(cfg.Inference.TimeoutSeconds) * time.Second
-	infClient := inference.New(cfg.Inference.BaseURL, cfg.Inference.APIKey, timeout)
-	charonClient := charonpkg.New(cfg.Charon.BaseURL, timeout)
-	proxyH := proxy.NewHandler(charonClient, infClient, log, cfg.Inference.StoreBufferBytes)
-	proxyMux := http.NewServeMux()
-	proxy.RegisterHandlers(proxyMux, proxyH)
-	proxySrv := api.NewServerFromMux(cfg.Server.Listen, proxyMux, log)
+	// ── Proxy server (starts only when proxy.enabled: true) ────────────────
+	var proxySrv *api.Server
+	if cfg.Proxy.Enabled {
+		timeout := time.Duration(cfg.Proxy.Inference.TimeoutSeconds) * time.Second
+		infClient := inference.New(cfg.Proxy.Inference.BaseURL, cfg.Proxy.Inference.APIKey, timeout)
+		charonClient := charonpkg.New(cfg.Proxy.CharonURL, timeout)
+		proxyH := proxy.NewHandler(charonClient, infClient, log, cfg.Proxy.Inference.StoreBufferBytes)
+		proxyMux := http.NewServeMux()
+		proxy.RegisterHandlers(proxyMux, proxyH)
+		proxySrv = api.NewServerFromMux(cfg.Proxy.Listen, proxyMux, log)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	var workerWG sync.WaitGroup
 	workerWG.Add(2)
-	go func() { defer workerWG.Done(); worker.NewCleaner(idx, pay, log, cfg.Workers.TTLInterval).Run(ctx) }()
 	go func() {
 		defer workerWG.Done()
-		worker.NewReconciler(idx, pay, log, cfg.Storage.WriteIntentStaleThreshold, cfg.Workers.RecoveryInterval).Run(ctx)
+		worker.NewCleaner(idx, pay, log, cfg.Charon.Workers.TTLInterval).Run(ctx)
+	}()
+	go func() {
+		defer workerWG.Done()
+		worker.NewReconciler(idx, pay, log,
+			cfg.Charon.Storage.WriteIntentStaleThreshold,
+			cfg.Charon.Workers.RecoveryInterval).Run(ctx)
 	}()
 
 	go func() {
@@ -118,12 +125,16 @@ func main() {
 			log.Error("charon server error", "err", err)
 		}
 	}()
-	go func() {
-		log.Info("starting proxy server", "addr", cfg.Server.Listen)
-		if err := proxySrv.Start(); err != nil && err != http.ErrServerClosed {
-			log.Error("proxy server error", "err", err)
-		}
-	}()
+	if cfg.Proxy.Enabled {
+		go func() {
+			log.Info("starting proxy server", "addr", cfg.Proxy.Listen)
+			if err := proxySrv.Start(); err != nil && err != http.ErrServerClosed {
+				log.Error("proxy server error", "err", err)
+			}
+		}()
+	} else {
+		log.Info("proxy layer disabled — set proxy.enabled: true to enable")
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
@@ -137,11 +148,12 @@ func main() {
 	if err := charonSrv.Shutdown(shutdownCtx); err != nil {
 		log.Error("charon shutdown error", "err", err)
 	}
-	if err := proxySrv.Shutdown(shutdownCtx); err != nil {
-		log.Error("proxy shutdown error", "err", err)
+	if cfg.Proxy.Enabled {
+		if err := proxySrv.Shutdown(shutdownCtx); err != nil {
+			log.Error("proxy shutdown error", "err", err)
+		}
 	}
 
-	// Wait for background workers to finish their current sweep.
 	workerDone := make(chan struct{})
 	go func() { workerWG.Wait(); close(workerDone) }()
 	select {
@@ -153,7 +165,7 @@ func main() {
 }
 
 // runReconcile opens storage, runs a single write-intent recovery sweep, and exits.
-// Used as: charon reconcile --config config.yaml
+// Usage: charon reconcile --config config.yaml
 func runReconcile(log *slog.Logger, configPath string) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -166,9 +178,9 @@ func runReconcile(log *slog.Logger, configPath string) {
 		pay     storage.PayloadStore
 		cleanup func() error
 	)
-	switch cfg.Storage.Backend {
+	switch cfg.Charon.Storage.Backend {
 	case "sqlite":
-		idx, pay, cleanup, err = sqlitestore.Open(cfg.Storage, log)
+		idx, pay, cleanup, err = sqlitestore.Open(cfg.Charon.Storage, log)
 		if err != nil {
 			log.Error("open sqlite storage", "err", err)
 			os.Exit(1)
@@ -179,7 +191,9 @@ func runReconcile(log *slog.Logger, configPath string) {
 	}
 
 	ctx := context.Background()
-	r := worker.NewReconciler(idx, pay, log, cfg.Storage.WriteIntentStaleThreshold, cfg.Workers.RecoveryInterval)
+	r := worker.NewReconciler(idx, pay, log,
+		cfg.Charon.Storage.WriteIntentStaleThreshold,
+		cfg.Charon.Workers.RecoveryInterval)
 	r.RunOnce(ctx)
 	log.Info("reconcile sweep complete")
 }

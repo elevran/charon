@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -9,20 +10,20 @@ import (
 )
 
 // Config is the top-level application configuration.
+// All proxy concerns live under Proxy; all Charon concerns under Charon.
 type Config struct {
-	Server    ServerConfig    `json:"server"`
-	Charon    CharonConfig    `json:"charon"`
-	Storage   StorageConfig   `json:"storage"`
-	Workers   WorkerConfig    `json:"workers"`
-	Inference InferenceConfig `json:"inference"`
+	Proxy  ProxyConfig  `json:"proxy"`
+	Charon CharonConfig `json:"charon"`
 }
 
-// CharonConfig controls both the port Charon listens on and the URL the
-// proxy uses to reach it. In single-binary mode these point to localhost;
-// in multi-binary mode they point to the remote Charon instance.
-type CharonConfig struct {
-	Listen  string `json:"listen"`   // default ":8081"
-	BaseURL string `json:"base_url"` // default "http://127.0.0.1:8081"
+// ProxyConfig holds all proxy-side settings. When Enabled is false (the
+// default), the binary starts only the Charon internal API; no inference
+// client, no proxy HTTP server, and no Charon HTTP client are created.
+type ProxyConfig struct {
+	Enabled   bool            `json:"enabled"`    // default false — proxy is off unless explicitly enabled
+	Listen    string          `json:"listen"`     // default ":8080"
+	CharonURL string          `json:"charon_url"` // default auto-derived from Charon.Listen
+	Inference InferenceConfig `json:"inference"`
 }
 
 // InferenceConfig is the stateless Responses API inference backend.
@@ -32,37 +33,32 @@ type InferenceConfig struct {
 	BaseURL          string `json:"base_url"` // default "http://localhost:11434"
 	APIKey           string `json:"api_key"`
 	TimeoutSeconds   int    `json:"timeout_seconds"`    // default 120
-	StoreBufferBytes int    `json:"store_buffer_bytes"` // 0 = no buffering; default 65536
+	StoreBufferBytes int    `json:"store_buffer_bytes"` // 0 → 65536 (64 KB); -1 → flush every item
 }
 
-// ServerConfig holds HTTP server settings.
-type ServerConfig struct {
-	Listen string `json:"listen"`
+// CharonConfig holds all Charon-side settings.
+type CharonConfig struct {
+	Listen  string        `json:"listen"` // default ":8081"
+	Storage StorageConfig `json:"storage"`
+	Workers WorkerConfig  `json:"workers"`
 }
 
 // StorageConfig holds store-level settings.
 type StorageConfig struct {
-	CheckpointInterval        int           `json:"checkpoint_interval"`
-	TTLDays                   int           `json:"ttl_days"`
-	WriteIntentStaleThreshold time.Duration `json:"write_intent_stale_threshold"`
-	Backend                   string        `json:"backend"`  // "memory" (default) | "sqlite"
-	DataDir                   string        `json:"data_dir"` // default "./data"
-	SQLite                    SQLiteConfig  `json:"sqlite"`
-	// Caps — 0 means unbounded. Both are enforced independently; set one, the other is unconstrained.
+	Backend                   string        `json:"backend"`                      // "memory" (default) | "sqlite"
+	DataDir                   string        `json:"data_dir"`                     // default "./data"
+	CheckpointInterval        int           `json:"checkpoint_interval"`          // default 10
+	TTLDays                   int           `json:"ttl_days"`                     // default 30
+	WriteIntentStaleThreshold time.Duration `json:"write_intent_stale_threshold"` // default 5m
+	// Caps — 0 means unbounded.
 	MaxResponses    int64 `json:"max_responses"`     // max total responses in the index
 	MaxPayloadBytes int64 `json:"max_payload_bytes"` // max size of a single response payload blob
 }
 
-// SQLiteConfig holds SQLite-specific tuning knobs.
-type SQLiteConfig struct {
-	WALMode       bool `json:"wal_mode"`
-	BusyTimeoutMs int  `json:"busy_timeout_ms"`
-}
-
 // WorkerConfig holds background worker settings.
 type WorkerConfig struct {
-	TTLInterval      time.Duration `json:"ttl_interval"`
-	RecoveryInterval time.Duration `json:"recovery_interval"`
+	TTLInterval      time.Duration `json:"ttl_interval"`      // default 1h
+	RecoveryInterval time.Duration `json:"recovery_interval"` // default 5m
 }
 
 // Load reads config from path and applies defaults. If path is empty, returns defaults.
@@ -70,67 +66,79 @@ func Load(path string) (Config, error) {
 	var cfg Config
 	applyDefaults(&cfg)
 
-	if path == "" {
-		return cfg, nil
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return cfg, fmt.Errorf("read config: %w", err)
+		}
+		if err := yaml.UnmarshalStrict(data, &cfg); err != nil {
+			return cfg, fmt.Errorf("parse config: %w", err)
+		}
+		applyDefaults(&cfg)
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cfg, fmt.Errorf("read config: %w", err)
+	// Auto-derive proxy.charon_url from charon.listen if not explicitly set.
+	// Done after both applyDefaults passes so any user-supplied charon.listen is resolved first.
+	if cfg.Proxy.CharonURL == "" {
+		cfg.Proxy.CharonURL = deriveCharonURL(cfg.Charon.Listen)
 	}
-	if err := yaml.UnmarshalStrict(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parse config: %w", err)
-	}
-	applyDefaults(&cfg)
+
 	return cfg, nil
 }
 
 func applyDefaults(cfg *Config) {
-	if cfg.Server.Listen == "" {
-		cfg.Server.Listen = ":8080"
+	// Proxy defaults — Enabled stays false unless the user sets proxy.enabled: true
+	if cfg.Proxy.Listen == "" {
+		cfg.Proxy.Listen = ":8080"
 	}
-	if cfg.Storage.CheckpointInterval <= 0 {
-		cfg.Storage.CheckpointInterval = 10
+	if cfg.Proxy.Inference.BaseURL == "" {
+		cfg.Proxy.Inference.BaseURL = "http://localhost:11434"
 	}
-	if cfg.Storage.TTLDays <= 0 {
-		cfg.Storage.TTLDays = 30
+	if cfg.Proxy.Inference.TimeoutSeconds <= 0 {
+		cfg.Proxy.Inference.TimeoutSeconds = 120
 	}
-	if cfg.Storage.WriteIntentStaleThreshold <= 0 {
-		cfg.Storage.WriteIntentStaleThreshold = 5 * time.Minute
+	// StoreBufferBytes: 0 → 65536 (64 KB); -1 → immediate flush; N>0 → N bytes
+	if cfg.Proxy.Inference.StoreBufferBytes == 0 {
+		cfg.Proxy.Inference.StoreBufferBytes = 65536
 	}
-	if cfg.Storage.Backend == "" {
-		cfg.Storage.Backend = "memory"
-	}
-	if cfg.Storage.DataDir == "" {
-		cfg.Storage.DataDir = "./data"
-	}
-	if cfg.Storage.SQLite.BusyTimeoutMs <= 0 {
-		cfg.Storage.SQLite.BusyTimeoutMs = 5000
-	}
-	// WALMode defaults to false (DELETE journal); set wal_mode: true in config to enable WAL.
+
+	// Charon defaults
 	if cfg.Charon.Listen == "" {
 		cfg.Charon.Listen = ":8081"
 	}
-	if cfg.Charon.BaseURL == "" {
-		cfg.Charon.BaseURL = "http://127.0.0.1:8081"
+	if cfg.Charon.Storage.Backend == "" {
+		cfg.Charon.Storage.Backend = "memory"
 	}
-	if cfg.Inference.BaseURL == "" {
-		cfg.Inference.BaseURL = "http://localhost:11434"
+	if cfg.Charon.Storage.DataDir == "" {
+		cfg.Charon.Storage.DataDir = "./data"
 	}
-	if cfg.Inference.TimeoutSeconds <= 0 {
-		cfg.Inference.TimeoutSeconds = 120
+	if cfg.Charon.Storage.CheckpointInterval <= 0 {
+		cfg.Charon.Storage.CheckpointInterval = 10
 	}
-	// StoreBufferBytes:
-	//   0  (unset/default) → 65536 (64 KB flush threshold)
-	//  -1                  → no buffering: flush every output item immediately
-	//   N > 0              → flush when accumulated item JSON reaches N bytes
-	if cfg.Inference.StoreBufferBytes == 0 {
-		cfg.Inference.StoreBufferBytes = 65536
+	if cfg.Charon.Storage.TTLDays <= 0 {
+		cfg.Charon.Storage.TTLDays = 30
 	}
-	if cfg.Workers.TTLInterval <= 0 {
-		cfg.Workers.TTLInterval = time.Hour
+	if cfg.Charon.Storage.WriteIntentStaleThreshold <= 0 {
+		cfg.Charon.Storage.WriteIntentStaleThreshold = 5 * time.Minute
 	}
-	if cfg.Workers.RecoveryInterval <= 0 {
-		cfg.Workers.RecoveryInterval = 5 * time.Minute
+	if cfg.Charon.Workers.TTLInterval <= 0 {
+		cfg.Charon.Workers.TTLInterval = time.Hour
 	}
+	if cfg.Charon.Workers.RecoveryInterval <= 0 {
+		cfg.Charon.Workers.RecoveryInterval = 5 * time.Minute
+	}
+}
+
+// deriveCharonURL returns an HTTP URL for the Charon internal API from its
+// listen address. Wildcard hosts (empty, "0.0.0.0", "::") are replaced with
+// "127.0.0.1" so the proxy connects to localhost.
+func deriveCharonURL(charonListen string) string {
+	host, port, err := net.SplitHostPort(charonListen)
+	if err != nil {
+		return "http://127.0.0.1:8081"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
