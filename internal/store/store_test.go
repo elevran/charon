@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,9 +13,9 @@ import (
 	"github.com/openai/openai-go/responses"
 	"github.com/stretchr/testify/require"
 
+	"github.com/elevran/charon/internal/config"
 	"github.com/elevran/charon/internal/model"
 	"github.com/elevran/charon/internal/storage"
-	"github.com/elevran/charon/internal/storage/filesystem"
 	"github.com/elevran/charon/internal/storage/memory"
 	sqlitestore "github.com/elevran/charon/internal/storage/sqlite"
 	"github.com/elevran/charon/internal/store"
@@ -67,17 +66,14 @@ func TestSQLiteBackendConformance(t *testing.T) {
 		t.Skip("skipping SQLite conformance under -short")
 	}
 	runConformanceSuite(t, func(cfg store.Config) (*store.ContextStore, storage.IndexStore, storage.PayloadStore) {
-		dataDir := t.TempDir()
-		db, err := sqlitestore.Open(filepath.Join(dataDir, "responses.db"), sqlitestore.Config{WALMode: false})
-		require.NoError(t, err)
-		t.Cleanup(func() { sqlitestore.Close(db) })
-
-		pay, err := filesystem.New(filepath.Join(dataDir, "payloads"))
-		require.NoError(t, err)
-
-		idx, err := sqlitestore.NewIndexStore(db)
-		require.NoError(t, err)
+		storageCfg := config.StorageConfig{
+			DataDir: t.TempDir(),
+			SQLite:  config.SQLiteConfig{WALMode: false},
+		}
 		log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+		idx, pay, cleanup, err := sqlitestore.Open(storageCfg, log)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = cleanup() })
 		return store.New(idx, pay, cfg, log), idx, pay
 	})
 }
