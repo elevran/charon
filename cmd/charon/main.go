@@ -59,19 +59,20 @@ func main() {
 			log.Error("open sqlite", "path", dbPath, "err", err)
 			os.Exit(1)
 		}
-		defer sqlitestore.Close(db)
-
 		payDir := filepath.Join(cfg.Storage.DataDir, "payloads")
 		fsStore, err := filesystem.New(payDir)
 		if err != nil {
+			_ = sqlitestore.Close(db)
 			log.Error("open filesystem store", "dir", payDir, "err", err)
 			os.Exit(1)
 		}
 		sqlIdx, err := sqlitestore.NewIndexStore(db)
 		if err != nil {
+			_ = sqlitestore.Close(db)
 			log.Error("prepare sqlite statements", "err", err)
 			os.Exit(1)
 		}
+		defer func() { _ = sqlitestore.Close(db) }()
 		idx = sqlIdx
 		pay = fsStore
 	default: // "memory"
@@ -88,7 +89,7 @@ func main() {
 	reg := prometheus.NewRegistry()
 	if err := metrics.Register(reg, ""); err != nil {
 		log.Error("register metrics", "err", err)
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // exitAfterDefer: SQLite close is intentionally skipped on startup failure
 	}
 
 	// ── Charon internal API server (port 8081 by default) ──────────────────
@@ -99,7 +100,7 @@ func main() {
 	timeout := time.Duration(cfg.Inference.TimeoutSeconds) * time.Second
 	infClient := inference.New(cfg.Inference.BaseURL, cfg.Inference.APIKey, timeout)
 	charonClient := charonpkg.New(cfg.Charon.BaseURL, timeout)
-	proxyH := proxy.NewHandler(charonClient, infClient, log)
+	proxyH := proxy.NewHandler(charonClient, infClient, log, cfg.Inference.StoreBufferBytes)
 	proxyMux := http.NewServeMux()
 	proxy.RegisterHandlers(proxyMux, proxyH)
 	proxySrv := api.NewServerFromMux(cfg.Server.Listen, proxyMux, log)

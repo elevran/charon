@@ -130,6 +130,37 @@ func (h *Handler) HandleRetrieve(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleAppendChunk handles PATCH /responses/{id}.
+// Body type "chunk" appends output items to the in-progress stream stage.
+// Body type "commit" finalises the stream and commits the response to storage.
+func (h *Handler) HandleAppendChunk(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req model.ChunkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	var err error
+	switch req.Type {
+	case "chunk":
+		err = h.svc.AppendChunk(r.Context(), id, req.Seq, req.Items)
+	case "commit":
+		err = h.svc.CommitStream(r.Context(), id, req)
+	default:
+		writeError(w, http.StatusBadRequest, "unknown chunk type: must be 'chunk' or 'commit'")
+		return
+	}
+	if err != nil {
+		status, msg := mapStatus(err)
+		if status == http.StatusInternalServerError {
+			h.log.Error("append chunk", "id", id, "type", req.Type, "err", err)
+		}
+		writeError(w, status, msg)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // HandleDelete handles DELETE /responses/{id}.
 func (h *Handler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

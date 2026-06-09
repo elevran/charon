@@ -14,7 +14,7 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: func(_ *http.Request) bool { return true },
 }
 
 // wsCache stores store:false responses for a single WebSocket connection.
@@ -86,7 +86,7 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		h.log.Error("ws upgrade", "err", err)
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	cache := newWSCache()
 	ctx, cancel := context.WithCancel(r.Context())
@@ -171,6 +171,26 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 	var sentCreated bool
 	var finalInfResp *inference.Response
 
+	var sw *charon.StreamWriter
+	buf := &streamBuffer{}
+
+	flushToCharonWS := func() {
+		if !msg.ShouldStore() || canonicalID == "" {
+			buf.drain()
+			return
+		}
+		items := buf.drain()
+		if len(items) == 0 {
+			return
+		}
+		if sw == nil {
+			sw = h.charon.NewStreamWriter(ctx, canonicalID)
+		}
+		if err := sw.Append(items); err != nil {
+			h.log.Error("ws charon stream append", "id", canonicalID, "err", err)
+		}
+	}
+
 	for evt := range ch {
 		if evt.Response != nil && evt.Response.ID != "" && canonicalID == "" {
 			canonicalID = evt.Response.ID
@@ -195,6 +215,10 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 		case "response.output_item.done":
 			h.wsSend(conn, sseEvent{Type: evt.Type, SequenceNumber: seq, OutputIndex: &outIdx, Item: evt.Item})
 			seq++
+			buf.add(evt.Item)
+			if buf.shouldFlush(h.storeBufferBytes) {
+				flushToCharonWS()
+			}
 		case "response.completed":
 			finalInfResp = evt.Response
 		}
@@ -205,19 +229,38 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 	}
 
 	if msg.ShouldStore() {
-		storeReq := charon.StoreRequest{
-			ReservationID:      reservationID,
-			PreviousResponseID: msg.PreviousResponseID,
-			Input:              inputItems,
-			Output:             finalInfResp.Output,
-			Status:             finalInfResp.Status,
-			Model:              finalInfResp.Model,
+		var usage json.RawMessage
+		if finalInfResp.Usage != nil {
+			usage, _ = json.Marshal(finalInfResp.Usage)
 		}
-		if err := h.charon.Store(ctx, canonicalID, storeReq); err != nil {
-			h.log.Error("ws charon store", "id", canonicalID, "err", err)
+		if sw != nil {
+			if err := sw.Commit(charon.CommitRequest{
+				ReservationID:      reservationID,
+				PreviousResponseID: msg.PreviousResponseID,
+				Input:              inputItems,
+				FinalItems:         buf.drain(),
+				Usage:              usage,
+				Status:             finalInfResp.Status,
+				Model:              finalInfResp.Model,
+			}); err != nil {
+				h.log.Error("ws charon stream commit", "id", canonicalID, "err", err)
+			}
+		} else {
+			storeReq := charon.StoreRequest{
+				ReservationID:      reservationID,
+				PreviousResponseID: msg.PreviousResponseID,
+				Input:              inputItems,
+				Output:             buf.drain(),
+				Usage:              usage,
+				Status:             finalInfResp.Status,
+				Model:              finalInfResp.Model,
+			}
+			if err := h.charon.Store(ctx, canonicalID, storeReq); err != nil {
+				h.log.Error("ws charon store", "id", canonicalID, "err", err)
+			}
 		}
 	} else {
-		// Cache the assembled flat_context for subsequent turns on this connection.
+		// store:false — cache assembled flat_context for subsequent turns.
 		newCtx := make([]json.RawMessage, 0, len(flatCtx)+len(inputItems)+len(finalInfResp.Output))
 		newCtx = append(newCtx, flatCtx...)
 		newCtx = append(newCtx, inputItems...)

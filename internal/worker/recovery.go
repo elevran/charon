@@ -46,6 +46,12 @@ func (w *Reconciler) Run(ctx context.Context) {
 	}
 }
 
+// RunOnce performs a single recovery sweep and returns.
+// Useful in tests and for the charon reconcile subcommand.
+func (w *Reconciler) RunOnce(ctx context.Context) {
+	w.sweep(ctx)
+}
+
 func (w *Reconciler) sweep(ctx context.Context) {
 	intents, err := w.index.ListStaleWriteIntents(ctx, w.stale)
 	if err != nil {
@@ -59,6 +65,16 @@ func (w *Reconciler) sweep(ctx context.Context) {
 
 func (w *Reconciler) recover(ctx context.Context, intent model.WriteIntent) {
 	switch intent.Phase {
+	case model.WriteIntentCommitted, model.WriteIntentFailed:
+		// Already in a terminal state; ListStaleWriteIntents should not return these,
+		// but guard against any race with the Reconciler's own UpdateWriteIntent calls.
+
+	case model.WriteIntentStreamOpen:
+		// Proxy crashed mid-stream; in-memory staged chunks are lost.
+		w.log.Warn("recovery: stream_open intent lost (proxy crashed mid-stream)", "response_id", intent.ResponseID)
+		_ = w.index.UpdateWriteIntent(ctx, intent.IntentID, model.WriteIntentFailed)
+		metrics.WriteIntentFailuresTotal.Inc()
+
 	case model.WriteIntentPending:
 		w.log.Warn("recovery: pending intent lost", "response_id", intent.ResponseID)
 		_ = w.index.UpdateWriteIntent(ctx, intent.IntentID, model.WriteIntentFailed)
