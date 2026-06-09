@@ -68,6 +68,35 @@ func (m *MockServer) writeComplete(w http.ResponseWriter, id string, item json.R
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// NewPartialMockServer creates a mock that closes the inference stream after
+// emitting response.created, simulating a mid-stream backend failure (no
+// response.completed is ever delivered).
+func NewPartialMockServer() *MockServer {
+	m := &MockServer{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /responses", func(w http.ResponseWriter, r *http.Request) {
+		id := m.nextID()
+		m.writePartialStream(w, id)
+	})
+	m.Server = httptest.NewServer(mux)
+	return m
+}
+
+func (m *MockServer) writePartialStream(w http.ResponseWriter, id string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	f := w.(http.Flusher)
+
+	inProgressResp := Response{ID: id, Status: "in_progress", Model: "mock", Output: []json.RawMessage{}}
+	evt := SSEEvent{Type: "response.created", SequenceNumber: 0, Response: &inProgressResp}
+	b, _ := json.Marshal(evt)
+	fmt.Fprintf(w, "data: %s\n\n", b)
+	f.Flush()
+	// Return without response.completed — handler exit closes the response body,
+	// which signals the inference client's SSE reader goroutine to stop.
+}
+
 func (m *MockServer) writeStream(w http.ResponseWriter, id string, item json.RawMessage, usage *UsageInfo) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
