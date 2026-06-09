@@ -10,7 +10,8 @@ Charon bridges this gap. It is an internal service that:
 2. Returns that context (plus a new response ID) to the caller before inference
 3. Accepts the completed inference output for durable storage after inference
 
-Charon is **not** the client-facing API layer. It is called by a proxy that owns the client surface.
+Charon is **not** the client-facing API layer. It is called by a proxy that owns the
+client surface (e.g., `/v1/responses/` API).
 
 ---
 
@@ -19,18 +20,20 @@ Charon is **not** the client-facing API layer. It is called by a proxy that owns
 ```
 Client
   ↓  OpenAI Responses API (HTTP / SSE / WebSocket)
-Proxy
-  ↓  GET /responses/{id}/context     ← continuation only; new chains skip this
-  ↓  (returns flat_context + new response_id)
-Charon
-  ↓
-Inference Backend (OpenAI-compatible, stateless)
-  ↓
+Proxy ──────────────────────────────────────► Charon
+  │  GET /responses/{id}/context (resolve)      (context resolution + storage)
+  │  POST /responses/{id}        (store)
+  │
+  ↓  stateless Responses API (full flat_context as input)
+Inference Backend (OpenAI-compatible)
+  │  returns response with canonical ID
+  ↑
 Proxy streams output back to client
-  ↓  POST /responses/{response_id}   ← skipped if store=false
-  ↓  (write-intent + payload commit)
-Charon
 ```
+
+Proxy and Charon are **peers**: the proxy calls Charon to resolve prior context before
+inference and to store results after inference. The proxy calls the inference backend
+directly — Charon is never in the inference call path.
 
 ### Proxy
 
@@ -41,6 +44,22 @@ The proxy owns all client-facing concerns:
 - Connection-local ephemeral cache for `store: false` responses (WebSocket sessions)
 - Request validation and routing
 - Streaming inference output back to the client
+
+### Charon
+
+Charon owns storage and resolution:
+
+- Resolves `previous_response_id` chains into flat `[]Item` context arrays
+- Assigns reservation IDs for write-intent correlation; canonical response IDs are assigned by the inference server
+- Persists response payloads (input items, output items) to durable storage
+- Manages write-intent safety across the index and payload stores
+- Runs background workers: TTL expiry, write-intent recovery
+
+Charon does **not** own: SSE, WebSocket, auth, TLS, model routing, or `store: false` semantics.
+
+---
+
+### Proxy–Charon interaction
 
 The proxy calls Charon differently depending on whether this is a new chain or a continuation:
 
@@ -59,18 +78,6 @@ The proxy calls Charon differently depending on whether this is a new chain or a
 If inference fails before the canonical ID is known (no data returned at all), the proxy uses the `reservation_id` as the fallback response ID and calls `POST /responses/{reservation_id}` with `status: "failed"`. If the canonical ID was already received, the proxy uses it.
 
 If `store: false` is set, the proxy skips the store call entirely. No write-intent is ever created. The `store: false` flag is a proxy-level concern; Charon is unaware of it.
-
-### Charon
-
-Charon owns storage and resolution:
-
-- Resolves `previous_response_id` chains into flat `[]Item` context arrays
-- Assigns reservation IDs for write-intent correlation; canonical response IDs are assigned by the inference server
-- Persists response payloads (input items, output items) to durable storage
-- Manages write-intent safety across the index and payload stores
-- Runs background workers: TTL expiry, write-intent recovery
-
-Charon does **not** own: SSE, WebSocket, auth, TLS, model routing, or `store: false` semantics.
 
 ---
 
@@ -95,23 +102,19 @@ Application logic calls only these interfaces. Concrete backends are injected at
 
 | Deployment level | IndexStore | PayloadStore |
 |-----------------|------------|--------------|
+| Memory only (testing) | In-memory | In-memory |
 | Single binary   | SQLite     | Local filesystem |
 | Multi-instance  | PostgreSQL | MinIO / S3   |
 
 The binary is identical across all levels. Only configuration changes.
 
-### 3. Tokens, not KV cache
+### 3. User Inputs, not KV cache
 
 The storage layer persists conversation history as serialized items (text, tool calls, tool outputs). It does not attempt to persist the inference engine's KV cache.
 
-The expansion factor makes KV cache storage impractical:
+The expansion factor makes KV cache storage impractical (three orders of magnitude expansion).
 
-| Model | KV cache per token (FP16) | Expansion vs. token |
-|-------|--------------------------|---------------------|
-| Llama 3 8B | ~128 KB | ~65,000× |
-| Llama 3 70B | ~320 KB | ~163,000× |
-
-Tokens are portable across model versions and inference backends. KV caches are GPU-memory-bound and model-version-specific.
+Alternative: Tokens are portable across model versions and inference backends and could potentially be used instead.
 
 ---
 
@@ -138,11 +141,15 @@ The proxy appends the new request's `input[]` to the flat context before forward
 
 **Implementation strategies:**
 
-| Strategy | Write cost | Read cost | Notes |
-|----------|-----------|-----------|-------|
-| Delta-per-response | O(1) | O(N) — walk chain | Storage efficient; latency grows with chain depth |
-| Full-snapshot-per-response | O(N) | O(1) — single fetch | Write amplification; simplest reads |
-| Checkpoint every K turns | O(1) amortized | O(K) — walk at most K steps | Practical tradeoff |
+| Strategy | Write cost | Read cost | Storage cost | Notes |
+|----------|-----------|-----------|--------------|-------|
+| Entry-per-response | O(1) | O(N) — walk chain | O(N) total | Storage efficient; latency grows with chain depth |
+| Full-snapshot-per-response | O(N) | O(1) — single fetch | O(N²) total | Write amplification; simplest reads |
+| Checkpoint every K turns | O(1) amortized | O(K) — 1 checkpoint + ≤K deltas | O(N²/K) total | Trades storage for bounded read latency |
+
+Read cost for the checkpoint strategy is O(K), not O(log N): the nearest checkpoint is always within K steps of the head by construction, regardless of total chain length N. Only the K-step tail walk is needed; the checkpoint itself is a single self-contained fetch.
+
+Each checkpoint blob is **cumulative** — it contains all turns from chain root to its position. The checkpoint at position nK holds nK payloads, not just the K new turns since the last checkpoint. There is no back-reference between checkpoints. This means total checkpoint storage grows as K + 2K + ... + (N/K)·K ≈ N²/(2K). With K=10 and a 1000-turn chain, checkpoint storage is roughly 50× the delta storage — the cost paid for O(K) reads without chaining checkpoint blobs.
 
 Charon uses the checkpoint strategy. See [storage design](storage.md) for details.
 
@@ -154,7 +161,8 @@ Charon exposes an internal HTTP API consumed only by the proxy. It is **not** re
 
 The two read endpoints reflect two distinct proxy needs:
 
-- **Resolve** (`GET /responses/{id}/context`): the proxy is about to call inference and needs the assembled chain as a flat context. Requires a full chain walk (up to K steps with checkpoints), multiple payload reads, and a new minted response_id. Called before every continuation inference turn.
+- **Resolve** (`GET /responses/{id}/context`): the proxy is about to call inference and needs the assembled chain as a flat context. Requires a full chain walk (up to K steps with checkpoints), multiple payload reads, and a new minted `reservation_id` for the upcoming response. Called before every continuation inference turn. The inference backend
+returns the real response ID that can be used in future requests.
 
 - **Retrieve** (`GET /responses/{id}`): the proxy is serving a client read request (`GET /responses/{id}` on the client-facing API). The client wants that specific turn's stored data — input items, output items, usage, status. No chain walk. No new ID. Only that one record. Using resolve here would walk the entire chain and mint a wasted ID.
 
@@ -173,7 +181,7 @@ Response:
 
 `flat_context` is the assembled history (all prior input/output items). The proxy appends the new `input[]` before forwarding to the inference backend. The canonical response ID is assigned by the inference server in its first streaming chunk or response body — the proxy uses that ID in the `response.created` event to the client and in the subsequent store call.
 
-New chains skip this call — the proxy calls inference directly and uses the inference-server-assigned ID for the store call.
+New chains skip this call — the proxy calls inference directly and uses the ID assigned by the inference server for the store call.
 
 ### Store: `POST /responses/{id}`
 
@@ -284,6 +292,8 @@ Transfer-Encoding: chunked
 
 Write-intent phases for chunked mode: `stream_open` → (chunks accumulating) → `committed` | `failed`. The recovery worker identifies streams stale beyond the threshold and marks them `failed`, preserving any partially written chunks for debugging.
 
+**Seq field and ordering**: each `PATCH` chunk carries a `seq` integer (0-based). Charon stores chunks indexed by seq and sorts at commit time. This allows the proxy to dispatch chunk writes from concurrent goroutines without requiring arrival order — each goroutine is assigned a seq before being spawned. The proxy does not call commit until all chunk writes have returned successfully, so Charon always has a complete set of chunks by the time it assembles the payload. Gaps (a chunk seq with no corresponding PATCH) indicate a dropped request; the proxy must retry that chunk before committing.
+
 **Chunk size trade-offs:**
 
 | Chunk size | Peak proxy memory | Charon write ops | Durability boundary |
@@ -340,26 +350,41 @@ Charon has no knowledge of `store: false`. Because write-intents are created onl
 
 ## Scaling Path
 
-**Level 1 — Single binary** (dev, low-volume production)
+Proxy and Charon are always separate services in production — they run in separate processes, typically on separate hosts. Colocation in the same binary is provided only for testing purposes (conformance, compliance, and development iteration).
+
+**Memory only** (conformance and compliance testing)
+- IndexStore: in-memory
+- PayloadStore: in-memory
+- No persistence across restarts; suitable for running the openresponses.org compliance suite and integration tests
+
+**Single binary** (development and compliance testing)
 - IndexStore: embedded SQLite (no external process)
 - PayloadStore: local filesystem
-- Proxy and Charon colocated in the same binary
+- Proxy and Charon in the same process on `:8080` (proxy) and `:8081` (Charon internal API)
+- Not intended for production; data survives restarts but there is no horizontal scaling
 
-**Level 2 — Networked storage** (multi-instance proxy)
+**Production — single Charon instance**
+- Proxy and Charon run as separate services (separate hosts or containers)
 - IndexStore: PostgreSQL
-- PayloadStore: shared filesystem or object store (MinIO/S3)
-- Multiple proxy instances, shared Charon and storage backend
+- PayloadStore: object store (MinIO/S3)
+- Multiple proxy instances share one Charon service; Charon is the single source of truth for chain state
 
-**Level 3 — Fully distributed** (high throughput)
-- IndexStore: PostgreSQL with connection pooling
-- PayloadStore: distributed object store (MinIO cluster, S3)
-- Horizontal proxy and Charon scaling behind a load balancer
+**Production — scaled Charon**
+- Same as above but Charon itself is horizontally scaled behind a load balancer
+- Requires distributed locking or sharding for write-intent safety across Charon instances
+- IndexStore: PostgreSQL with connection pooling (write-intent coordination via advisory locks or row-level locking)
+- PayloadStore: distributed object store (MinIO cluster or S3)
+
+The distinction between the last two levels is whether Charon is a single bottleneck or itself scaled. Most deployments start with a single Charon instance and scale it only when write throughput is measurably constrained.
 
 ---
 
 ## What This Design Does Not Solve
 
-- **Durable KV cache across restarts**: The inference backend's KV cache is in-GPU-memory only. A restart drops the cache, incurring re-prefill cost. This is an infrastructure-level concern orthogonal to Charon's design.
-- **Semantic compaction**: Charon stores the literal content of every turn. Automatic semantic summarization is not part of the core design but is explicitly enabled by the `/responses/compact` endpoint for caller-driven compaction.
-- **Chunked streaming store**: Phase 1 uses fully-buffered mode (single `POST` after inference completes). Chunked delivery — from N-token batches down to single-token granularity — reduces peak proxy memory and improves partial-recovery granularity but requires a streaming ingest protocol in Charon. See [Streaming Store Modes](#streaming-store-modes) for the full design.
-- **DAG history (branching conversations)**: The spec allows `previous_response_id` to form a DAG. Charon's storage design accommodates this structurally, but tree-shaped retrieval paths are not optimized.
+- **Durable KV cache across restarts**: The inference backend's KV cache is out of scope. This is an infrastructure-level concern orthogonal to Charon's design.
+
+- **Semantic compaction**: Charon stores the literal content of every turn verbatim. Semantic summarization — collapsing prior turns into a shorter representation — is a proxy concern, not a Charon concern. When the proxy calls `POST /responses/compact`, it sends the turns to be compacted to the inference backend, which returns a `compaction` item with opaque `encrypted_content`. The proxy then stores this compaction item via the normal Charon store path. Charon stores the compaction item verbatim alongside the other items in the chain; it does not drop or rewrite prior entries. Which responses to compact and what to do with the resulting item are decisions made by the proxy or the calling application.
+
+- **DAG history (branching conversations)**: The spec allows `previous_response_id` to form a DAG (two responses can share the same parent). Charon's storage design accommodates this structurally — the `chain_root_id` + `position` denormalisation and checkpoint blobs are keyed per chain, and separate branches simply produce separate keys. However, retrieving context from a non-linear DAG path is not specially optimised: each branch is walked independently, and there is no shared-prefix cache across branches. If DAG usage becomes common, branch-aware checkpoint sharing and a prefix cache would reduce redundant reads.
+
+- **Chunked streaming store**: Implemented. The proxy delivers output to Charon in configurable-size batches via `PATCH /responses/{id}` as inference tokens arrive. See [Streaming Store Modes](#streaming-store-modes).
