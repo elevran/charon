@@ -13,7 +13,7 @@ import (
 //   - id: "resp_" + 32 hex zero-padded counter (unique per request)
 //   - status: "completed"
 //   - output: [{type:"message",role:"assistant",status:"completed",
-//              content:[{type:"output_text",text:"OK."}]}]
+//     content:[{type:"output_text",text:"OK."}]}]
 //
 // Streaming emits the standard SSE event sequence for the same response.
 type MockServer struct {

@@ -12,11 +12,11 @@ import (
 
 // sseEvent is the wire format of a single SSE event.
 type sseEvent struct {
-	Type           string           `json:"type"`
-	SequenceNumber int              `json:"sequence_number"`
+	Type           string            `json:"type"`
+	SequenceNumber int               `json:"sequence_number"`
 	Response       *ResponseResource `json:"response,omitempty"`
-	OutputIndex    *int             `json:"output_index,omitempty"`
-	Item           json.RawMessage  `json:"item,omitempty"`
+	OutputIndex    *int              `json:"output_index,omitempty"`
+	Item           json.RawMessage   `json:"item,omitempty"`
 }
 
 // writeSSE writes a single SSE event and flushes. The connection must support

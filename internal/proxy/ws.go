@@ -61,7 +61,7 @@ func (m *wsCreateMsg) ShouldStore() bool { return m.Store == nil || *m.Store }
 
 // wsErrorEvent is sent to the client when an error occurs at the protocol level.
 type wsErrorEvent struct {
-	Type   string         `json:"type"`  // "error"
+	Type   string         `json:"type"` // "error"
 	Status int            `json:"status"`
 	Error  *ResponseError `json:"error"`
 }
@@ -287,4 +287,3 @@ func hasOrphanedFunctionCallOutput(inputItems, flatCtx []json.RawMessage) bool {
 	}
 	return false
 }
-

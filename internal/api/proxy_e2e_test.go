@@ -128,9 +128,9 @@ func TestProxyNewChain(t *testing.T) {
 
 // TestProxyMultiTurnChain validates the full proxy loop across three turns:
 //
-//   proxy loop per turn:
-//     1. GET /responses/{prev_id}/context  → mint new id + flat_context
-//     2. POST /responses/{new_id}          → store result
+//	proxy loop per turn:
+//	  1. GET /responses/{prev_id}/context  → mint new id + flat_context
+//	  2. POST /responses/{new_id}          → store result
 //
 // After each turn the flat_context must grow by exactly 2 items (1 input + 1 output).
 func TestProxyMultiTurnChain(t *testing.T) {
