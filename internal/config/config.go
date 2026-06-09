@@ -37,7 +37,8 @@ type InferenceConfig struct {
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
-	Listen string `json:"listen"`
+	Listen       string `json:"listen"`
+	ProxyEnabled *bool  `json:"proxy_enabled"` // nil / true = start proxy (default); false = Charon internal API only
 }
 
 // StorageConfig holds store-level settings.
