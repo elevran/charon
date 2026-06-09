@@ -60,7 +60,7 @@ func startStack(t *testing.T, idx storage.IndexStore, pay storage.PayloadStore, 
 	charonH := apihandler.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
 	apihandler.RegisterHandlers(charonMux, charonH)
-	charonSrv := httptest.NewServer(apihandler.WrapH2c(charonMux))
+	charonSrv := httptest.NewServer(charonMux)
 	t.Cleanup(charonSrv.Close)
 
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)

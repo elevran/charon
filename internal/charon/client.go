@@ -3,18 +3,14 @@ package charon
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/net/http2"
 )
 
 // StoreRequest is the body of POST /responses/{id} on Charon's internal API.
@@ -167,20 +163,10 @@ type Client struct {
 }
 
 // New creates a Client targeting baseURL (e.g. "http://127.0.0.1:8081").
-// The client uses an HTTP/2 cleartext (H2c) transport so that concurrent
-// PATCH chunk requests multiplex over a single TCP connection without
-// head-of-line blocking. Falls back to HTTP/1.1 automatically if the server
-// does not support H2c.
 func New(baseURL string, timeout time.Duration) *Client {
-	h2transport := &http2.Transport{
-		AllowHTTP: true, // allow H2c (cleartext, no TLS)
-		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			return (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, addr)
-		},
-	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		http:    &http.Client{Transport: h2transport, Timeout: timeout},
+		http:    &http.Client{Timeout: timeout},
 	}
 }
 

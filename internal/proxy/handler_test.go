@@ -39,7 +39,7 @@ func startStack(t *testing.T) *stack {
 	charonH := apihandler.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
 	apihandler.RegisterHandlers(charonMux, charonH)
-	charonSrv := httptest.NewServer(apihandler.WrapH2c(charonMux))
+	charonSrv := httptest.NewServer(charonMux)
 	t.Cleanup(charonSrv.Close)
 
 	// Mock inference

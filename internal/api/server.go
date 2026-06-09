@@ -8,8 +8,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 // Server wraps net/http.Server.
@@ -37,27 +35,11 @@ func RegisterHandlers(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("DELETE /responses/{id}", h.HandleDelete)
 }
 
-// WrapH2c wraps a handler with H2c support (HTTP/2 cleartext).
-// Use this when creating an httptest.NewServer for the Charon internal API
-// so that tests match the production server behaviour; the charon.Client
-// uses an H2c transport by default.
-func WrapH2c(handler http.Handler) http.Handler {
-	return h2c.NewHandler(handler, &http2.Server{})
-}
-
-// newServer is the shared constructor. It wraps handler in the middleware
-// stack and in an h2c.Handler so that the Charon internal API and proxy
-// both accept HTTP/2 cleartext (H2c) in addition to HTTP/1.1.
-//
-// H2c allows the proxy to multiplex concurrent PATCH /responses/{id} chunk
-// requests over a single TCP connection without head-of-line blocking.
-// Go's net/http.Client automatically upgrades to H2 when the server supports
-// it — no API surface change required.
+// newServer is the shared constructor.
 func newServer(addr string, handler http.Handler) *Server {
-	h2s := &http2.Server{}
 	return &Server{srv: &http.Server{
 		Addr:         addr,
-		Handler:      h2c.NewHandler(handler, h2s),
+		Handler:      handler,
 		ReadTimeout:  35 * time.Second,
 		WriteTimeout: 35 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -65,14 +47,13 @@ func newServer(addr string, handler http.Handler) *Server {
 }
 
 // NewServerFromMux builds a Server wrapping a pre-configured mux with the
-// standard middleware stack (recovery, request logging, timeout) and H2c.
+// standard middleware stack (recovery, request logging, timeout).
 func NewServerFromMux(addr string, mux *http.ServeMux, log *slog.Logger) *Server {
 	handler := Chain(mux, Recovery(log), RequestLogger(log), Timeout(30*time.Second))
 	return newServer(addr, handler)
 }
 
-// NewServerWithRegistry builds a Server with a custom prometheus Gatherer for
-// /metrics and H2c support.
+// NewServerWithRegistry builds a Server with a custom prometheus Gatherer for /metrics.
 func NewServerWithRegistry(addr string, h *Handler, log *slog.Logger, reg prometheus.Gatherer) *Server {
 	mux := http.NewServeMux()
 	RegisterHandlers(mux, h)

@@ -55,7 +55,7 @@ func startStackWithBuffer(t testing.TB, bufferBytes int) *testStack {
 	charonH := apihandler.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
 	apihandler.RegisterHandlers(charonMux, charonH)
-	charonSrv := httptest.NewServer(apihandler.WrapH2c(charonMux))
+	charonSrv := httptest.NewServer(charonMux)
 	t.Cleanup(charonSrv.Close)
 
 	mockInf := inference.NewMockServer()
