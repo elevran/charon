@@ -19,17 +19,50 @@ type sseEvent struct {
 	Item           json.RawMessage   `json:"item,omitempty"`
 }
 
-// writeSSE writes a single SSE event and flushes. The connection must support
-// http.Flusher (all Go HTTP response writers do in practice).
+// writeSSE writes a single SSE event and flushes.
 func writeSSE(w http.ResponseWriter, evt sseEvent) {
 	b, _ := json.Marshal(evt)
-	fmt.Fprintf(w, "data: %s\n\n", b)
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
+// streamBuffer accumulates bare output item JSON (SSE framing already stripped)
+// and decides when to flush to Charon.
+type streamBuffer struct {
+	items      []json.RawMessage
+	totalBytes int
+}
+
+func (b *streamBuffer) add(item json.RawMessage) {
+	b.items = append(b.items, item)
+	b.totalBytes += len(item)
+}
+
+// shouldFlush returns true when the buffer is non-empty and either:
+//   - limitBytes == -1 (no buffering: flush every item), or
+//   - limitBytes > 0 and accumulated bytes have reached the threshold.
+func (b *streamBuffer) shouldFlush(limitBytes int) bool {
+	if len(b.items) == 0 {
+		return false
+	}
+	return limitBytes < 0 || b.totalBytes >= limitBytes
+}
+
+func (b *streamBuffer) drain() []json.RawMessage {
+	items := b.items
+	b.items = nil
+	b.totalBytes = 0
+	return items
+}
+
 // handleStream implements POST /responses with stream:true.
+//
+// Output items are extracted from response.output_item.done events (bare item
+// JSON, SSE framing stripped) and forwarded to Charon in batches controlled
+// by h.storeBufferBytes. The client receives all SSE events in real-time
+// regardless of buffering mode.
 //
 // Event sequence emitted to client:
 //
@@ -68,23 +101,37 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 		return
 	}
 
-	// Set SSE headers before writing any body.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	seq := 0
+	outIdx := 0
 	var canonicalID string
+	var created bool
 	var finalInfResp *inference.Response
 
-	// Emit response.created with a placeholder — we don't have the ID yet.
-	// We'll use the ID from the first event.
-	var created bool
+	var sw *charon.StreamWriter // created lazily on first store flush
+	buf := &streamBuffer{}
 
-	outIdx := 0
+	flushToCharon := func() {
+		if !req.ShouldStore() || canonicalID == "" {
+			buf.drain() // store:false — discard staged chunks
+			return
+		}
+		items := buf.drain()
+		if len(items) == 0 {
+			return
+		}
+		if sw == nil {
+			sw = h.charon.NewStreamWriter(ctx, canonicalID)
+		}
+		if err := sw.Append(items); err != nil {
+			h.log.Error("charon stream append", "id", canonicalID, "err", err)
+		}
+	}
 
 	for evt := range ch {
-		// On first event we learn the canonical ID.
 		if evt.Response != nil && evt.Response.ID != "" && canonicalID == "" {
 			canonicalID = evt.Response.ID
 		}
@@ -103,21 +150,19 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 
 		switch evt.Type {
 		case "response.output_item.added":
-			writeSSE(w, sseEvent{
-				Type:           "response.output_item.added",
-				SequenceNumber: seq,
-				OutputIndex:    &outIdx,
-				Item:           evt.Item,
-			})
+			writeSSE(w, sseEvent{Type: evt.Type, SequenceNumber: seq, OutputIndex: &outIdx, Item: evt.Item})
 			seq++
+
 		case "response.output_item.done":
-			writeSSE(w, sseEvent{
-				Type:           "response.output_item.done",
-				SequenceNumber: seq,
-				OutputIndex:    &outIdx,
-				Item:           evt.Item,
-			})
+			// Forward to client immediately (no buffering of client events).
+			writeSSE(w, sseEvent{Type: evt.Type, SequenceNumber: seq, OutputIndex: &outIdx, Item: evt.Item})
 			seq++
+			// Buffer bare item JSON for Charon (SSE envelope stripped).
+			buf.add(evt.Item)
+			if buf.shouldFlush(h.storeBufferBytes) {
+				flushToCharon()
+			}
+
 		case "response.completed":
 			finalInfResp = evt.Response
 		}
@@ -128,16 +173,38 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 	}
 
 	if req.ShouldStore() && canonicalID != "" {
-		storeReq := charon.StoreRequest{
-			ReservationID:      reservationID,
-			PreviousResponseID: req.PreviousResponseID,
-			Input:              inputItems,
-			Output:             finalInfResp.Output,
-			Status:             finalInfResp.Status,
-			Model:              finalInfResp.Model,
+		var usage json.RawMessage
+		if finalInfResp.Usage != nil {
+			usage, _ = json.Marshal(finalInfResp.Usage)
 		}
-		if err := h.charon.Store(ctx, canonicalID, storeReq); err != nil {
-			h.log.Error("charon store after stream", "id", canonicalID, "err", err)
+		if sw != nil {
+			// Streaming path: commit with any remaining buffered items.
+			if err := sw.Commit(charon.CommitRequest{
+				ReservationID:      reservationID,
+				PreviousResponseID: req.PreviousResponseID,
+				Input:              inputItems,
+				FinalItems:         buf.drain(),
+				Usage:              usage,
+				Status:             finalInfResp.Status,
+				Model:              finalInfResp.Model,
+			}); err != nil {
+				h.log.Error("charon stream commit", "id", canonicalID, "err", err)
+			}
+		} else {
+			// No mid-stream flushes happened (output fit within buffer).
+			// Use a single Store call — no streaming overhead.
+			storeReq := charon.StoreRequest{
+				ReservationID:      reservationID,
+				PreviousResponseID: req.PreviousResponseID,
+				Input:              inputItems,
+				Output:             buf.drain(),
+				Usage:              usage,
+				Status:             finalInfResp.Status,
+				Model:              finalInfResp.Model,
+			}
+			if err := h.charon.Store(ctx, canonicalID, storeReq); err != nil {
+				h.log.Error("charon store after stream", "id", canonicalID, "err", err)
+			}
 		}
 	}
 

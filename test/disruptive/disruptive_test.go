@@ -65,7 +65,7 @@ func startStack(t *testing.T, idx storage.IndexStore, pay storage.PayloadStore, 
 
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)
 	infClient := inference.New(infSrv.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log)
+	proxyH := proxy.NewHandler(charonClient, infClient, log, 0)
 	proxyMux := http.NewServeMux()
 	proxy.RegisterHandlers(proxyMux, proxyH)
 	proxySrv := httptest.NewServer(proxyMux)

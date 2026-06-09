@@ -69,7 +69,7 @@ func NewIndexStore(db *sqlx.DB) (*IndexStore, error) {
 		}
 		st, e := db.Prepare(q)
 		if e != nil {
-			err = fmt.Errorf("prepare %q: %w", q[:min(len(q), 40)], e)
+			err = fmt.Errorf("prepare %q: %w", q[:minInt(len(q), 40)], e)
 		}
 		return st
 	}
@@ -79,7 +79,7 @@ func NewIndexStore(db *sqlx.DB) (*IndexStore, error) {
 		}
 		st, e := db.Preparex(q)
 		if e != nil {
-			err = fmt.Errorf("preparex %q: %w", q[:min(len(q), 40)], e)
+			err = fmt.Errorf("preparex %q: %w", q[:minInt(len(q), 40)], e)
 		}
 		return st
 	}
@@ -99,7 +99,7 @@ func NewIndexStore(db *sqlx.DB) (*IndexStore, error) {
 	return s, nil
 }
 
-func min(a, b int) int {
+func minInt(a, b int) int {
 	if a < b {
 		return a
 	}
@@ -179,7 +179,7 @@ func (s *IndexStore) List(_ context.Context, opts storage.ListOptions) ([]model.
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []model.ResponseMeta
 	pastCursor := opts.Cursor == ""
@@ -232,7 +232,7 @@ func (s *IndexStore) ListExpired(_ context.Context, before int64) ([]model.Respo
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanMetaRows(rows)
 }
 
@@ -267,7 +267,7 @@ func (s *IndexStore) ListStaleWriteIntents(_ context.Context, olderThan time.Dur
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanIntentRows(rows)
 }
 
@@ -344,7 +344,7 @@ func scanIntentRows(rows *sqlx.Rows) ([]model.WriteIntent, error) {
 }
 
 func isUniqueConstraint(err error) bool {
-	return err != nil && (errors.Is(err, sql.ErrNoRows) == false) &&
+	return err != nil && !errors.Is(err, sql.ErrNoRows) &&
 		containsAny(err.Error(), "UNIQUE constraint failed", "constraint failed")
 }
 
