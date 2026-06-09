@@ -11,7 +11,7 @@ OUT := $(BUILD_DIR)/$(GOOS)/$(GOARCH)/$(BINARY)
 
 OPENRESPONSES_DIR ?= ../openresponses
 
-.PHONY: all fmt fmt-check vet lint presubmit test test-unit test-integration test-compliance test-system test-compliance-bun tidy update build image clean
+.PHONY: all fmt fmt-check vet lint presubmit test test-unit test-integration test-compliance test-disruptive test-system test-compliance-bun tidy update build image clean
 
 all: fmt tidy lint test build
 
@@ -56,6 +56,11 @@ test-integration:
 # test-compliance: Go compliance suite (mock inference, no external deps).
 test-compliance:
 	go test -race ./test/compliance/...
+
+# test-disruptive: end-to-end disruptive tests (proxy/stack failure paths).
+# Store-level disruptive tests live in internal/store/ and run via test-unit.
+test-disruptive:
+	go test -race ./test/disruptive/...
 
 # test-system: canonical openresponses.org suite via bun.
 # Requires: bun (https://bun.sh) and OPENRESPONSES_DIR set to a clone of
