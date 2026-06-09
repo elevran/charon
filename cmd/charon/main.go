@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,12 +28,28 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "", "path to config file")
-	flag.Parse()
+	// Subcommand dispatch: "charon reconcile --config ..." runs a single
+	// write-intent recovery sweep then exits. Any other invocation (or no
+	// subcommand) starts the full server.
+	subcmd := ""
+	args := os.Args[1:]
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		subcmd = args[0]
+		args = args[1:]
+	}
+	// Re-parse flags after stripping the optional subcommand.
+	fs := flag.NewFlagSet("charon", flag.ExitOnError)
+	configPath := fs.String("config", "", "path to config file")
+	_ = fs.Parse(args)
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	cfg, err := config.Load(*configPath)
+	if subcmd == "reconcile" {
+		runReconcile(log, *configPath)
+		return
+	}
+
+	cfg, err := config.Load(*configPath) //nolint:gocritic // the flag var is from fs, not the removed global flag
 	if err != nil {
 		log.Error("load config", "err", err)
 		os.Exit(1)
@@ -84,8 +102,13 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go worker.NewCleaner(idx, pay, log, cfg.Workers.TTLInterval).Run(ctx)
-	go worker.NewReconciler(idx, pay, log, cfg.Storage.WriteIntentStaleThreshold, cfg.Workers.RecoveryInterval).Run(ctx)
+	var workerWG sync.WaitGroup
+	workerWG.Add(2)
+	go func() { defer workerWG.Done(); worker.NewCleaner(idx, pay, log, cfg.Workers.TTLInterval).Run(ctx) }()
+	go func() {
+		defer workerWG.Done()
+		worker.NewReconciler(idx, pay, log, cfg.Storage.WriteIntentStaleThreshold, cfg.Workers.RecoveryInterval).Run(ctx)
+	}()
 
 	go func() {
 		log.Info("starting charon internal API", "addr", cfg.Charon.Listen)
@@ -115,4 +138,46 @@ func main() {
 	if err := proxySrv.Shutdown(shutdownCtx); err != nil {
 		log.Error("proxy shutdown error", "err", err)
 	}
+
+	// Wait for background workers to finish their current sweep.
+	workerDone := make(chan struct{})
+	go func() { workerWG.Wait(); close(workerDone) }()
+	select {
+	case <-workerDone:
+		log.Info("workers stopped cleanly")
+	case <-shutdownCtx.Done():
+		log.Warn("timed out waiting for workers to stop")
+	}
+}
+
+// runReconcile opens storage, runs a single write-intent recovery sweep, and exits.
+// Used as: charon reconcile --config config.yaml
+func runReconcile(log *slog.Logger, configPath string) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		log.Error("load config", "err", err)
+		os.Exit(1)
+	}
+
+	var (
+		idx     storage.IndexStore
+		pay     storage.PayloadStore
+		cleanup func() error
+	)
+	switch cfg.Storage.Backend {
+	case "sqlite":
+		idx, pay, cleanup, err = sqlitestore.Open(cfg.Storage, log)
+		if err != nil {
+			log.Error("open sqlite storage", "err", err)
+			os.Exit(1)
+		}
+		defer func() { _ = cleanup() }()
+	default:
+		idx, pay = memory.Open()
+	}
+
+	ctx := context.Background()
+	r := worker.NewReconciler(idx, pay, log, cfg.Storage.WriteIntentStaleThreshold, cfg.Workers.RecoveryInterval)
+	r.RunOnce(ctx)
+	log.Info("reconcile sweep complete")
 }

@@ -53,6 +53,9 @@ func (w *Reconciler) RunOnce(ctx context.Context) {
 }
 
 func (w *Reconciler) sweep(ctx context.Context) {
+	start := time.Now()
+	defer func() { metrics.WorkerSweepDuration.WithLabelValues("reconciler").Observe(time.Since(start).Seconds()) }()
+
 	intents, err := w.index.ListStaleWriteIntents(ctx, w.stale)
 	if err != nil {
 		w.log.Error("recovery: list stale intents", "err", err)

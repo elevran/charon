@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/elevran/charon/internal/metrics"
 	"github.com/elevran/charon/internal/storage"
 )
 
@@ -37,6 +38,9 @@ func (w *Cleaner) Run(ctx context.Context) {
 }
 
 func (w *Cleaner) sweep(ctx context.Context) {
+	start := time.Now()
+	defer func() { metrics.WorkerSweepDuration.WithLabelValues("cleaner").Observe(time.Since(start).Seconds()) }()
+
 	expired, err := w.index.ListExpired(ctx, time.Now().Unix())
 	if err != nil {
 		w.log.Error("ttl: list expired", "err", err)
@@ -57,6 +61,8 @@ func (w *Cleaner) sweep(ctx context.Context) {
 		}
 		if err := w.index.Delete(ctx, meta.ID); err != nil {
 			w.log.Error("ttl: delete index", "id", meta.ID, "err", err)
+		} else {
+			metrics.TTLExpirationsTotal.Inc()
 		}
 	}
 }
