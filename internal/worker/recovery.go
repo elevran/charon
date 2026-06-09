@@ -106,6 +106,10 @@ func (w *Reconciler) recover(ctx context.Context, intent model.WriteIntent) {
 			metrics.WriteIntentFailuresTotal.Inc()
 			return
 		}
+		// ExpiresAt is not stored in the write-intent; use a 30-day default so
+		// recovered records are eventually cleaned up rather than living forever.
+		const defaultTTLSeconds = 30 * 24 * 3600
+		expiresAt := intent.CreatedAt + defaultTTLSeconds
 		meta := model.ResponseMeta{
 			ID:                 payload.ID,
 			PreviousResponseID: payload.PreviousResponseID,
@@ -114,6 +118,7 @@ func (w *Reconciler) recover(ctx context.Context, intent model.WriteIntent) {
 			PayloadKey:         intent.PayloadKey,
 			Status:             model.StatusCompleted,
 			CreatedAt:          intent.CreatedAt,
+			ExpiresAt:          &expiresAt,
 		}
 		if err := w.index.Put(ctx, meta); err != nil {
 			w.log.Error("recovery: commit index", "response_id", intent.ResponseID, "err", err)
