@@ -46,13 +46,3 @@ linters:
 
     exhaustive:
       default-signifies-exhaustive: true
-
-issues:
-  max-issues-per-linter: 5
-
-exclusions:
-  rules:
-    - path: "_test\\.go"
-      linters:
-        - unparam
-        - gocritic
