@@ -45,7 +45,9 @@ type CharonConfig struct {
 
 // StorageConfig holds store-level settings.
 type StorageConfig struct {
-	Backend                   string        `json:"backend"`                      // "memory" (default) | "sqlite"
+	Backend                   string        `json:"backend"`                      // "memory" (default) | "sqlite" | "postgres" | "postgres+s3"
+	IndexBackend              string        `json:"index_backend"`                // "memory" | "sqlite" | "postgres"; overrides Backend when set
+	PayloadBackend            string        `json:"payload_backend"`              // "memory" | "filesystem" | "s3"; overrides Backend when set
 	DataDir                   string        `json:"data_dir"`                     // default "./data"
 	CheckpointInterval        int           `json:"checkpoint_interval"`          // default 10
 	TTLDays                   int           `json:"ttl_days"`                     // default 30
@@ -53,6 +55,25 @@ type StorageConfig struct {
 	// Caps — 0 means unbounded.
 	MaxResponses    int64 `json:"max_responses"`     // max total responses in the index
 	MaxPayloadBytes int64 `json:"max_payload_bytes"` // max size of a single response payload blob
+	// Backend-specific connection settings.
+	Postgres PostgresConfig `json:"postgres"`
+	S3       S3Config       `json:"s3"`
+}
+
+// PostgresConfig holds PostgreSQL connection settings.
+type PostgresConfig struct {
+	DSN      string `json:"dsn"`       // e.g. "postgres://user:pass@host:5432/db"
+	MaxConns int32  `json:"max_conns"` // default 10
+}
+
+// S3Config holds S3-compatible object storage settings.
+type S3Config struct {
+	Bucket          string `json:"bucket"`            // e.g. "charon-payloads"
+	Region          string `json:"region"`            // e.g. "us-east-1"
+	EndpointURL     string `json:"endpoint_url"`      // empty = AWS; set for MinIO/COS
+	AccessKeyID     string `json:"access_key_id"`     // empty = default credential chain
+	SecretAccessKey string `json:"secret_access_key"` // empty = default credential chain
+	PathStyle       bool   `json:"path_style"`        // true for MinIO
 }
 
 // WorkerConfig holds background worker settings.
