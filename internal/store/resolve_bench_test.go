@@ -15,10 +15,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"testing"
 
-	"github.com/elevran/charon/internal/storage/filesystem"
+	"github.com/elevran/charon/internal/config"
 	"github.com/elevran/charon/internal/storage/memory"
 	sqlitestore "github.com/elevran/charon/internal/storage/sqlite"
 	"github.com/elevran/charon/internal/store"
@@ -86,24 +85,17 @@ func BenchmarkResolveContext_SQLite_500(b *testing.B) { benchResolveSQLite(b, 50
 
 func benchResolveSQLite(b *testing.B, depth int) {
 	b.Helper()
-	dataDir := b.TempDir()
-	db, err := sqlitestore.Open(filepath.Join(dataDir, "responses.db"),
-		sqlitestore.Config{WALMode: true})
+	storageCfg := config.StorageConfig{
+		DataDir: b.TempDir(),
+		SQLite:  config.SQLiteConfig{WALMode: true},
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	idx, pay, cleanup, err := sqlitestore.Open(storageCfg, log)
 	if err != nil {
 		b.Fatalf("open sqlite: %v", err)
 	}
-	b.Cleanup(func() { sqlitestore.Close(db) })
-
-	pay, err := filesystem.New(filepath.Join(dataDir, "payloads"))
-	if err != nil {
-		b.Fatalf("open filesystem: %v", err)
-	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	sqlIdx, idxErr := sqlitestore.NewIndexStore(db)
-	if idxErr != nil {
-		b.Fatalf("NewIndexStore: %v", idxErr)
-	}
-	svc := store.New(sqlIdx, pay, store.Config{CheckpointInterval: 10}, log)
+	b.Cleanup(func() { _ = cleanup() })
+	svc := store.New(idx, pay, store.Config{CheckpointInterval: 10}, log)
 
 	headID := buildChain(b, svc, depth)
 
