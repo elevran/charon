@@ -77,6 +77,8 @@ func main() {
 	svcCfg := store.Config{
 		CheckpointInterval: cfg.Storage.CheckpointInterval,
 		TTLDays:            cfg.Storage.TTLDays,
+		MaxResponses:       cfg.Storage.MaxResponses,
+		MaxPayloadBytes:    cfg.Storage.MaxPayloadBytes,
 	}
 	svc := store.New(idx, pay, svcCfg, log)
 

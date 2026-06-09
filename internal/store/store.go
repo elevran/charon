@@ -22,8 +22,10 @@ import (
 
 // Config holds store-level configuration.
 type Config struct {
-	CheckpointInterval int // create checkpoint every N turns; default 10
-	TTLDays            int // response TTL; default 30
+	CheckpointInterval int   // create checkpoint every N turns; default 10
+	TTLDays            int   // response TTL; default 30
+	MaxResponses       int64 // max total responses in index; 0 = unbounded
+	MaxPayloadBytes    int64 // max size of a single payload blob in bytes; 0 = unbounded
 }
 
 func (c *Config) applyDefaults() {
@@ -117,6 +119,17 @@ func (s *ContextStore) Resolve(ctx context.Context, previousID string) (string, 
 
 // Store commits a completed inference response using the two-phase write-intent protocol.
 func (s *ContextStore) Store(ctx context.Context, responseID string, req model.StoreRequest) error {
+	// Enforce MaxResponses cap before accepting new entries.
+	if s.cfg.MaxResponses > 0 {
+		n, err := s.index.Count(ctx)
+		if err != nil {
+			return fmt.Errorf("count index: %w", err)
+		}
+		if n >= s.cfg.MaxResponses {
+			return fmt.Errorf("%w: index holds %d of %d responses", storage.ErrStoreFull, n, s.cfg.MaxResponses)
+		}
+	}
+
 	chainRootID, position, err := s.resolveChainPosition(ctx, req.PreviousResponseID, responseID)
 	if err != nil {
 		return err
@@ -172,6 +185,10 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
+	}
+	// Enforce MaxPayloadBytes cap after marshaling so we know the actual size.
+	if s.cfg.MaxPayloadBytes > 0 && int64(len(payloadBytes)) > s.cfg.MaxPayloadBytes {
+		return fmt.Errorf("%w: payload %d bytes exceeds limit %d", storage.ErrStoreFull, len(payloadBytes), s.cfg.MaxPayloadBytes)
 	}
 
 	isCheckpoint := position > 0 && position%s.cfg.CheckpointInterval == 0
