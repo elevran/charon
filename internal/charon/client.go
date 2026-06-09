@@ -53,6 +53,15 @@ type StreamWriter struct {
 }
 
 // NewStreamWriter creates a StreamWriter for the given response ID.
+//
+// H2c note: each concurrent streaming client produces sequential PATCH
+// requests for its own response. With N concurrent clients the proxy opens N
+// HTTP/1.1 connections to Charon (amortised via keep-alive). If N exceeds
+// ~500 on a separate-host deployment, replacing this client's http.Client
+// with an http2.Transport{AllowHTTP:true} and wrapping the Charon server
+// with h2c.NewHandler collapses N connections to 1 multiplexed connection,
+// reducing socket pressure. At lower concurrencies the complexity is not
+// justified.
 func (c *Client) NewStreamWriter(ctx context.Context, id string) *StreamWriter {
 	return &StreamWriter{client: c, id: id, ctx: ctx}
 }
