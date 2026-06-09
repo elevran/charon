@@ -24,14 +24,14 @@ type IndexStore struct {
 }
 
 type indexStmts struct {
-	getResp         *sqlx.Stmt // SELECT * FROM responses WHERE id = ?
-	putResp         *sql.Stmt  // INSERT OR REPLACE INTO responses
-	deleteResp      *sql.Stmt  // DELETE FROM responses WHERE id = ?
-	listExpired     *sqlx.Stmt // SELECT * FROM responses WHERE expires_at < ?
-	insertIntent    *sql.Stmt  // INSERT INTO write_intents
-	updateIntent    *sql.Stmt  // UPDATE write_intents SET phase=?, updated_at=? WHERE intent_id=?
+	getResp          *sqlx.Stmt // SELECT * FROM responses WHERE id = ?
+	putResp          *sql.Stmt  // INSERT OR REPLACE INTO responses
+	deleteResp       *sql.Stmt  // DELETE FROM responses WHERE id = ?
+	listExpired      *sqlx.Stmt // SELECT * FROM responses WHERE expires_at < ?
+	insertIntent     *sql.Stmt  // INSERT INTO write_intents
+	updateIntent     *sql.Stmt  // UPDATE write_intents SET phase=?, updated_at=? WHERE intent_id=?
 	listStaleIntents *sqlx.Stmt // SELECT * FROM write_intents WHERE phase NOT IN ... AND updated_at < ?
-	deleteIntent    *sql.Stmt  // DELETE FROM write_intents WHERE intent_id=?
+	deleteIntent     *sql.Stmt  // DELETE FROM write_intents WHERE intent_id=?
 }
 
 const (
