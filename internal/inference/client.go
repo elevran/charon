@@ -107,6 +107,7 @@ func (c *Client) Stream(ctx context.Context, req Request) (<-chan SSEEvent, erro
 			if err := json.Unmarshal([]byte(data), &evt); err != nil {
 				continue
 			}
+			evt.Raw = json.RawMessage(data)
 			select {
 			case ch <- evt:
 			case <-ctx.Done():
