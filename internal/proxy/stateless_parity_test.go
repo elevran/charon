@@ -46,7 +46,6 @@ type capturedInfReq struct {
 	Stream bool              `json:"stream"`
 }
 
-
 // capturingInfServer is a test inference server that records each request.
 // It returns the same deterministic response as MockServer.
 type capturingInfServer struct {
@@ -240,13 +239,13 @@ func TestStatelessStatefulParity(t *testing.T) {
 
 	// captured[1].Input[0:1] == captured[0].Input[0:1]  (t0 user message preserved)
 	assertItemsJSONEqual(t,
-		captured[0].Input[:1],  // stateless: what we sent in turn 0
-		captured[1].Input[:1],  // proxy: what it prepended in turn 1
+		captured[0].Input[:1], // stateless: what we sent in turn 0
+		captured[1].Input[:1], // proxy: what it prepended in turn 1
 	)
 
 	// captured[2].Input[0:3] == captured[1].Input[0:3]  (turns 0+1 preserved)
 	assertItemsJSONEqual(t,
-		captured[1].Input[:3],  // stateless: what we sent in turn 1
-		captured[2].Input[:3],  // proxy: what it prepended in turn 2
+		captured[1].Input[:3], // stateless: what we sent in turn 1
+		captured[2].Input[:3], // proxy: what it prepended in turn 2
 	)
 }
