@@ -195,7 +195,6 @@ func TestStatelessStatefulParity(t *testing.T) {
 		"previous_response_id": r1.ID,
 	})
 	require.Equal(t, "completed", r2.Status)
-	_ = r2
 
 	// ----------------------------------------------------------------
 	// Assertion: inference backend received stateless, complete context.
