@@ -124,6 +124,7 @@ func (h *Handler) HandleRetrieve(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, model.RetrieveResponse{
 		ID:                 meta.ID,
 		PreviousResponseID: meta.PreviousResponseID,
+		Instructions:       payload.Instructions,
 		Status:             responses.ResponseStatus(meta.Status),
 		Model:              meta.Model,
 		CreatedAt:          meta.CreatedAt,
