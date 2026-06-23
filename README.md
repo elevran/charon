@@ -1,5 +1,13 @@
 # Charon
 
+> [!NOTE]
+> Charon implements the **persistence and context-resolution layer** of the Responses API only. It does not implement the agentic loop or any of the following concerns — these must be provided by a separate orchestration service placed in front of Charon:
+> - **Server-side tool execution** — file search, web search, code interpreter, image generation
+> - **MCP tool orchestration** — tool discovery, session management, approval flows
+> - **Background / async processing** — `background: true` request queueing and polling
+> - **Guardrails** — input and output content moderation
+> - **Conversation management** — dual-storage conversation threading (`conversation` parameter)
+
 Charon is an internal context-store service for the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses). It bridges the gap between the stateful Responses API and stateless LLM inference:
 
 - Resolves `previous_response_id` chains into the flat context an inference backend needs
