@@ -71,7 +71,7 @@ func (b *streamBuffer) drain() []json.RawMessage {
 //	seq=1  response.output_item.added  {output_index:0, item:{partial}}
 //	seq=2  response.output_item.done   {output_index:0, item:{complete}}
 //	seq=3  response.completed    {response: {id, status:"completed", output:[...], usage:{...}}}
-func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req CreateRequest) {
+func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req CreateRequest, rawReq map[string]json.RawMessage) {
 	ctx := r.Context()
 	createdAt := time.Now()
 
@@ -92,10 +92,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 		}
 	}
 
-	infReq := buildInferenceRequest(req, flatCtx, inputItems)
-	infReq.Stream = true
+	infMap := buildInferenceMap(rawReq, flatCtx, inputItems)
+	infMap["stream"] = json.RawMessage("true")
 
-	ch, err := h.inf.Stream(ctx, infReq)
+	ch, err := h.inf.Stream(ctx, infMap)
 	if err != nil {
 		h.log.Error("inference stream", "err", err)
 		writeError(w, http.StatusBadGateway, "inference error")

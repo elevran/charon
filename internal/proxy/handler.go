@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -42,8 +43,14 @@ func RegisterHandlers(mux *http.ServeMux, h *Handler) {
 
 // HandleCreate handles POST /responses.
 func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
 	var req CreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -52,9 +59,15 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var rawReq map[string]json.RawMessage
+	if err := json.Unmarshal(bodyBytes, &rawReq); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
 	// Stream mode handled separately.
 	if req.Stream {
-		h.handleStream(w, r, req)
+		h.handleStream(w, r, req, rawReq)
 		return
 	}
 
@@ -77,9 +90,9 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	infReq := buildInferenceRequest(req, flatCtx, inputItems)
+	infMap := buildInferenceMap(rawReq, flatCtx, inputItems)
 	createdAt := time.Now()
-	infResp, err := h.inf.Complete(ctx, infReq)
+	infResp, err := h.inf.Complete(ctx, infMap)
 	if err != nil {
 		h.log.Error("inference complete", "err", err)
 		writeError(w, http.StatusBadGateway, "inference error")

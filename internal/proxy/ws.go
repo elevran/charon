@@ -111,12 +111,20 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		h.wsTurn(ctx, conn, cache, msg)
+		var rawMsg map[string]json.RawMessage
+		if err := json.Unmarshal(msgBytes, &rawMsg); err != nil {
+			h.wsSendError(conn, 400, "invalid_message", "failed to parse message")
+			continue
+		}
+		// Strip the WebSocket protocol field before forwarding to inference.
+		delete(rawMsg, "type")
+
+		h.wsTurn(ctx, conn, cache, msg, rawMsg)
 	}
 }
 
 // wsTurn processes one response.create turn.
-func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCache, msg wsCreateMsg) {
+func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCache, msg wsCreateMsg, rawMsg map[string]json.RawMessage) {
 	createdAt := time.Now()
 
 	inputItems, err := inputToItems(msg.Input)
@@ -152,17 +160,10 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 		return
 	}
 
-	req := CreateRequest{
-		Model:              msg.Model,
-		Instructions:       msg.Instructions,
-		Tools:              msg.Tools,
-		ToolChoice:         msg.ToolChoice,
-		PreviousResponseID: msg.PreviousResponseID,
-	}
-	infReq := buildInferenceRequest(req, flatCtx, inputItems)
-	infReq.Stream = true
+	infMap := buildInferenceMap(rawMsg, flatCtx, inputItems)
+	infMap["stream"] = json.RawMessage("true")
 
-	ch, err := h.inf.Stream(ctx, infReq)
+	ch, err := h.inf.Stream(ctx, infMap)
 	if err != nil {
 		h.log.Error("ws inference stream", "err", err)
 		h.wsSendError(conn, 502, "inference_error", "inference backend error")

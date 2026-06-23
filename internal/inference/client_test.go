@@ -16,7 +16,11 @@ func TestMockComplete(t *testing.T) {
 	defer mock.Close()
 
 	client := inference.New(mock.URL, "", 0)
-	resp, err := client.Complete(ctx, inference.Request{Model: "test", Input: []json.RawMessage{}})
+	req := map[string]json.RawMessage{
+		"model": json.RawMessage(`"test"`),
+		"input": json.RawMessage(`[]`),
+	}
+	resp, err := client.Complete(ctx, req)
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -36,8 +40,9 @@ func TestMockIDsAreUnique(t *testing.T) {
 	defer mock.Close()
 	client := inference.New(mock.URL, "", 0)
 
-	r1, _ := client.Complete(ctx, inference.Request{Model: "test"})
-	r2, _ := client.Complete(ctx, inference.Request{Model: "test"})
+	req := map[string]json.RawMessage{"model": json.RawMessage(`"test"`)}
+	r1, _ := client.Complete(ctx, req)
+	r2, _ := client.Complete(ctx, req)
 	if r1.ID == r2.ID {
 		t.Errorf("expected unique IDs, both got %q", r1.ID)
 	}
@@ -48,7 +53,10 @@ func TestMockStream(t *testing.T) {
 	defer mock.Close()
 	client := inference.New(mock.URL, "", 0)
 
-	ch, err := client.Stream(ctx, inference.Request{Model: "test"})
+	ch, err := client.Stream(ctx, map[string]json.RawMessage{
+		"model":  json.RawMessage(`"test"`),
+		"stream": json.RawMessage(`true`),
+	})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
