@@ -34,6 +34,7 @@ type ResponseMeta struct {
 type ResponsePayload struct {
 	ID                 string            `json:"id"`
 	PreviousResponseID *string           `json:"previous_response_id,omitempty"`
+	Instructions       *string           `json:"instructions,omitempty"`
 	InputItems         []json.RawMessage `json:"input_items"`
 	OutputItems        []json.RawMessage `json:"output_items"`
 	Usage              json.RawMessage   `json:"usage,omitempty"`
@@ -43,6 +44,7 @@ type ResponsePayload struct {
 type StoreRequest struct {
 	ReservationID      string                       `json:"reservation_id,omitempty"` // from preceding resolve; omitted for new chains
 	PreviousResponseID *string                      `json:"previous_response_id,omitempty"`
+	Instructions       *string                      `json:"instructions,omitempty"`
 	Input              responses.ResponseInputParam `json:"input"`
 	Output             []json.RawMessage            `json:"output"`
 	Usage              json.RawMessage              `json:"usage,omitempty"` // raw JSON; avoids SDK type coupling
@@ -66,6 +68,7 @@ type ChunkRequest struct {
 	// Commit-only fields (same semantics as StoreRequest):
 	ReservationID      string            `json:"reservation_id,omitempty"`
 	PreviousResponseID *string           `json:"previous_response_id,omitempty"`
+	Instructions       *string           `json:"instructions,omitempty"`
 	Input              []json.RawMessage `json:"input,omitempty"`
 	Usage              json.RawMessage   `json:"usage,omitempty"`
 	Status             string            `json:"status,omitempty"`
@@ -82,6 +85,7 @@ type ResolveResponse struct {
 type RetrieveResponse struct {
 	ID                 string                       `json:"id"`
 	PreviousResponseID *string                      `json:"previous_response_id,omitempty"`
+	Instructions       *string                      `json:"instructions,omitempty"`
 	Status             responses.ResponseStatus     `json:"status"`
 	Model              string                       `json:"model,omitempty"`
 	CreatedAt          int64                        `json:"created_at"`
