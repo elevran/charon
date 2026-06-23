@@ -8,6 +8,38 @@ import (
 	"github.com/elevran/charon/internal/inference"
 )
 
+// buildInferenceMap constructs the inference request map from the raw client
+// request. It strips gateway-consumed fields, forces store:false, forces
+// stream:false (caller overrides to true for streaming paths), and replaces
+// input with the assembled flat context + new input items.
+func buildInferenceMap(rawReq map[string]json.RawMessage, flatCtx, inputItems []json.RawMessage) map[string]json.RawMessage {
+	// Shallow-copy to avoid mutating the caller's map.
+	out := make(map[string]json.RawMessage, len(rawReq))
+	for k, v := range rawReq {
+		out[k] = v
+	}
+
+	// Strip gateway-consumed fields.
+	delete(out, "previous_response_id")
+	delete(out, "background")
+	delete(out, "conversation")
+
+	// Inference backend must be stateless.
+	out["store"] = json.RawMessage("false")
+
+	// Non-streaming by default; streaming callers override after this call.
+	out["stream"] = json.RawMessage("false")
+
+	// Replace input with assembled flat context + new input items.
+	combined := make([]json.RawMessage, 0, len(flatCtx)+len(inputItems))
+	combined = append(combined, flatCtx...)
+	combined = append(combined, inputItems...)
+	inputJSON, _ := json.Marshal(combined)
+	out["input"] = inputJSON
+
+	return out
+}
+
 // inputToItems normalises CreateRequest.Input into []json.RawMessage items.
 // If input is a plain JSON string, wraps it as a user message item.
 // If input is a JSON array, returns elements unchanged.
@@ -46,24 +78,6 @@ func inputToItems(raw json.RawMessage) ([]json.RawMessage, error) {
 		}
 	}
 	return nil, nil
-}
-
-// buildInferenceRequest assembles the inference.Request:
-// flatCtx + inputItems concatenated as input, store always false.
-func buildInferenceRequest(req CreateRequest, flatCtx, inputItems []json.RawMessage) inference.Request {
-	combined := make([]json.RawMessage, 0, len(flatCtx)+len(inputItems))
-	combined = append(combined, flatCtx...)
-	combined = append(combined, inputItems...)
-
-	return inference.Request{
-		Model:        req.Model,
-		Input:        combined,
-		Instructions: req.Instructions,
-		Tools:        req.Tools,
-		ToolChoice:   req.ToolChoice,
-		Stream:       req.Stream,
-		Store:        false,
-	}
 }
 
 // buildResponseResource constructs the ResponseResource returned to the client.

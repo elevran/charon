@@ -2,19 +2,6 @@ package inference
 
 import "encoding/json"
 
-// Request is the body sent to POST {base_url}/responses.
-// Always stateless: no previous_response_id; store is always false
-// (the proxy, not the inference backend, owns persistence).
-type Request struct {
-	Model        string            `json:"model"`
-	Input        []json.RawMessage `json:"input"`
-	Instructions *string           `json:"instructions,omitempty"`
-	Tools        []json.RawMessage `json:"tools,omitempty"`
-	ToolChoice   json.RawMessage   `json:"tool_choice,omitempty"`
-	Stream       bool              `json:"stream"`
-	Store        bool              `json:"store"` // always false
-}
-
 // Response is the subset of ResponseResource that the inference client reads.
 type Response struct {
 	ID     string            `json:"id"`
