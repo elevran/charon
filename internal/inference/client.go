@@ -28,10 +28,7 @@ func New(baseURL, apiKey string, timeout time.Duration) *Client {
 }
 
 // Complete performs a non-streaming inference call.
-func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
-	req.Stream = false
-	req.Store = false
-
+func (c *Client) Complete(ctx context.Context, req map[string]json.RawMessage) (*Response, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -62,10 +59,7 @@ func (c *Client) Complete(ctx context.Context, req Request) (*Response, error) {
 // Stream performs a streaming inference call.
 // Returns a channel of SSEEvents. Closed when the stream ends or ctx is cancelled.
 // The caller must drain the channel.
-func (c *Client) Stream(ctx context.Context, req Request) (<-chan SSEEvent, error) {
-	req.Stream = true
-	req.Store = false
-
+func (c *Client) Stream(ctx context.Context, req map[string]json.RawMessage) (<-chan SSEEvent, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
