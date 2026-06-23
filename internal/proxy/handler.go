@@ -78,12 +78,14 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	infReq := buildInferenceRequest(req, flatCtx, inputItems)
+	createdAt := time.Now()
 	infResp, err := h.inf.Complete(ctx, infReq)
 	if err != nil {
 		h.log.Error("inference complete", "err", err)
 		writeError(w, http.StatusBadGateway, "inference error")
 		return
 	}
+	completedAt := time.Now()
 
 	if req.ShouldStore() {
 		storeReq := charon.StoreRequest{
@@ -100,7 +102,7 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resource := buildResponseResource(infResp, req.PreviousResponseID, req.ShouldStore(), time.Now())
+	resource := buildResponseResource(infResp, req.PreviousResponseID, req.ShouldStore(), createdAt, &completedAt)
 	writeJSON(w, http.StatusOK, resource)
 }
 
