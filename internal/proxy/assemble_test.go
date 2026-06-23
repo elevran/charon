@@ -72,7 +72,8 @@ func TestBuildResponseResource(t *testing.T) {
 		Output: []json.RawMessage{output},
 		Usage:  &inference.UsageInfo{InputTokens: 5, OutputTokens: 3, TotalTokens: 8},
 	}
-	r := buildResponseResource(infResp, &prevID, true, time.Now())
+	now := time.Now()
+	r := buildResponseResource(infResp, &prevID, true, now, &now)
 	if r.ID != "resp_abc" {
 		t.Errorf("ID mismatch: %q", r.ID)
 	}

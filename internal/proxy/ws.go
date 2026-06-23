@@ -114,7 +114,7 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // wsTurn processes one response.create turn.
 func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCache, msg wsCreateMsg) {
-	now := time.Now()
+	createdAt := time.Now()
 
 	inputItems, err := inputToItems(msg.Input)
 	if err != nil {
@@ -145,7 +145,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 		if msg.PreviousResponseID != nil {
 			cache.evict(*msg.PreviousResponseID)
 		}
-		h.wsSendFailedTurn(conn, now, msg)
+		h.wsSendFailedTurn(conn, createdAt, msg)
 		return
 	}
 
@@ -202,7 +202,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 				Status: "in_progress",
 				Model:  msg.Model,
 				Output: []json.RawMessage{},
-			}, msg.PreviousResponseID, msg.ShouldStore(), now)
+			}, msg.PreviousResponseID, msg.ShouldStore(), createdAt, nil)
 			h.wsSend(conn, sseEvent{Type: "response.created", SequenceNumber: seq, Response: placeholder})
 			seq++
 			sentCreated = true
@@ -268,7 +268,8 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 		cache.put(canonicalID, newCtx)
 	}
 
-	completed := buildResponseResource(finalInfResp, msg.PreviousResponseID, msg.ShouldStore(), now)
+	completedAt := time.Now()
+	completed := buildResponseResource(finalInfResp, msg.PreviousResponseID, msg.ShouldStore(), createdAt, &completedAt)
 	h.wsSend(conn, sseEvent{Type: "response.completed", SequenceNumber: seq, Response: completed})
 }
 

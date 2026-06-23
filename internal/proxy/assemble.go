@@ -66,18 +66,25 @@ func buildInferenceRequest(req CreateRequest, flatCtx, inputItems []json.RawMess
 }
 
 // buildResponseResource constructs the ResponseResource returned to the client.
+// When completedAt is nil, CompletedAt is left as nil in the returned resource.
 func buildResponseResource(
 	infResp *inference.Response,
 	previousID *string,
 	shouldStore bool,
-	now time.Time,
+	createdAt time.Time,
+	completedAt *time.Time,
 ) *ResponseResource {
-	ts := now.Unix()
+	ts := createdAt.Unix()
+	var completedTs *int64
+	if completedAt != nil {
+		v := completedAt.Unix()
+		completedTs = &v
+	}
 	r := &ResponseResource{
 		ID:                 infResp.ID,
 		Object:             "response",
 		CreatedAt:          ts,
-		CompletedAt:        &ts,
+		CompletedAt:        completedTs,
 		Status:             infResp.Status,
 		Model:              infResp.Model,
 		PreviousResponseID: previousID,
