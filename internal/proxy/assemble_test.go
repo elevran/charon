@@ -8,6 +8,15 @@ import (
 	"github.com/elevran/charon/internal/inference"
 )
 
+// helper: decode json.RawMessage value for a key from map.
+func rawString(m map[string]json.RawMessage, key string) string {
+	v, ok := m[key]
+	if !ok {
+		return ""
+	}
+	return string(v)
+}
+
 func TestInputToItems_String(t *testing.T) {
 	raw := json.RawMessage(`"hello world"`)
 	items, err := inputToItems(raw)
@@ -45,20 +54,60 @@ func TestInputToItems_Empty(t *testing.T) {
 	}
 }
 
-func TestBuildInferenceRequest(t *testing.T) {
+func TestBuildInferenceMap(t *testing.T) {
 	flatCtx := []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"hi"}`)}
 	inputItems := []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"follow up"}`)}
-	req := CreateRequest{Model: "test", Stream: false}
 
-	infReq := buildInferenceRequest(req, flatCtx, inputItems)
-	if infReq.Store {
-		t.Error("inference request must have store:false")
+	rawReq := map[string]json.RawMessage{
+		"model":                json.RawMessage(`"test"`),
+		"temperature":          json.RawMessage(`0.7`),
+		"previous_response_id": json.RawMessage(`"resp_old"`),
+		"background":           json.RawMessage(`false`),
 	}
-	if len(infReq.Input) != 2 {
-		t.Errorf("expected 2 input items, got %d", len(infReq.Input))
+
+	infMap := buildInferenceMap(rawReq, flatCtx, inputItems)
+
+	// Gateway-consumed fields must be stripped.
+	if _, ok := infMap["previous_response_id"]; ok {
+		t.Error("previous_response_id must be stripped")
 	}
-	if infReq.Stream {
-		t.Error("stream flag should match request (false)")
+	if _, ok := infMap["background"]; ok {
+		t.Error("background must be stripped")
+	}
+
+	// store must be false.
+	if rawString(infMap, "store") != "false" {
+		t.Errorf("store must be false, got %s", rawString(infMap, "store"))
+	}
+
+	// stream must be false (default; streaming callers override).
+	if rawString(infMap, "stream") != "false" {
+		t.Errorf("stream must be false, got %s", rawString(infMap, "stream"))
+	}
+
+	// Pass-through fields must survive.
+	if rawString(infMap, "temperature") != "0.7" {
+		t.Errorf("temperature must pass through, got %s", rawString(infMap, "temperature"))
+	}
+
+	// input must contain flatCtx + inputItems (2 items).
+	var items []json.RawMessage
+	if err := json.Unmarshal(infMap["input"], &items); err != nil {
+		t.Fatalf("decode input: %v", err)
+	}
+	if len(items) != 2 {
+		t.Errorf("expected 2 input items, got %d", len(items))
+	}
+}
+
+func TestBuildInferenceMap_DoesNotMutateInput(t *testing.T) {
+	rawReq := map[string]json.RawMessage{
+		"model": json.RawMessage(`"test"`),
+	}
+	buildInferenceMap(rawReq, nil, nil)
+	// original must not have been modified.
+	if _, ok := rawReq["store"]; ok {
+		t.Error("buildInferenceMap must not mutate the caller's map")
 	}
 }
 
