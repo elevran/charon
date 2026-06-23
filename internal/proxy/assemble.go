@@ -60,6 +60,7 @@ func buildInferenceRequest(req CreateRequest, flatCtx, inputItems []json.RawMess
 		Input:        combined,
 		Instructions: req.Instructions,
 		Tools:        req.Tools,
+		ToolChoice:   req.ToolChoice,
 		Stream:       req.Stream,
 		Store:        false,
 	}

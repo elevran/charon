@@ -3,7 +3,9 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -55,6 +57,7 @@ type wsCreateMsg struct {
 	Instructions       *string           `json:"instructions,omitempty"`
 	Store              *bool             `json:"store,omitempty"`
 	Tools              []json.RawMessage `json:"tools,omitempty"`
+	ToolChoice         json.RawMessage   `json:"tool_choice,omitempty"`
 }
 
 func (m *wsCreateMsg) ShouldStore() bool { return m.Store == nil || *m.Store }
@@ -153,6 +156,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 		Model:              msg.Model,
 		Instructions:       msg.Instructions,
 		Tools:              msg.Tools,
+		ToolChoice:         msg.ToolChoice,
 		PreviousResponseID: msg.PreviousResponseID,
 	}
 	infReq := buildInferenceRequest(req, flatCtx, inputItems)
@@ -221,6 +225,24 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 			}
 		case "response.completed":
 			finalInfResp = evt.Response
+
+		default:
+			if len(evt.Raw) == 0 {
+				continue
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(evt.Raw, &raw); err != nil {
+				continue
+			}
+			raw["sequence_number"] = json.RawMessage(strconv.Itoa(seq))
+			b, err := json.Marshal(raw)
+			if err != nil {
+				continue
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
+				h.log.Debug("ws write default", "err", err)
+			}
+			seq++
 		}
 	}
 
@@ -288,8 +310,19 @@ func (h *Handler) wsSendError(conn *websocket.Conn, status int, code, message st
 }
 
 func (h *Handler) wsSendFailedTurn(conn *websocket.Conn, now time.Time, msg wsCreateMsg) {
+	id := fmt.Sprintf("resp_err_%d", now.UnixNano())
+	createdResource := &ResponseResource{
+		ID:        id,
+		Object:    "response",
+		CreatedAt: now.Unix(),
+		Status:    "in_progress",
+		Model:     msg.Model,
+		Output:    []json.RawMessage{},
+		Tools:     []json.RawMessage{},
+		Metadata:  map[string]string{},
+	}
 	failedResource := &ResponseResource{
-		ID:        "resp_failed_" + now.Format("20060102150405"),
+		ID:        id,
 		Object:    "response",
 		CreatedAt: now.Unix(),
 		Status:    "failed",
@@ -299,7 +332,7 @@ func (h *Handler) wsSendFailedTurn(conn *websocket.Conn, now time.Time, msg wsCr
 		Tools:     []json.RawMessage{},
 		Metadata:  map[string]string{},
 	}
-	h.wsSend(conn, sseEvent{Type: "response.created", SequenceNumber: 0, Response: failedResource})
+	h.wsSend(conn, sseEvent{Type: "response.created", SequenceNumber: 0, Response: createdResource})
 	h.wsSend(conn, sseEvent{Type: "response.failed", SequenceNumber: 1, Response: failedResource})
 }
 
