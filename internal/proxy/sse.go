@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/elevran/charon/internal/charon"
@@ -165,6 +166,25 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 
 		case "response.completed":
 			finalInfResp = evt.Response
+
+		default:
+			if len(evt.Raw) == 0 {
+				continue
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(evt.Raw, &raw); err != nil {
+				continue
+			}
+			raw["sequence_number"] = json.RawMessage(strconv.Itoa(seq))
+			b, err := json.Marshal(raw)
+			if err != nil {
+				continue
+			}
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			seq++
 		}
 	}
 
