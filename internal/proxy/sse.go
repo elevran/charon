@@ -72,7 +72,7 @@ func (b *streamBuffer) drain() []json.RawMessage {
 //	seq=3  response.completed    {response: {id, status:"completed", output:[...], usage:{...}}}
 func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req CreateRequest) {
 	ctx := r.Context()
-	now := time.Now()
+	createdAt := time.Now()
 
 	inputItems, err := inputToItems(req.Input)
 	if err != nil {
@@ -142,7 +142,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 				Status: "in_progress",
 				Model:  req.Model,
 				Output: []json.RawMessage{},
-			}, req.PreviousResponseID, req.ShouldStore(), now)
+			}, req.PreviousResponseID, req.ShouldStore(), createdAt, nil)
 			writeSSE(w, sseEvent{Type: "response.created", SequenceNumber: seq, Response: placeholder})
 			seq++
 			created = true
@@ -208,6 +208,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 		}
 	}
 
-	completedResource := buildResponseResource(finalInfResp, req.PreviousResponseID, req.ShouldStore(), now)
+	completedAt := time.Now()
+	completedResource := buildResponseResource(finalInfResp, req.PreviousResponseID, req.ShouldStore(), createdAt, &completedAt)
 	writeSSE(w, sseEvent{Type: "response.completed", SequenceNumber: seq, Response: completedResource})
 }
