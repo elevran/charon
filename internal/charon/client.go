@@ -19,6 +19,7 @@ import (
 type StoreRequest struct {
 	ReservationID      string            `json:"reservation_id,omitempty"`
 	PreviousResponseID *string           `json:"previous_response_id,omitempty"`
+	Instructions       *string           `json:"instructions,omitempty"`
 	Input              []json.RawMessage `json:"input"`
 	Output             []json.RawMessage `json:"output"`
 	Usage              json.RawMessage   `json:"usage,omitempty"`
@@ -30,6 +31,7 @@ type StoreRequest struct {
 type CommitRequest struct {
 	ReservationID      string
 	PreviousResponseID *string
+	Instructions       *string
 	Input              []json.RawMessage
 	FinalItems         []json.RawMessage // merged with staged items by Charon
 	Usage              json.RawMessage
@@ -121,6 +123,9 @@ func (w *StreamWriter) Commit(req CommitRequest) error {
 	if req.PreviousResponseID != nil {
 		body["previous_response_id"] = *req.PreviousResponseID
 	}
+	if req.Instructions != nil {
+		body["instructions"] = *req.Instructions
+	}
 	if len(req.Usage) > 0 {
 		body["usage"] = req.Usage
 	}
@@ -150,6 +155,7 @@ func (w *StreamWriter) patch(body interface{}) error {
 type RetrieveResponse struct {
 	ID                 string            `json:"id"`
 	PreviousResponseID *string           `json:"previous_response_id,omitempty"`
+	Instructions       *string           `json:"instructions,omitempty"`
 	Status             string            `json:"status"`
 	Model              string            `json:"model,omitempty"`
 	CreatedAt          int64             `json:"created_at"`

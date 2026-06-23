@@ -89,6 +89,7 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		storeReq := charon.StoreRequest{
 			ReservationID:      reservationID,
 			PreviousResponseID: req.PreviousResponseID,
+			Instructions:       req.Instructions,
 			Input:              inputItems,
 			Output:             infResp.Output,
 			Status:             infResp.Status,
@@ -120,6 +121,7 @@ func (h *Handler) HandleRetrieve(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:          retrieved.CreatedAt,
 		Status:             retrieved.Status,
 		Model:              retrieved.Model,
+		Instructions:       retrieved.Instructions,
 		PreviousResponseID: retrieved.PreviousResponseID,
 		Output:             retrieved.Output,
 		Store:              true,

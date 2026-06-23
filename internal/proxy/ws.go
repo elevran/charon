@@ -237,6 +237,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 			if err := sw.Commit(charon.CommitRequest{
 				ReservationID:      reservationID,
 				PreviousResponseID: msg.PreviousResponseID,
+				Instructions:       msg.Instructions,
 				Input:              inputItems,
 				FinalItems:         buf.drain(),
 				Usage:              usage,
@@ -249,6 +250,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 			storeReq := charon.StoreRequest{
 				ReservationID:      reservationID,
 				PreviousResponseID: msg.PreviousResponseID,
+				Instructions:       msg.Instructions,
 				Input:              inputItems,
 				Output:             buf.drain(),
 				Usage:              usage,
