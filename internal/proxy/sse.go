@@ -182,6 +182,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 			if err := sw.Commit(charon.CommitRequest{
 				ReservationID:      reservationID,
 				PreviousResponseID: req.PreviousResponseID,
+				Instructions:       req.Instructions,
 				Input:              inputItems,
 				FinalItems:         buf.drain(),
 				Usage:              usage,
@@ -196,6 +197,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 			storeReq := charon.StoreRequest{
 				ReservationID:      reservationID,
 				PreviousResponseID: req.PreviousResponseID,
+				Instructions:       req.Instructions,
 				Input:              inputItems,
 				Output:             buf.drain(),
 				Usage:              usage,

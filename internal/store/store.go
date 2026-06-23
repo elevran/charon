@@ -178,6 +178,7 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 	payload := model.ResponsePayload{
 		ID:                 responseID,
 		PreviousResponseID: req.PreviousResponseID,
+		Instructions:       req.Instructions,
 		InputItems:         rawInput,
 		OutputItems:        req.Output,
 		Usage:              usageRaw,
@@ -397,6 +398,7 @@ func (s *ContextStore) CommitStream(ctx context.Context, responseID string, req 
 	payload := model.ResponsePayload{
 		ID:                 responseID,
 		PreviousResponseID: req.PreviousResponseID,
+		Instructions:       req.Instructions,
 		InputItems:         rawInput,
 		OutputItems:        allOutput,
 		Usage:              req.Usage,
