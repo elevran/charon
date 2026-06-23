@@ -43,4 +43,5 @@ type SSEEvent struct {
 	Response       *Response       `json:"response,omitempty"`
 	OutputIndex    *int            `json:"output_index,omitempty"`
 	Item           json.RawMessage `json:"item,omitempty"`
+	Raw            json.RawMessage `json:"-"`
 }
