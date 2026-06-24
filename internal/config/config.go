@@ -53,8 +53,8 @@ type StorageConfig struct {
 	TTLDays                   int           `json:"ttl_days"`                     // default 30
 	WriteIntentStaleThreshold time.Duration `json:"write_intent_stale_threshold"` // default 5m
 	// Caps — 0 means unbounded.
-	MaxResponses    int64 `json:"max_responses"`     // max total responses in the index
-	MaxPayloadBytes int64 `json:"max_payload_bytes"` // max size of a single response payload blob
+	MaxResponses int64    `json:"max_responses"` // max total responses in the index
+	MaxPayload   ByteSize `json:"max_payload"`   // max size of a single response payload blob
 	// Backend-specific connection settings.
 	Postgres PostgresConfig `json:"postgres"`
 	S3       S3Config       `json:"s3"`
