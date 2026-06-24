@@ -1,5 +1,15 @@
 # Charon
 
+Charon is an internal context-store service for the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses). It bridges the gap between the stateful Responses API and stateless LLM inference:
+
+- Resolves `previous_response_id` chains into the flat context an inference backend needs
+- Persists response payloads (input items, output items) to durable storage
+- Manages write-intent safety and background TTL/recovery workers
+
+Charon is **not** the client-facing API layer. A proxy sits in front of Charon, owns the Responses API surface (REST, SSE, WebSocket), and calls Charon to resolve context before inference and to store results after.
+
+The proxy included in this repository is provided for testing and to demonstrate how a proxy gateway integrates with Charon. It is not intended for production use.
+
 > [!NOTE]
 > Charon implements the **persistence and context-resolution layer** of the Responses API only. It does not implement the agentic loop or any of the following concerns — these must be provided by a separate orchestration service placed in front of Charon:
 > - **Server-side tool execution** — file search, web search, code interpreter, image generation
@@ -8,13 +18,8 @@
 > - **Guardrails** — input and output content moderation
 > - **Conversation management** — dual-storage conversation threading (`conversation` parameter)
 
-Charon is an internal context-store service for the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses). It bridges the gap between the stateful Responses API and stateless LLM inference:
-
-- Resolves `previous_response_id` chains into the flat context an inference backend needs
-- Persists response payloads (input items, output items) to durable storage
-- Manages write-intent safety and background TTL/recovery workers
-
-Charon is **not** the client-facing API layer. A proxy sits in front of Charon, owns the Responses API surface (REST, SSE, WebSocket), and calls Charon to resolve context before inference and to store results after.
+> [!WARNING]
+> Charon is alpha-quality software. APIs, configuration, and storage formats may change without notice. Do not use in production.
 
 ---
 
