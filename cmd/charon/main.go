@@ -66,7 +66,7 @@ func main() {
 		CheckpointInterval: cfg.Charon.Storage.CheckpointInterval,
 		TTLDays:            cfg.Charon.Storage.TTLDays,
 		MaxResponses:       cfg.Charon.Storage.MaxResponses,
-		MaxPayloadBytes:    cfg.Charon.Storage.MaxPayloadBytes,
+		MaxPayloadBytes:    int64(cfg.Charon.Storage.MaxPayload),
 	}
 	svc := store.New(idx, pay, svcCfg, log)
 
