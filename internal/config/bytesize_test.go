@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"encoding/json"
+	"flag"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -78,7 +79,10 @@ func TestByteSizeUnmarshalErrors(t *testing.T) {
 }
 
 func TestByteSizeInConfig(t *testing.T) {
-	cfg, err := config.Load("testdata/bytesize.yaml")
-	require.NoError(t, err)
-	assert.Equal(t, config.ByteSize(10*1024*1024), cfg.Charon.Storage.MaxPayload)
+	opts := config.NewServerOptions()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--config", "testdata/bytesize.yaml"}))
+	require.NoError(t, opts.Complete(fs))
+	assert.Equal(t, config.ByteSize(10*1024*1024), opts.Storage.MaxPayload)
 }
