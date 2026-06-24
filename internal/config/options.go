@@ -168,9 +168,6 @@ type ReconcileOptions struct {
 
 	// Storage is the only piece the reconcile command cares about.
 	Storage StorageOptions
-
-	// WriteIntentStaleThreshold is promoted here for reconcile convenience.
-	WriteIntentStaleThreshold time.Duration
 }
 
 // NewServerOptions returns a ServerOptions pre-filled with built-in defaults.
@@ -203,7 +200,6 @@ func NewReconcileOptions() *ReconcileOptions {
 			TTLDays:                   30,
 			WriteIntentStaleThreshold: 5 * time.Minute,
 		},
-		WriteIntentStaleThreshold: 5 * time.Minute,
 	}
 }
 
@@ -325,7 +321,6 @@ func (o *ReconcileOptions) Complete(fs *flag.FlagSet) error {
 	o.Storage.MaxPayload = fc.Charon.Storage.MaxPayload
 	o.Storage.Postgres = fc.Charon.Storage.Postgres
 	o.Storage.S3 = fc.Charon.Storage.S3
-	o.WriteIntentStaleThreshold = fc.Charon.Storage.WriteIntentStaleThreshold
 
 	return nil
 }
