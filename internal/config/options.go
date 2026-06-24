@@ -155,7 +155,7 @@ type StorageOptions struct {
 	TTLDays                   int
 	WriteIntentStaleThreshold time.Duration
 	MaxResponses              int64
-	MaxPayload ByteSize
+	MaxPayload                ByteSize
 
 	Postgres PostgresConfig
 	S3       S3Config
