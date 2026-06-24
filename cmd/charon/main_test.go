@@ -9,12 +9,11 @@ import (
 	"github.com/elevran/charon/internal/config"
 )
 
-func TestConfigLoading(t *testing.T) {
-	cfg, err := config.Load("")
-	require.NoError(t, err)
-	require.False(t, cfg.Proxy.Enabled)
-	require.Equal(t, ":8080", cfg.Proxy.Listen)
-	require.Equal(t, 10, cfg.Charon.Storage.CheckpointInterval)
+func TestConfigDefaults(t *testing.T) {
+	opts := config.NewServerOptions()
+	require.False(t, opts.ProxyEnabled)
+	require.Equal(t, ":8080", opts.ProxyListen)
+	require.Equal(t, 10, opts.Storage.CheckpointInterval)
 }
 
 func TestListenerBinds(t *testing.T) {
