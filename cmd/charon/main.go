@@ -40,33 +40,49 @@ func main() {
 		subcmd = args[0]
 		args = args[1:]
 	}
-	fs := flag.NewFlagSet("charon", flag.ExitOnError)
-	configPath := fs.String("config", "", "path to config file")
-	_ = fs.Parse(args)
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	if subcmd == "reconcile" {
-		runReconcile(log, *configPath)
+		opts := config.NewReconcileOptions()
+		fs := flag.NewFlagSet("charon reconcile", flag.ExitOnError)
+		opts.AddFlags(fs)
+		_ = fs.Parse(args)
+		if err := opts.Complete(fs); err != nil {
+			log.Error("complete reconcile config", "err", err)
+			os.Exit(1)
+		}
+		if err := opts.Validate(); err != nil {
+			log.Error("validate reconcile config", "err", err)
+			os.Exit(1)
+		}
+		runReconcile(log, opts)
 		return
 	}
 
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		log.Error("load config", "err", err)
+	opts := config.NewServerOptions()
+	fs := flag.NewFlagSet("charon", flag.ExitOnError)
+	opts.AddFlags(fs)
+	_ = fs.Parse(args)
+	if err := opts.Complete(fs); err != nil {
+		log.Error("complete server config", "err", err)
+		os.Exit(1)
+	}
+	if err := opts.Validate(); err != nil {
+		log.Error("validate server config", "err", err)
 		os.Exit(1)
 	}
 
-	idx, pay, cleanupFn := openStorage(cfg.Charon.Storage, log)
+	idx, pay, cleanupFn := openStorage(opts.Storage.ToStorageConfig(), log)
 	if cleanupFn != nil {
 		defer func() { _ = cleanupFn() }()
 	}
 
 	svcCfg := store.Config{
-		CheckpointInterval: cfg.Charon.Storage.CheckpointInterval,
-		TTLDays:            cfg.Charon.Storage.TTLDays,
-		MaxResponses:       cfg.Charon.Storage.MaxResponses,
-		MaxPayloadBytes:    int64(cfg.Charon.Storage.MaxPayload),
+		CheckpointInterval: opts.Storage.CheckpointInterval,
+		TTLDays:            opts.Storage.TTLDays,
+		MaxResponses:       opts.Storage.MaxResponses,
+		MaxPayloadBytes:    int64(opts.Storage.MaxPayload),
 	}
 	svc := store.New(idx, pay, svcCfg, log)
 
@@ -78,18 +94,18 @@ func main() {
 
 	// ── Charon internal API server (always starts) ─────────────────────────
 	charonH := api.NewHandler(svc, log)
-	charonSrv := api.NewServerWithRegistry(cfg.Charon.Listen, charonH, log, reg)
+	charonSrv := api.NewServerWithRegistry(opts.CharonListen, charonH, log, reg)
 
-	// ── Proxy server (starts only when proxy.enabled: true) ────────────────
+	// ── Proxy server (starts only when --proxy / proxy.enabled: true) ──────
 	var proxySrv *api.Server
-	if cfg.Proxy.Enabled {
-		timeout := time.Duration(cfg.Proxy.Inference.TimeoutSeconds) * time.Second
-		infClient := inference.New(cfg.Proxy.Inference.BaseURL, cfg.Proxy.Inference.APIKey, timeout)
-		charonClient := charonpkg.New(cfg.Proxy.CharonURL, timeout)
-		proxyH := proxy.NewHandler(charonClient, infClient, log, cfg.Proxy.Inference.StoreBufferBytes)
+	if opts.ProxyEnabled {
+		timeout := time.Duration(opts.InferenceTimeoutSeconds) * time.Second
+		infClient := inference.New(opts.ProxyBackend, opts.ProxyAPIKey, timeout)
+		charonClient := charonpkg.New(opts.ProxyCharonURL, timeout)
+		proxyH := proxy.NewHandler(charonClient, infClient, log, opts.InferenceStoreBufferBytes)
 		proxyMux := http.NewServeMux()
 		proxy.RegisterHandlers(proxyMux, proxyH)
-		proxySrv = api.NewServerFromMux(cfg.Proxy.Listen, proxyMux, log)
+		proxySrv = api.NewServerFromMux(opts.ProxyListen, proxyMux, log)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -99,24 +115,24 @@ func main() {
 	workerWG.Add(2)
 	go func() {
 		defer workerWG.Done()
-		worker.NewCleaner(idx, pay, log, cfg.Charon.Workers.TTLInterval).Run(ctx)
+		worker.NewCleaner(idx, pay, log, opts.WorkerTTLInterval).Run(ctx)
 	}()
 	go func() {
 		defer workerWG.Done()
 		worker.NewReconciler(idx, pay, log,
-			cfg.Charon.Storage.WriteIntentStaleThreshold,
-			cfg.Charon.Workers.RecoveryInterval).Run(ctx)
+			opts.Storage.WriteIntentStaleThreshold,
+			opts.WorkerRecoveryInterval).Run(ctx)
 	}()
 
 	go func() {
-		log.Info("starting charon internal API", "addr", cfg.Charon.Listen)
+		log.Info("starting charon internal API", "addr", opts.CharonListen)
 		if err := charonSrv.Start(); err != nil && err != http.ErrServerClosed {
 			log.Error("charon server error", "err", err)
 		}
 	}()
-	if cfg.Proxy.Enabled {
+	if opts.ProxyEnabled {
 		go func() {
-			log.Info("starting proxy server", "addr", cfg.Proxy.Listen)
+			log.Info("starting proxy server", "addr", opts.ProxyListen)
 			if err := proxySrv.Start(); err != nil && err != http.ErrServerClosed {
 				log.Error("proxy server error", "err", err)
 			}
@@ -137,7 +153,7 @@ func main() {
 	if err := charonSrv.Shutdown(shutdownCtx); err != nil {
 		log.Error("charon shutdown error", "err", err)
 	}
-	if cfg.Proxy.Enabled {
+	if opts.ProxyEnabled {
 		if err := proxySrv.Shutdown(shutdownCtx); err != nil {
 			log.Error("proxy shutdown error", "err", err)
 		}
@@ -275,23 +291,16 @@ func openStorage(cfg config.StorageConfig, log *slog.Logger) (storage.IndexStore
 }
 
 // runReconcile opens storage, runs a single write-intent recovery sweep, and exits.
-// Usage: charon reconcile --config config.yaml
-func runReconcile(log *slog.Logger, configPath string) {
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		log.Error("load config", "err", err)
-		os.Exit(1)
-	}
-
-	idx, pay, cleanup := openStorage(cfg.Charon.Storage, log)
+func runReconcile(log *slog.Logger, opts *config.ReconcileOptions) {
+	idx, pay, cleanup := openStorage(opts.Storage.ToStorageConfig(), log)
 	if cleanup != nil {
 		defer func() { _ = cleanup() }()
 	}
 
 	ctx := context.Background()
 	r := worker.NewReconciler(idx, pay, log,
-		cfg.Charon.Storage.WriteIntentStaleThreshold,
-		cfg.Charon.Workers.RecoveryInterval)
+		opts.Storage.WriteIntentStaleThreshold,
+		5*time.Minute) // RecoveryInterval not relevant for one-shot run
 	r.RunOnce(ctx)
 	log.Info("reconcile sweep complete")
 }
