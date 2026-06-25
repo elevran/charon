@@ -1,8 +1,10 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -223,4 +225,113 @@ func unmarshalInputItems(items []json.RawMessage) (responses.ResponseInputParam,
 		}
 	}
 	return params, nil
+}
+
+// HandleListInputItems handles GET /responses/{id}/input_items.
+// Supports ?after=<cursor>&limit=<n> pagination. All input items are returned
+// as stored; compaction items are not filtered because they represent prior
+// context that was folded into this turn's input.
+func (h *Handler) HandleListInputItems(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	_, payload, err := h.svc.Retrieve(r.Context(), id)
+	if err != nil {
+		status, msg := mapStatus(err)
+		if status == http.StatusInternalServerError {
+			h.log.Error("retrieve for input_items", "id", id, "err", err)
+		}
+		writeError(w, status, msg)
+		return
+	}
+	page, parseErr := paginateItems(r, payload.InputItems)
+	if parseErr != nil {
+		writeError(w, http.StatusBadRequest, parseErr.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+// HandleListOutputItems handles GET /responses/{id}/output_items.
+// Supports ?after=<cursor>&limit=<n> pagination. Compaction items are excluded.
+func (h *Handler) HandleListOutputItems(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	_, payload, err := h.svc.Retrieve(r.Context(), id)
+	if err != nil {
+		status, msg := mapStatus(err)
+		if status == http.StatusInternalServerError {
+			h.log.Error("retrieve for output_items", "id", id, "err", err)
+		}
+		writeError(w, status, msg)
+		return
+	}
+	page, parseErr := paginateItems(r, filterCompactionItems(payload.OutputItems))
+	if parseErr != nil {
+		writeError(w, http.StatusBadRequest, parseErr.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+const defaultPageLimit = 100
+
+// paginateItems applies ?after and ?limit to a slice of items and returns an ItemsPage.
+func paginateItems(r *http.Request, items []json.RawMessage) (model.ItemsPage, error) {
+	limit := defaultPageLimit
+	if s := r.URL.Query().Get("limit"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n <= 0 {
+			return model.ItemsPage{}, fmt.Errorf("limit must be a positive integer")
+		}
+		if n > defaultPageLimit {
+			n = defaultPageLimit
+		}
+		limit = n
+	}
+
+	start := 0
+	if after := r.URL.Query().Get("after"); after != "" {
+		dec, err := base64.StdEncoding.DecodeString(after)
+		if err != nil {
+			return model.ItemsPage{}, fmt.Errorf("invalid cursor")
+		}
+		idx, err := strconv.Atoi(string(dec))
+		if err != nil || idx < 0 {
+			return model.ItemsPage{}, fmt.Errorf("invalid cursor")
+		}
+		start = idx
+	}
+
+	if start >= len(items) {
+		return model.ItemsPage{Items: []json.RawMessage{}}, nil
+	}
+
+	end := start + limit
+	hasMore := end < len(items)
+	if end > len(items) {
+		end = len(items)
+	}
+
+	page := model.ItemsPage{
+		Items:   items[start:end],
+		HasMore: hasMore,
+	}
+	if hasMore {
+		cursor := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
+		page.NextCursor = &cursor
+	}
+	return page, nil
+}
+
+// filterCompactionItems returns items with compaction-type items removed.
+func filterCompactionItems(items []json.RawMessage) []json.RawMessage {
+	out := make([]json.RawMessage, 0, len(items))
+	for _, raw := range items {
+		var t struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &t); err != nil || t.Type == string(model.ItemTypeCompaction) {
+			continue
+		}
+		out = append(out, raw)
+	}
+	return out
 }
