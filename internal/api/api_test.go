@@ -170,6 +170,91 @@ func TestDeleteNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
+func TestListInputOutputItems(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Use a commit (PATCH) to store a response whose input contains a compaction
+	// item — compaction items reach the input via the streaming/commit path which
+	// accepts raw JSON, not the OpenAI SDK types used by POST.
+	out1 := json.RawMessage(`{"type":"message","role":"assistant","text":"hi"}`)
+	out2 := json.RawMessage(`{"type":"compaction","encrypted_content":"secret"}`)
+	out3 := json.RawMessage(`{"type":"message","role":"assistant","text":"bye"}`)
+	chunk := model.ChunkRequest{Type: "chunk", Seq: 0, Items: []json.RawMessage{out1, out2, out3}}
+	chunkResp := doJSON(t, srv, "PATCH", "/responses/resp_page1", chunk)
+	defer chunkResp.Body.Close()
+	require.Equal(t, http.StatusNoContent, chunkResp.StatusCode)
+
+	// Input: one regular message + one compaction item (prior compressed context).
+	commit := model.ChunkRequest{
+		Type: "commit",
+		Seq:  1,
+		Input: []json.RawMessage{
+			json.RawMessage(`{"type":"message","role":"user","text":"hello"}`),
+			json.RawMessage(`{"type":"compaction","encrypted_content":"compressed"}`),
+		},
+		Status: "completed",
+	}
+	commitResp := doJSON(t, srv, "PATCH", "/responses/resp_page1", commit)
+	defer commitResp.Body.Close()
+	require.Equal(t, http.StatusNoContent, commitResp.StatusCode)
+
+	t.Run("input_items returns all items including compaction", func(t *testing.T) {
+		r := doJSON(t, srv, "GET", "/responses/resp_page1/input_items", nil)
+		defer r.Body.Close()
+		require.Equal(t, http.StatusOK, r.StatusCode)
+		var page model.ItemsPage
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&page))
+		// Both the message and the compaction item must appear — compaction items
+		// in input represent prior compressed context and should not be hidden.
+		assert.Len(t, page.Items, 2)
+		assert.False(t, page.HasMore)
+		assert.Nil(t, page.NextCursor)
+	})
+
+	t.Run("output_items hides compaction items", func(t *testing.T) {
+		r := doJSON(t, srv, "GET", "/responses/resp_page1/output_items", nil)
+		defer r.Body.Close()
+		require.Equal(t, http.StatusOK, r.StatusCode)
+		var page model.ItemsPage
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&page))
+		assert.Len(t, page.Items, 2) // out1 and out3; out2 (compaction) excluded
+		assert.False(t, page.HasMore)
+	})
+
+	t.Run("pagination with limit=1", func(t *testing.T) {
+		r := doJSON(t, srv, "GET", "/responses/resp_page1/output_items?limit=1", nil)
+		defer r.Body.Close()
+		require.Equal(t, http.StatusOK, r.StatusCode)
+		var page model.ItemsPage
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&page))
+		assert.Len(t, page.Items, 1)
+		assert.True(t, page.HasMore)
+		require.NotNil(t, page.NextCursor)
+
+		// Follow cursor
+		r2 := doJSON(t, srv, "GET", "/responses/resp_page1/output_items?limit=1&after="+*page.NextCursor, nil)
+		defer r2.Body.Close()
+		require.Equal(t, http.StatusOK, r2.StatusCode)
+		var page2 model.ItemsPage
+		require.NoError(t, json.NewDecoder(r2.Body).Decode(&page2))
+		assert.Len(t, page2.Items, 1)
+		assert.False(t, page2.HasMore)
+		assert.Nil(t, page2.NextCursor)
+	})
+
+	t.Run("invalid cursor returns 400", func(t *testing.T) {
+		r := doJSON(t, srv, "GET", "/responses/resp_page1/output_items?after=!!notbase64!!", nil)
+		defer r.Body.Close()
+		assert.Equal(t, http.StatusBadRequest, r.StatusCode)
+	})
+
+	t.Run("unknown id returns 404", func(t *testing.T) {
+		r := doJSON(t, srv, "GET", "/responses/resp_unknown/output_items", nil)
+		defer r.Body.Close()
+		assert.Equal(t, http.StatusNotFound, r.StatusCode)
+	})
+}
+
 // TestResolveMaxBytesExceeded verifies that GET /responses/{id}/context?max_bytes=<small>
 // returns 422 with error "context_too_large" when the assembled context exceeds the limit.
 func TestResolveMaxBytesExceeded(t *testing.T) {
