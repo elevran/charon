@@ -109,6 +109,7 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 			Output:             infResp.Output,
 			Status:             infResp.Status,
 			Model:              infResp.Model,
+			Background:         req.Background,
 		}
 		if err := h.charon.Store(ctx, infResp.ID, storeReq); err != nil {
 			h.log.Error("charon store", "id", infResp.ID, "err", err)
@@ -136,6 +137,7 @@ func (h *Handler) HandleRetrieve(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:          retrieved.CreatedAt,
 		Status:             retrieved.Status,
 		Model:              retrieved.Model,
+		Background:         retrieved.Background,
 		Instructions:       retrieved.Instructions,
 		PreviousResponseID: retrieved.PreviousResponseID,
 		Output:             retrieved.Output,

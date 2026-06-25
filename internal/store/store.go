@@ -276,6 +276,7 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 		CheckpointKey:      ckKey,
 		Status:             model.StatusCompleted,
 		Model:              req.Model,
+		Background:         req.Background,
 		CreatedAt:          now,
 		ExpiresAt:          s.computeExpiresAt(),
 	}
@@ -502,6 +503,7 @@ func (s *ContextStore) CommitStream(ctx context.Context, responseID string, req 
 		CheckpointKey:      ckKey,
 		Status:             status,
 		Model:              req.Model,
+		Background:         req.Background,
 		CreatedAt:          now,
 		ExpiresAt:          s.computeExpiresAt(),
 	}

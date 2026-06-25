@@ -61,6 +61,7 @@ type CreateRequest struct {
 	Instructions       *string           `json:"instructions,omitempty"`
 	Stream             bool              `json:"stream"`
 	Store              *bool             `json:"store,omitempty"` // nil == true
+	Background         bool              `json:"background,omitempty"`
 	Tools              []json.RawMessage `json:"tools,omitempty"`
 	ToolChoice         json.RawMessage   `json:"tool_choice,omitempty"`
 }
