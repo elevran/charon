@@ -25,6 +25,7 @@ type StoreRequest struct {
 	Usage              json.RawMessage   `json:"usage,omitempty"`
 	Status             string            `json:"status"`
 	Model              string            `json:"model,omitempty"`
+	Background         bool              `json:"background,omitempty"`
 }
 
 // CommitRequest is passed to StreamWriter.Commit to finalise a streaming store.
@@ -37,6 +38,7 @@ type CommitRequest struct {
 	Usage              json.RawMessage
 	Status             string
 	Model              string
+	Background         bool
 }
 
 // StreamWriter sends output item batches to Charon incrementally via PATCH,
@@ -129,6 +131,9 @@ func (w *StreamWriter) Commit(req CommitRequest) error {
 	if len(req.Usage) > 0 {
 		body["usage"] = req.Usage
 	}
+	if req.Background {
+		body["background"] = true
+	}
 	return w.patch(body)
 }
 
@@ -158,6 +163,7 @@ type RetrieveResponse struct {
 	Instructions       *string           `json:"instructions,omitempty"`
 	Status             string            `json:"status"`
 	Model              string            `json:"model,omitempty"`
+	Background         bool              `json:"background,omitempty"`
 	CreatedAt          int64             `json:"created_at"`
 	ExpiresAt          *int64            `json:"expires_at,omitempty"`
 	Input              []json.RawMessage `json:"input"`

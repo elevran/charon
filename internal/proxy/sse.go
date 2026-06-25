@@ -208,6 +208,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 				Usage:              usage,
 				Status:             finalInfResp.Status,
 				Model:              finalInfResp.Model,
+				Background:         req.Background,
 			}); err != nil {
 				h.log.Error("charon stream commit", "id", canonicalID, "err", err)
 			}
@@ -223,6 +224,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 				Usage:              usage,
 				Status:             finalInfResp.Status,
 				Model:              finalInfResp.Model,
+				Background:         req.Background,
 			}
 			if err := h.charon.Store(ctx, canonicalID, storeReq); err != nil {
 				h.log.Error("charon store after stream", "id", canonicalID, "err", err)

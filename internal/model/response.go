@@ -25,6 +25,7 @@ type ResponseMeta struct {
 	CheckpointKey      *string // non-nil when this position is a checkpoint
 	OwnerPrincipal     string
 	Model              string
+	Background         bool
 	Status             ResponseStatus
 	CreatedAt          int64  // Unix epoch seconds
 	ExpiresAt          *int64 // Unix epoch seconds; nil means no expiry
@@ -50,6 +51,7 @@ type StoreRequest struct {
 	Usage              json.RawMessage              `json:"usage,omitempty"` // raw JSON; avoids SDK type coupling
 	Status             responses.ResponseStatus     `json:"status"`
 	Model              string                       `json:"model,omitempty"`
+	Background         bool                         `json:"background,omitempty"`
 }
 
 // ChunkRequest is the body of PATCH /responses/{id}.
@@ -73,6 +75,7 @@ type ChunkRequest struct {
 	Usage              json.RawMessage   `json:"usage,omitempty"`
 	Status             string            `json:"status,omitempty"`
 	Model              string            `json:"model,omitempty"`
+	Background         bool              `json:"background,omitempty"`
 }
 
 // ResolveResponse is the body returned by GET /responses/{id}/context.
@@ -88,6 +91,7 @@ type RetrieveResponse struct {
 	Instructions       *string                      `json:"instructions,omitempty"`
 	Status             responses.ResponseStatus     `json:"status"`
 	Model              string                       `json:"model,omitempty"`
+	Background         bool                         `json:"background,omitempty"`
 	CreatedAt          int64                        `json:"created_at"`
 	ExpiresAt          *int64                       `json:"expires_at,omitempty"`
 	Input              responses.ResponseInputParam `json:"input"`
