@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/elevran/charon/internal/metrics"
 )
 
@@ -76,6 +79,19 @@ func RequestLogger(log *slog.Logger) Middleware {
 			metrics.HTTPRequestsTotal.WithLabelValues(endpoint, strconv.Itoa(status)).Inc()
 			metrics.HTTPRequestDuration.WithLabelValues(endpoint).Observe(dur.Seconds())
 		})
+	}
+}
+
+// Tracing wraps the handler with otelhttp so every request creates a span.
+// When tp is nil the handler is returned unchanged (tracing disabled).
+func Tracing(serverName string, tp trace.TracerProvider) Middleware {
+	return func(next http.Handler) http.Handler {
+		if tp == nil {
+			return next
+		}
+		return otelhttp.NewHandler(next, serverName,
+			otelhttp.WithTracerProvider(tp),
+		)
 	}
 }
 
