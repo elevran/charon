@@ -53,7 +53,9 @@ func mapStatus(err error) (int, string) {
 }
 
 // HandleResolve handles GET /responses/{id}/context.
-// Accepts an optional max_bytes query parameter to cap the assembled context size.
+// Accepts an optional max_bytes query parameter (integer bytes, e.g. ?max_bytes=1048576) to cap
+// the assembled context size. Unlike the storage.max_context_bytes config field, this parameter
+// does not accept unit suffixes (KB, MB, GB) — only bare integers are valid.
 func (h *Handler) HandleResolve(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
