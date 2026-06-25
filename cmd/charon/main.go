@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/elevran/charon/internal/api"
 	charonpkg "github.com/elevran/charon/internal/charon"
@@ -27,6 +28,7 @@ import (
 	s3store "github.com/elevran/charon/internal/storage/s3"
 	sqlitestore "github.com/elevran/charon/internal/storage/sqlite"
 	"github.com/elevran/charon/internal/store"
+	"github.com/elevran/charon/internal/telemetry"
 	"github.com/elevran/charon/internal/worker"
 )
 
@@ -78,6 +80,36 @@ func main() {
 		defer func() { _ = cleanupFn() }()
 	}
 
+	// Initialise OTel tracing (no-op when ExporterURL is empty).
+	charonTP, err := telemetry.Init(context.Background(), opts.Telemetry.CharonService, opts.Telemetry.ExporterURL)
+	if err != nil {
+		log.Error("init charon tracer", "err", err)
+		os.Exit(1) //nolint:gocritic
+	}
+	if charonTP != nil {
+		defer func() {
+			shutdownCtx2, c2 := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c2()
+			_ = charonTP.Shutdown(shutdownCtx2)
+		}()
+	}
+
+	var proxyTP *sdktrace.TracerProvider
+	if opts.ProxyEnabled {
+		proxyTP, err = telemetry.Init(context.Background(), opts.Telemetry.ProxyService, opts.Telemetry.ExporterURL)
+		if err != nil {
+			log.Error("init proxy tracer", "err", err)
+			os.Exit(1) //nolint:gocritic
+		}
+		if proxyTP != nil {
+			defer func() {
+				shutdownCtx3, c3 := context.WithTimeout(context.Background(), 5*time.Second)
+				defer c3()
+				_ = proxyTP.Shutdown(shutdownCtx3)
+			}()
+		}
+	}
+
 	svcCfg := store.Config{
 		CheckpointInterval: opts.Storage.CheckpointInterval,
 		TTLDays:            opts.Storage.TTLDays,
@@ -85,6 +117,7 @@ func main() {
 		MaxPayloadBytes:    int64(opts.Storage.MaxPayload),
 		MaxChainDepth:      opts.Storage.MaxChainDepth,
 		MaxContextBytes:    int64(opts.Storage.MaxContextBytes),
+		TracerProvider:     charonTP,
 	}
 	svc := store.New(idx, pay, svcCfg, log)
 
@@ -96,7 +129,7 @@ func main() {
 
 	// ── Charon internal API server (always starts) ─────────────────────────
 	charonH := api.NewHandler(svc, log)
-	charonSrv := api.NewServerWithRegistry(opts.CharonListen, charonH, log, reg)
+	charonSrv := api.NewServerWithRegistry(opts.CharonListen, charonH, log, reg, charonTP)
 
 	// ── Proxy server (starts only when --proxy / proxy.enabled: true) ──────
 	var proxySrv *api.Server
@@ -107,7 +140,7 @@ func main() {
 		proxyH := proxy.NewHandler(charonClient, infClient, log, opts.InferenceStoreBufferBytes)
 		proxyMux := http.NewServeMux()
 		proxy.RegisterHandlers(proxyMux, proxyH)
-		proxySrv = api.NewServerFromMux(opts.ProxyListen, proxyMux, log)
+		proxySrv = api.NewServerFromMux(opts.ProxyListen, proxyMux, log, proxyTP)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
