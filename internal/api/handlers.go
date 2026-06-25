@@ -210,7 +210,9 @@ func unmarshalInputItems(items []json.RawMessage) (responses.ResponseInputParam,
 }
 
 // HandleListInputItems handles GET /responses/{id}/input_items.
-// Supports ?after=<cursor>&limit=<n> pagination. Compaction items are excluded.
+// Supports ?after=<cursor>&limit=<n> pagination. All input items are returned
+// as stored; compaction items are not filtered because they represent prior
+// context that was folded into this turn's input.
 func (h *Handler) HandleListInputItems(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	_, payload, err := h.svc.Retrieve(r.Context(), id)
@@ -222,7 +224,7 @@ func (h *Handler) HandleListInputItems(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, msg)
 		return
 	}
-	page, parseErr := paginateItems(r, filterCompactionItems(payload.InputItems))
+	page, parseErr := paginateItems(r, payload.InputItems)
 	if parseErr != nil {
 		writeError(w, http.StatusBadRequest, parseErr.Error())
 		return

@@ -173,26 +173,40 @@ func TestDeleteNotFound(t *testing.T) {
 func TestListInputOutputItems(t *testing.T) {
 	srv := newTestServer(t)
 
-	inp := json.RawMessage(`{"type":"message","role":"user","text":"hello"}`)
+	// Use a commit (PATCH) to store a response whose input contains a compaction
+	// item — compaction items reach the input via the streaming/commit path which
+	// accepts raw JSON, not the OpenAI SDK types used by POST.
 	out1 := json.RawMessage(`{"type":"message","role":"assistant","text":"hi"}`)
 	out2 := json.RawMessage(`{"type":"compaction","encrypted_content":"secret"}`)
 	out3 := json.RawMessage(`{"type":"message","role":"assistant","text":"bye"}`)
-	req := model.StoreRequest{
-		Input:  toInputParam(inp),
-		Output: []json.RawMessage{out1, out2, out3},
+	chunk := model.ChunkRequest{Type: "chunk", Seq: 0, Items: []json.RawMessage{out1, out2, out3}}
+	chunkResp := doJSON(t, srv, "PATCH", "/responses/resp_page1", chunk)
+	defer chunkResp.Body.Close()
+	require.Equal(t, http.StatusNoContent, chunkResp.StatusCode)
+
+	// Input: one regular message + one compaction item (prior compressed context).
+	commit := model.ChunkRequest{
+		Type: "commit",
+		Seq:  1,
+		Input: []json.RawMessage{
+			json.RawMessage(`{"type":"message","role":"user","text":"hello"}`),
+			json.RawMessage(`{"type":"compaction","encrypted_content":"compressed"}`),
+		},
 		Status: "completed",
 	}
-	storeResp := doJSON(t, srv, "POST", "/responses/resp_page1", req)
-	defer storeResp.Body.Close()
-	require.Equal(t, http.StatusNoContent, storeResp.StatusCode)
+	commitResp := doJSON(t, srv, "PATCH", "/responses/resp_page1", commit)
+	defer commitResp.Body.Close()
+	require.Equal(t, http.StatusNoContent, commitResp.StatusCode)
 
-	t.Run("input_items returns all input items", func(t *testing.T) {
+	t.Run("input_items returns all items including compaction", func(t *testing.T) {
 		r := doJSON(t, srv, "GET", "/responses/resp_page1/input_items", nil)
 		defer r.Body.Close()
 		require.Equal(t, http.StatusOK, r.StatusCode)
 		var page model.ItemsPage
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&page))
-		assert.Len(t, page.Items, 1)
+		// Both the message and the compaction item must appear — compaction items
+		// in input represent prior compressed context and should not be hidden.
+		assert.Len(t, page.Items, 2)
 		assert.False(t, page.HasMore)
 		assert.Nil(t, page.NextCursor)
 	})
