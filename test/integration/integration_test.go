@@ -376,7 +376,6 @@ func TestTTLExpiry(t *testing.T) {
 
 			// Run a single TTL sweep directly.
 			sweepTTL(t, fx.index, fx.payloads, fx.log)
-			_ = worker.NewCleaner // referenced so import is used
 
 			r2 := fx.doJSON(t, "GET", "/responses/resp_ttl1", nil)
 			defer r2.Body.Close()
@@ -417,8 +416,6 @@ func TestChunkedStreamInOrder(t *testing.T) {
 			}
 
 			// Commit.
-			var inpParam responses.ResponseInputItemUnionParam
-			_ = json.Unmarshal(json.RawMessage(`{"type":"message","role":"user","text":"stream-in"}`), &inpParam)
 			commit := model.ChunkRequest{
 				Type:   "commit",
 				Seq:    3,
