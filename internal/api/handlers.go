@@ -148,6 +148,7 @@ func (h *Handler) HandleRetrieve(w http.ResponseWriter, r *http.Request) {
 		Instructions:       payload.Instructions,
 		Status:             responses.ResponseStatus(meta.Status),
 		Model:              meta.Model,
+		Background:         meta.Background,
 		CreatedAt:          meta.CreatedAt,
 		ExpiresAt:          meta.ExpiresAt,
 		Input:              input,
