@@ -42,6 +42,9 @@ var (
 	TTLExpirationsTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "ttl_expirations_total"},
 	)
+	EvictionsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "evictions_total"},
+	)
 	WorkerSweepDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "worker_sweep_duration_seconds",
@@ -71,6 +74,7 @@ func Register(reg prometheus.Registerer, namespace string) error {
 		CheckpointWritesTotal,
 		CheckpointSizeBytes,
 		TTLExpirationsTotal,
+		EvictionsTotal,
 		WorkerSweepDuration,
 	} {
 		if err := wrapped.Register(c); err != nil {

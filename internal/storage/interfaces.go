@@ -34,6 +34,10 @@ type IndexStore interface {
 
 	// Count returns the total number of response records. Used to enforce MaxResponses caps.
 	Count(ctx context.Context) (int64, error)
+
+	// ListOldest returns up to limit response records ordered by CreatedAt ascending.
+	// Used by the capacity-based eviction sweep to find chains to evict first.
+	ListOldest(ctx context.Context, limit int) ([]model.ResponseMeta, error)
 }
 
 // PayloadStore manages serialised response content blobs.

@@ -197,6 +197,19 @@ func (s *IndexStore) Count(ctx context.Context) (int64, error) {
 	return n, err
 }
 
+// ListOldest returns up to limit response records ordered by CreatedAt ascending.
+func (s *IndexStore) ListOldest(ctx context.Context, limit int) ([]model.ResponseMeta, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, previous_response_id, chain_root_id, position, is_checkpoint,
+		        owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key
+		 FROM responses ORDER BY created_at ASC, id ASC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMetaRows(rows)
+}
+
 // --- scan helpers ---
 
 // responseRow is the on-disk shape of a responses table row.

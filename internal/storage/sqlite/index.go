@@ -47,6 +47,7 @@ type indexStmts struct {
 	deleteResp       *sql.Stmt  // DELETE FROM responses WHERE id = ?
 	countResp        *sql.Stmt  // SELECT COUNT(*) FROM responses
 	listExpired      *sqlx.Stmt // SELECT * FROM responses WHERE expires_at < ?
+	listOldest       *sqlx.Stmt // SELECT * FROM responses ORDER BY created_at ASC LIMIT ?
 	insertIntent     *sql.Stmt  // INSERT INTO write_intents
 	updateIntent     *sql.Stmt  // UPDATE write_intents SET phase=?, updated_at=? WHERE intent_id=?
 	listStaleIntents *sqlx.Stmt // SELECT * FROM write_intents WHERE phase NOT IN ... AND updated_at < ?
@@ -66,6 +67,8 @@ const (
 	sqlCountResp = `SELECT COUNT(*) FROM responses`
 
 	sqlListExpired = `SELECT * FROM responses WHERE expires_at IS NOT NULL AND expires_at < ?`
+
+	sqlListOldest = `SELECT * FROM responses ORDER BY created_at ASC, id ASC LIMIT ?`
 
 	sqlInsertIntent = `INSERT INTO write_intents
 		(intent_id, response_id, reservation_id, payload_key, phase, created_at, updated_at)
@@ -110,6 +113,7 @@ func NewIndexStore(db *sqlx.DB) (*IndexStore, error) {
 	s.stmts.deleteResp = prepare(sqlDeleteResp)
 	s.stmts.countResp = prepare(sqlCountResp)
 	s.stmts.listExpired = preparex(sqlListExpired)
+	s.stmts.listOldest = preparex(sqlListOldest)
 	s.stmts.insertIntent = prepare(sqlInsertIntent)
 	s.stmts.updateIntent = prepare(sqlUpdateIntent)
 	s.stmts.listStaleIntents = preparex(sqlListStaleIntents)
@@ -207,6 +211,15 @@ func (s *IndexStore) List(_ context.Context, opts storage.ListOptions) ([]model.
 
 func (s *IndexStore) ListExpired(_ context.Context, before int64) ([]model.ResponseMeta, error) {
 	rows, err := s.stmts.listExpired.Queryx(before)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanMetaRows(rows)
+}
+
+func (s *IndexStore) ListOldest(_ context.Context, limit int) ([]model.ResponseMeta, error) {
+	rows, err := s.stmts.listOldest.Queryx(limit)
 	if err != nil {
 		return nil, err
 	}

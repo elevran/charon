@@ -151,3 +151,24 @@ func (s *IndexStore) Count(_ context.Context) (int64, error) {
 	defer s.mu.RUnlock()
 	return int64(len(s.records)), nil
 }
+
+func (s *IndexStore) ListOldest(_ context.Context, limit int) ([]model.ResponseMeta, error) {
+	s.mu.RLock()
+	results := make([]model.ResponseMeta, 0, len(s.records))
+	for _, m := range s.records {
+		results = append(results, m)
+	}
+	s.mu.RUnlock()
+
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].CreatedAt != results[j].CreatedAt {
+			return results[i].CreatedAt < results[j].CreatedAt
+		}
+		return results[i].ID < results[j].ID
+	})
+
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}

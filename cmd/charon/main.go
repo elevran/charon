@@ -150,7 +150,8 @@ func main() {
 	workerWG.Add(2)
 	go func() {
 		defer workerWG.Done()
-		worker.NewCleaner(idx, pay, log, opts.WorkerTTLInterval).Run(ctx)
+		worker.NewCleanerWithEviction(idx, pay, log, opts.WorkerTTLInterval,
+			opts.Storage.MaxResponses, opts.Storage.EvictionHighWatermark).Run(ctx)
 	}()
 	go func() {
 		defer workerWG.Done()

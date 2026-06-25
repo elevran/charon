@@ -49,6 +49,7 @@ type fileStorageConfig struct {
 	MaxPayload                ByteSize       `json:"max_payload"`
 	MaxChainDepth             int            `json:"max_chain_depth"`
 	MaxContextBytes           ByteSize       `json:"max_context_bytes"`
+	EvictionHighWatermark     float64        `json:"eviction_high_watermark"`
 	Postgres                  PostgresConfig `json:"postgres"`
 	S3                        S3Config       `json:"s3"`
 }
@@ -97,6 +98,9 @@ func applyFileDefaults(fc *fileConfig) {
 	}
 	if fc.Charon.Storage.WriteIntentStaleThreshold <= 0 {
 		fc.Charon.Storage.WriteIntentStaleThreshold = 5 * time.Minute
+	}
+	if fc.Charon.Storage.EvictionHighWatermark <= 0 {
+		fc.Charon.Storage.EvictionHighWatermark = 0.9
 	}
 	if fc.Charon.Workers.TTLInterval <= 0 {
 		fc.Charon.Workers.TTLInterval = time.Hour
@@ -176,6 +180,7 @@ type StorageOptions struct {
 	MaxPayload                ByteSize
 	MaxChainDepth             int
 	MaxContextBytes           ByteSize
+	EvictionHighWatermark     float64
 
 	Postgres PostgresConfig
 	S3       S3Config
@@ -211,6 +216,7 @@ func NewServerOptions() *ServerOptions {
 			CheckpointInterval:        10,
 			TTLDays:                   30,
 			WriteIntentStaleThreshold: 5 * time.Minute,
+			EvictionHighWatermark:     0.9,
 		},
 		WorkerTTLInterval:      time.Hour,
 		WorkerRecoveryInterval: 5 * time.Minute,
@@ -230,6 +236,7 @@ func NewReconcileOptions() *ReconcileOptions {
 			CheckpointInterval:        10,
 			TTLDays:                   30,
 			WriteIntentStaleThreshold: 5 * time.Minute,
+			EvictionHighWatermark:     0.9,
 		},
 	}
 }
@@ -308,6 +315,7 @@ func (o *ServerOptions) Complete(fs *flag.FlagSet) error {
 	o.Storage.MaxPayload = fc.Charon.Storage.MaxPayload
 	o.Storage.MaxChainDepth = fc.Charon.Storage.MaxChainDepth
 	o.Storage.MaxContextBytes = fc.Charon.Storage.MaxContextBytes
+	o.Storage.EvictionHighWatermark = fc.Charon.Storage.EvictionHighWatermark
 	o.Storage.Postgres = fc.Charon.Storage.Postgres
 	o.Storage.S3 = fc.Charon.Storage.S3
 
@@ -362,6 +370,7 @@ func (o *ReconcileOptions) Complete(fs *flag.FlagSet) error {
 	o.Storage.MaxPayload = fc.Charon.Storage.MaxPayload
 	o.Storage.MaxChainDepth = fc.Charon.Storage.MaxChainDepth
 	o.Storage.MaxContextBytes = fc.Charon.Storage.MaxContextBytes
+	o.Storage.EvictionHighWatermark = fc.Charon.Storage.EvictionHighWatermark
 	o.Storage.Postgres = fc.Charon.Storage.Postgres
 	o.Storage.S3 = fc.Charon.Storage.S3
 

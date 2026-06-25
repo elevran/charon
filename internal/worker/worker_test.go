@@ -188,3 +188,100 @@ func TestRecoveryWorkerStopsCleanly(t *testing.T) {
 		t.Fatal("RecoveryWorker did not stop within 1s after cancel")
 	}
 }
+
+// --- Eviction ---
+
+// storeChain stores n responses as a chain (each references the previous) and
+// returns the root ID. All entries are created at baseTime + i seconds so the
+// chains can be ordered by age.
+func storeChain(t *testing.T, idx *memory.IndexStore, pay *memory.PayloadStore, rootID string, n int, baseTime int64) {
+	t.Helper()
+	var prevID *string
+	for i := 0; i < n; i++ {
+		id := rootID
+		if i > 0 {
+			id = rootID + "_" + string(rune('a'+i))
+		}
+		payKey := id + "_pay"
+		require.NoError(t, pay.Put(ctx, payKey, []byte("data")))
+		require.NoError(t, idx.Put(ctx, model.ResponseMeta{
+			ID:                 id,
+			PreviousResponseID: prevID,
+			ChainRootID:        rootID,
+			Position:           i,
+			PayloadKey:         payKey,
+			Status:             model.StatusCompleted,
+			CreatedAt:          baseTime + int64(i),
+		}))
+		s := id
+		prevID = &s
+	}
+}
+
+func TestEvictionDeletesOldestChains(t *testing.T) {
+	idx := memory.NewIndexStore()
+	pay := memory.NewPayloadStore()
+
+	// Create 3 chains of 2 entries each (6 total).
+	// Chains are aged: chain A is oldest, chain C is newest.
+	now := time.Now().Unix()
+	storeChain(t, idx, pay, "chainA", 2, now-300)
+	storeChain(t, idx, pay, "chainB", 2, now-200)
+	storeChain(t, idx, pay, "chainC", 2, now-100)
+
+	count, err := idx.Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(6), count)
+
+	// maxResponses=6, watermark=90% → triggers at 6; evict down to 80% (4 entries → target 4).
+	// But with a small store, 80% of 6 = 4.8 → 4. We need to evict at least chainA (2 entries)
+	// to get below 5.4 (high watermark).
+	w := worker.NewCleanerWithEviction(idx, pay, logger, time.Hour, 6, 0.9)
+	w.EvictOnce(ctx)
+
+	afterCount, err := idx.Count(ctx)
+	require.NoError(t, err)
+	// After eviction we should be at or below 80% of 6 (4.8 → 4 entries).
+	assert.LessOrEqual(t, afterCount, int64(4), "expected count to drop to ≤4 after eviction")
+
+	// chainA (oldest) must be gone.
+	_, errA := idx.Get(ctx, "chainA")
+	assert.ErrorIs(t, errA, storage.ErrNotFound, "chainA root should be evicted")
+	_, errA2 := idx.Get(ctx, "chainA_b")
+	assert.ErrorIs(t, errA2, storage.ErrNotFound, "chainA second entry should be evicted")
+
+	// chainC (newest) must still be present.
+	_, errC := idx.Get(ctx, "chainC")
+	assert.NoError(t, errC, "chainC (newest) should survive eviction")
+}
+
+func TestEvictionDisabledWhenMaxResponsesZero(t *testing.T) {
+	idx := memory.NewIndexStore()
+	pay := memory.NewPayloadStore()
+
+	now := time.Now().Unix()
+	storeChain(t, idx, pay, "chainX", 3, now-100)
+
+	w := worker.NewCleanerWithEviction(idx, pay, logger, time.Hour, 0, 0.9)
+	w.EvictOnce(ctx)
+
+	count, err := idx.Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), count, "no eviction when maxResponses=0")
+}
+
+func TestEvictionNoOpBelowWatermark(t *testing.T) {
+	idx := memory.NewIndexStore()
+	pay := memory.NewPayloadStore()
+
+	now := time.Now().Unix()
+	storeChain(t, idx, pay, "chainY", 2, now-100) // 2 entries
+
+	// maxResponses=10, watermark=90% → triggers at 9; we only have 2.
+	w := worker.NewCleanerWithEviction(idx, pay, logger, time.Hour, 10, 0.9)
+	w.EvictOnce(ctx)
+
+	count, err := idx.Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), count, "no eviction when below watermark")
+}
