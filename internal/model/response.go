@@ -94,3 +94,12 @@ type RetrieveResponse struct {
 	Output             []json.RawMessage            `json:"output"`
 	Usage              *responses.ResponseUsage     `json:"usage,omitempty"`
 }
+
+// ItemsPage is the body returned by GET /responses/{id}/input_items and
+// GET /responses/{id}/output_items. Cursors are opaque base64-encoded integers
+// pointing into the visible (non-compaction) item slice.
+type ItemsPage struct {
+	Items      []json.RawMessage `json:"items"`
+	HasMore    bool              `json:"has_more"`
+	NextCursor *string           `json:"next_cursor,omitempty"`
+}
