@@ -14,9 +14,11 @@ type StorageConfig struct {
 	CheckpointInterval        int           `json:"checkpoint_interval"`          // default 10
 	TTLDays                   int           `json:"ttl_days"`                     // default 30
 	WriteIntentStaleThreshold time.Duration `json:"write_intent_stale_threshold"` // default 5m
-	// Caps — 0 means unbounded.
-	MaxResponses int64    `json:"max_responses"` // max total responses in the index
-	MaxPayload   ByteSize `json:"max_payload"`   // max size of a single response payload blob
+	// Caps — 0 means unbounded (or default for MaxChainDepth).
+	MaxResponses    int64    `json:"max_responses"`     // max total responses in the index
+	MaxPayload      ByteSize `json:"max_payload"`       // max size of a single response payload blob
+	MaxChainDepth   int      `json:"max_chain_depth"`   // max chain walk hops; 0 = default (1000)
+	MaxContextBytes ByteSize `json:"max_context_bytes"` // max assembled context size in bytes; 0 = unbounded
 	// Backend-specific connection settings.
 	Postgres PostgresConfig `json:"postgres"`
 	S3       S3Config       `json:"s3"`

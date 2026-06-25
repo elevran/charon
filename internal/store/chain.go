@@ -11,10 +11,12 @@ import (
 	"github.com/elevran/charon/internal/storage"
 )
 
-const maxChainDepth = 1000
-
 // buildContext walks the chain from prevID back to the nearest checkpoint (or root),
 // then assembles the flat []json.RawMessage context in chronological order.
+//
+// maxDepth caps the backward walk (returns ErrChainTooDeep when exceeded).
+// maxBytes caps the assembled context size in bytes (returns ErrContextTooLarge when exceeded).
+// Pass maxBytes=0 to skip the size check.
 //
 // Walk algorithm:
 //  1. Walk backward collecting ResponseMeta records until a checkpoint or chain root.
@@ -29,7 +31,7 @@ const maxChainDepth = 1000
 // storage to O(N) at the cost of O(log N) reads at resolve time.
 //
 // Returns ErrChainCorrupted if any payload key resolves to ErrNotFound.
-func (s *ContextStore) buildContext(ctx context.Context, prevID string) ([]json.RawMessage, error) {
+func (s *ContextStore) buildContext(ctx context.Context, prevID string, maxDepth int, maxBytes int64) ([]json.RawMessage, error) {
 	var chain []model.ResponseMeta
 	currentID := prevID
 
@@ -40,8 +42,8 @@ func (s *ContextStore) buildContext(ctx context.Context, prevID string) ([]json.
 		}
 		chain = append(chain, meta)
 
-		if len(chain) > maxChainDepth {
-			return nil, storage.ErrChainCorrupted
+		if len(chain) > maxDepth {
+			return nil, storage.ErrChainTooDeep
 		}
 
 		if meta.CheckpointKey != nil {
@@ -58,7 +60,21 @@ func (s *ContextStore) buildContext(ctx context.Context, prevID string) ([]json.
 		chain[i], chain[j] = chain[j], chain[i]
 	}
 
-	var flatContext []json.RawMessage
+	var (
+		flatContext []json.RawMessage
+		totalBytes  int64
+	)
+
+	appendItems := func(items []json.RawMessage) error {
+		for _, item := range items {
+			totalBytes += int64(len(item))
+			if maxBytes > 0 && totalBytes > maxBytes {
+				return storage.ErrContextTooLarge
+			}
+			flatContext = append(flatContext, item)
+		}
+		return nil
+	}
 
 	for i, meta := range chain {
 		if i == 0 && meta.CheckpointKey != nil {
@@ -70,7 +86,9 @@ func (s *ContextStore) buildContext(ctx context.Context, prevID string) ([]json.
 			if err != nil {
 				return nil, fmt.Errorf("parse checkpoint: %w", err)
 			}
-			flatContext = append(flatContext, ckItems...)
+			if err := appendItems(ckItems); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -82,8 +100,12 @@ func (s *ContextStore) buildContext(ctx context.Context, prevID string) ([]json.
 		if err := json.Unmarshal(data, &payload); err != nil {
 			return nil, fmt.Errorf("unmarshal payload: %w", err)
 		}
-		flatContext = append(flatContext, payload.InputItems...)
-		flatContext = append(flatContext, payload.OutputItems...)
+		if err := appendItems(payload.InputItems); err != nil {
+			return nil, err
+		}
+		if err := appendItems(payload.OutputItems); err != nil {
+			return nil, err
+		}
 	}
 
 	return flatContext, nil

@@ -62,7 +62,7 @@ func TestResolveSpan(t *testing.T) {
 	require.NoError(t, svc.Store(context.Background(), "resp_trace2", req))
 	rec.Reset()
 
-	_, _, err := svc.Resolve(context.Background(), "resp_trace2")
+	_, _, err := svc.Resolve(context.Background(), "resp_trace2", 0)
 	require.NoError(t, err)
 
 	spans := rec.Ended()
