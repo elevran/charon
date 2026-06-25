@@ -29,7 +29,6 @@ func TestServerOptionsDefaultsWithNoConfig(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1:8081", opts.ProxyCharonURL, "ProxyCharonURL must be auto-derived")
 	assert.Equal(t, "memory", opts.Storage.Backend)
 	assert.Equal(t, "./data", opts.Storage.DataDir)
-	assert.Equal(t, 10, opts.Storage.CheckpointInterval)
 	assert.Equal(t, 30, opts.Storage.TTLDays)
 	assert.Equal(t, 5*time.Minute, opts.Storage.WriteIntentStaleThreshold)
 	assert.Equal(t, time.Hour, opts.WorkerTTLInterval)
@@ -168,6 +167,4 @@ func TestReconcileOptionsCompleteLoadsFile(t *testing.T) {
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/config.yaml"}))
 	require.NoError(t, opts.Complete(fs))
 
-	// config.yaml sets charon.storage.checkpoint_interval: 10 (explicit).
-	assert.Equal(t, 10, opts.Storage.CheckpointInterval)
 }

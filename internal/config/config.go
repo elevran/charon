@@ -11,7 +11,6 @@ type StorageConfig struct {
 	IndexBackend              string        `json:"index_backend"`                // "memory" | "sqlite" | "postgres"; overrides Backend when set
 	PayloadBackend            string        `json:"payload_backend"`              // "memory" | "filesystem" | "s3"; overrides Backend when set
 	DataDir                   string        `json:"data_dir"`                     // default "./data"
-	CheckpointInterval        int           `json:"checkpoint_interval"`          // default 10
 	TTLDays                   int           `json:"ttl_days"`                     // default 30
 	WriteIntentStaleThreshold time.Duration `json:"write_intent_stale_threshold"` // default 5m
 	// Caps — 0 means unbounded (or default for MaxChainDepth).

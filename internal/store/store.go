@@ -19,26 +19,21 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/elevran/charon/internal/metrics"
 	"github.com/elevran/charon/internal/model"
 	"github.com/elevran/charon/internal/storage"
 )
 
 // Config holds store-level configuration.
 type Config struct {
-	CheckpointInterval int                  // create checkpoint every N turns; default 10
-	TTLDays            int                  // response TTL; default 30
-	MaxResponses       int64                // max total responses in index; 0 = unbounded
-	MaxPayloadBytes    int64                // max size of a single payload blob in bytes; 0 = unbounded
-	MaxChainDepth      int                  // abort resolve if chain walk exceeds this many hops; 0 = default (1000)
-	MaxContextBytes    int64                // abort resolve if assembled context exceeds this many bytes; 0 = unbounded
-	TracerProvider     trace.TracerProvider // nil = use otel.GetTracerProvider() (no-op when not configured)
+	TTLDays         int                  // response TTL; default 30
+	MaxResponses    int64                // max total responses in index; 0 = unbounded
+	MaxPayloadBytes int64                // max size of a single payload blob in bytes; 0 = unbounded
+	MaxChainDepth   int                  // abort resolve if chain walk exceeds this many hops; 0 = default (1000)
+	MaxContextBytes int64                // abort resolve if assembled context exceeds this many bytes; 0 = unbounded
+	TracerProvider  trace.TracerProvider // nil = use otel.GetTracerProvider() (no-op when not configured)
 }
 
 func (c *Config) applyDefaults() {
-	if c.CheckpointInterval <= 0 {
-		c.CheckpointInterval = 10
-	}
 	if c.TTLDays <= 0 {
 		c.TTLDays = 30
 	}
@@ -235,30 +230,6 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 		return fmt.Errorf("%w: payload %d bytes exceeds limit %d", storage.ErrStoreFull, len(payloadBytes), s.cfg.MaxPayloadBytes)
 	}
 
-	isCheckpoint := position > 0 && position%s.cfg.CheckpointInterval == 0
-	var ckKey *string
-
-	if isCheckpoint {
-		flatCtx := make([]json.RawMessage, 0, len(rawInput)+len(req.Output))
-		if req.PreviousResponseID != nil {
-			flatCtx, err = s.buildContext(ctx, *req.PreviousResponseID, s.cfg.MaxChainDepth, 0)
-			if err != nil {
-				return fmt.Errorf("build checkpoint context: %w", err)
-			}
-		}
-		flatCtx = append(flatCtx, rawInput...)
-		flatCtx = append(flatCtx, req.Output...)
-
-		ckBytes := marshalNDJSON(flatCtx)
-		ck := checkpointKey(chainRootID, position, responseID)
-		ckKey = &ck
-		if err := s.payloads.Put(ctx, ck, ckBytes); err != nil {
-			return fmt.Errorf("write checkpoint: %w", err)
-		}
-		metrics.CheckpointWritesTotal.Inc()
-		metrics.CheckpointSizeBytes.Observe(float64(len(ckBytes)))
-	}
-
 	if err := s.payloads.Put(ctx, pKey, payloadBytes); err != nil {
 		return fmt.Errorf("write payload: %w", err)
 	}
@@ -273,7 +244,6 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 		ChainRootID:        chainRootID,
 		Position:           position,
 		PayloadKey:         pKey,
-		CheckpointKey:      ckKey,
 		Status:             model.StatusCompleted,
 		Model:              req.Model,
 		CreatedAt:          now,
@@ -461,26 +431,6 @@ func (s *ContextStore) CommitStream(ctx context.Context, responseID string, req 
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 
-	isCheckpoint := position > 0 && position%s.cfg.CheckpointInterval == 0
-	var ckKey *string
-	if isCheckpoint {
-		flatCtx2 := make([]json.RawMessage, 0, len(rawInput)+len(allOutput))
-		if req.PreviousResponseID != nil {
-			flatCtx2, err = s.buildContext(ctx, *req.PreviousResponseID, s.cfg.MaxChainDepth, 0)
-			if err != nil {
-				return fmt.Errorf("build checkpoint context: %w", err)
-			}
-		}
-		flatCtx2 = append(flatCtx2, rawInput...)
-		flatCtx2 = append(flatCtx2, allOutput...)
-		ckBytes := marshalNDJSON(flatCtx2)
-		ck := checkpointKey(chainRootID, position, responseID)
-		ckKey = &ck
-		if err := s.payloads.Put(ctx, ck, ckBytes); err != nil {
-			return fmt.Errorf("write checkpoint: %w", err)
-		}
-	}
-
 	if err := s.payloads.Put(ctx, pKey, payloadBytes); err != nil {
 		return fmt.Errorf("write payload: %w", err)
 	}
@@ -499,7 +449,6 @@ func (s *ContextStore) CommitStream(ctx context.Context, responseID string, req 
 		ChainRootID:        chainRootID,
 		Position:           position,
 		PayloadKey:         pKey,
-		CheckpointKey:      ckKey,
 		Status:             status,
 		Model:              req.Model,
 		CreatedAt:          now,
@@ -537,10 +486,6 @@ func mintID(prefix string) string {
 
 func payloadKey(chainRootID string, position int, responseID string) string {
 	return fmt.Sprintf("%s/%08d_%s.json", chainRootID, position, responseID)
-}
-
-func checkpointKey(chainRootID string, position int, responseID string) string {
-	return fmt.Sprintf("%s/checkpoint_%08d_%s.json", chainRootID, position, responseID)
 }
 
 // marshalNDJSON serialises a []json.RawMessage as newline-delimited JSON.

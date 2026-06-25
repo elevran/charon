@@ -111,13 +111,12 @@ func main() {
 	}
 
 	svcCfg := store.Config{
-		CheckpointInterval: opts.Storage.CheckpointInterval,
-		TTLDays:            opts.Storage.TTLDays,
-		MaxResponses:       opts.Storage.MaxResponses,
-		MaxPayloadBytes:    int64(opts.Storage.MaxPayload),
-		MaxChainDepth:      opts.Storage.MaxChainDepth,
-		MaxContextBytes:    int64(opts.Storage.MaxContextBytes),
-		TracerProvider:     charonTP,
+		TTLDays:         opts.Storage.TTLDays,
+		MaxResponses:    opts.Storage.MaxResponses,
+		MaxPayloadBytes: int64(opts.Storage.MaxPayload),
+		MaxChainDepth:   opts.Storage.MaxChainDepth,
+		MaxContextBytes: int64(opts.Storage.MaxContextBytes),
+		TracerProvider:  charonTP,
 	}
 	svc := store.New(idx, pay, svcCfg, log)
 

@@ -3,5 +3,4 @@ charon:
   storage:
     backend: sqlite
     data_dir: ""
-    checkpoint_interval: 10
     ttl_days: 30

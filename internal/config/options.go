@@ -42,7 +42,6 @@ type fileStorageConfig struct {
 	IndexBackend              string         `json:"index_backend"`
 	PayloadBackend            string         `json:"payload_backend"`
 	DataDir                   string         `json:"data_dir"`
-	CheckpointInterval        int            `json:"checkpoint_interval"`
 	TTLDays                   int            `json:"ttl_days"`
 	WriteIntentStaleThreshold time.Duration  `json:"write_intent_stale_threshold"`
 	MaxResponses              int64          `json:"max_responses"`
@@ -88,9 +87,6 @@ func applyFileDefaults(fc *fileConfig) {
 	}
 	if fc.Charon.Storage.DataDir == "" {
 		fc.Charon.Storage.DataDir = "./data"
-	}
-	if fc.Charon.Storage.CheckpointInterval <= 0 {
-		fc.Charon.Storage.CheckpointInterval = 10
 	}
 	if fc.Charon.Storage.TTLDays <= 0 {
 		fc.Charon.Storage.TTLDays = 30
@@ -169,7 +165,6 @@ type StorageOptions struct {
 	DataDir        string
 
 	// Config-file-only knobs.
-	CheckpointInterval        int
 	TTLDays                   int
 	WriteIntentStaleThreshold time.Duration
 	MaxResponses              int64
@@ -208,7 +203,6 @@ func NewServerOptions() *ServerOptions {
 		Storage: StorageOptions{
 			Backend:                   "memory",
 			DataDir:                   "./data",
-			CheckpointInterval:        10,
 			TTLDays:                   30,
 			WriteIntentStaleThreshold: 5 * time.Minute,
 		},
@@ -227,7 +221,6 @@ func NewReconcileOptions() *ReconcileOptions {
 		Storage: StorageOptions{
 			Backend:                   "memory",
 			DataDir:                   "./data",
-			CheckpointInterval:        10,
 			TTLDays:                   30,
 			WriteIntentStaleThreshold: 5 * time.Minute,
 		},
@@ -301,7 +294,6 @@ func (o *ServerOptions) Complete(fs *flag.FlagSet) error {
 	o.Storage.IndexBackend = fc.Charon.Storage.IndexBackend
 	o.Storage.PayloadBackend = fc.Charon.Storage.PayloadBackend
 	o.Storage.DataDir = fc.Charon.Storage.DataDir
-	o.Storage.CheckpointInterval = fc.Charon.Storage.CheckpointInterval
 	o.Storage.TTLDays = fc.Charon.Storage.TTLDays
 	o.Storage.WriteIntentStaleThreshold = fc.Charon.Storage.WriteIntentStaleThreshold
 	o.Storage.MaxResponses = fc.Charon.Storage.MaxResponses
@@ -355,7 +347,6 @@ func (o *ReconcileOptions) Complete(fs *flag.FlagSet) error {
 	o.Storage.IndexBackend = fc.Charon.Storage.IndexBackend
 	o.Storage.PayloadBackend = fc.Charon.Storage.PayloadBackend
 	o.Storage.DataDir = fc.Charon.Storage.DataDir
-	o.Storage.CheckpointInterval = fc.Charon.Storage.CheckpointInterval
 	o.Storage.TTLDays = fc.Charon.Storage.TTLDays
 	o.Storage.WriteIntentStaleThreshold = fc.Charon.Storage.WriteIntentStaleThreshold
 	o.Storage.MaxResponses = fc.Charon.Storage.MaxResponses
@@ -452,7 +443,6 @@ func (s *StorageOptions) ToStorageConfig() StorageConfig {
 		IndexBackend:              s.IndexBackend,
 		PayloadBackend:            s.PayloadBackend,
 		DataDir:                   s.DataDir,
-		CheckpointInterval:        s.CheckpointInterval,
 		TTLDays:                   s.TTLDays,
 		WriteIntentStaleThreshold: s.WriteIntentStaleThreshold,
 		MaxResponses:              s.MaxResponses,

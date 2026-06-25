@@ -117,7 +117,7 @@ func testResolveNewChainNotFound(t *testing.T, factory storeFactory) {
 
 func testResolveMultiTurn(t *testing.T, factory storeFactory) {
 	t.Helper()
-	svc, _, _ := factory(store.Config{CheckpointInterval: 100})
+	svc, _, _ := factory(store.Config{})
 
 	var prevID *string
 	var lastID string
@@ -149,11 +149,12 @@ func testResolveMultiTurn(t *testing.T, factory storeFactory) {
 	}
 }
 
-// --- Scenario 3: resolve-with-checkpoint ---
+// --- Scenario 3: resolve-long-chain ---
+// Builds a 12-turn chain (no checkpoints written) and verifies full context assembly.
 
 func testResolveWithCheckpoint(t *testing.T, factory storeFactory) {
 	t.Helper()
-	svc, _, _ := factory(store.Config{CheckpointInterval: 10})
+	svc, _, _ := factory(store.Config{})
 
 	var prevID *string
 	for i := range 12 {
@@ -337,7 +338,7 @@ func testTTLExpiry(t *testing.T, factory storeFactory) {
 
 func testDeleteNoCascade(t *testing.T, factory storeFactory) {
 	t.Helper()
-	svc, _, _ := factory(store.Config{CheckpointInterval: 100})
+	svc, _, _ := factory(store.Config{})
 
 	var prevID *string
 	for i := range 3 {
@@ -371,7 +372,7 @@ func testDeleteNoCascade(t *testing.T, factory storeFactory) {
 
 func testEncryptedContentRoundtrip(t *testing.T, factory storeFactory) {
 	t.Helper()
-	svc, _, _ := factory(store.Config{CheckpointInterval: 100})
+	svc, _, _ := factory(store.Config{})
 
 	encryptedBlob := `{"type":"reasoning","encrypted_content":"OPAQUE_BLOB_12345==","summary":[]}`
 	reasoningItem := json.RawMessage(encryptedBlob)
@@ -410,7 +411,7 @@ func testEncryptedContentRoundtrip(t *testing.T, factory storeFactory) {
 
 func testInstructionsNotInContext(t *testing.T, factory storeFactory) {
 	t.Helper()
-	svc, _, _ := factory(store.Config{CheckpointInterval: 100})
+	svc, _, _ := factory(store.Config{})
 
 	inp := rawJSON(map[string]string{"type": "message", "role": "user", "text": "hello"})
 	out := rawJSON(map[string]string{"type": "message", "role": "assistant", "text": "hi"})
@@ -447,7 +448,7 @@ func testInstructionsNotInContext(t *testing.T, factory storeFactory) {
 
 func testPhaseFieldPreserved(t *testing.T, factory storeFactory) {
 	t.Helper()
-	svc, _, _ := factory(store.Config{CheckpointInterval: 100})
+	svc, _, _ := factory(store.Config{})
 
 	msgWithPhase := `{"type":"message","role":"assistant","content":[],"phase":"final_answer"}`
 	out := json.RawMessage(msgWithPhase)
@@ -483,8 +484,8 @@ func testPhaseFieldPreserved(t *testing.T, factory storeFactory) {
 }
 
 // --- Scenario 12: resolve-efficiency ---
-// Wraps the payload store with a counter so we can assert ≤10 Get calls
-// for a 100-turn chain with K=10.
+// Wraps the payload store with a counter so we can assert exactly N Get calls
+// for an N-turn chain (one read per turn, no checkpoints).
 
 type countingPayloadStore struct {
 	storage.PayloadStore
@@ -499,13 +500,14 @@ func (c *countingPayloadStore) Get(ctx context.Context, key string) ([]byte, err
 func testResolveEfficiency(t *testing.T, factory storeFactory) {
 	t.Helper()
 	// Get the raw stores from the factory so we can wrap the payload store.
-	_, idx, basePay := factory(store.Config{CheckpointInterval: 10})
+	_, idx, basePay := factory(store.Config{})
 	counter := &countingPayloadStore{PayloadStore: basePay}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	svc := store.New(idx, counter, store.Config{CheckpointInterval: 10}, log)
+	svc := store.New(idx, counter, store.Config{}, log)
 
+	const n = 100
 	var prevID *string
-	for i := range 100 {
+	for i := range n {
 		responseID := fmt.Sprintf("resp_%05d", i)
 		inp := rawJSON(map[string]any{"type": "message", "turn": i})
 		out := rawJSON(map[string]any{"type": "message", "turn": i})
@@ -522,7 +524,9 @@ func testResolveEfficiency(t *testing.T, factory storeFactory) {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	if gets := counter.gets.Load(); gets > 10 {
-		t.Fatalf("Resolve on 100-turn chain made %d PayloadStore.Get calls, want ≤10", gets)
+	// With per-response storage (no checkpoints), each of the N turns requires
+	// exactly one payload read — O(N) reads total.
+	if gets := counter.gets.Load(); gets != n {
+		t.Fatalf("Resolve on %d-turn chain made %d PayloadStore.Get calls, want %d", n, gets, n)
 	}
 }

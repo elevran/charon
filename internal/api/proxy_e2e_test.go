@@ -35,7 +35,7 @@ func newE2EServer(t *testing.T) (*httptest.Server, *http.Client) {
 	idx := memory.NewIndexStore()
 	pay := memory.NewPayloadStore()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := store.New(idx, pay, store.Config{CheckpointInterval: 10}, log)
+	svc := store.New(idx, pay, store.Config{}, log)
 	h := api.NewHandler(svc, log)
 
 	mux := http.NewServeMux()

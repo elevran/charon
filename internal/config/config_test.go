@@ -28,7 +28,6 @@ func TestLoadDefaults(t *testing.T) {
 	// Charon defaults
 	assert.Equal(t, ":8081", opts.CharonListen)
 	assert.Equal(t, "memory", opts.Storage.Backend)
-	assert.Equal(t, 10, opts.Storage.CheckpointInterval)
 	assert.Equal(t, 30, opts.Storage.TTLDays)
 	assert.Equal(t, 5*time.Minute, opts.Storage.WriteIntentStaleThreshold)
 	assert.Equal(t, time.Hour, opts.WorkerTTLInterval)
@@ -54,7 +53,6 @@ func TestLoadFromFile(t *testing.T) {
 	require.NoError(t, opts.Complete(fs))
 
 	assert.Equal(t, ":0", opts.ProxyListen)
-	assert.Equal(t, 10, opts.Storage.CheckpointInterval)
 }
 
 func TestLoadStrictRejectsUnknownFields(t *testing.T) {

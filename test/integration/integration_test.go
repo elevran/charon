@@ -246,7 +246,7 @@ func TestSingleContinuation(t *testing.T) {
 func TestMultiTurnChain(t *testing.T) {
 	for _, b := range backends {
 		t.Run(b.name, func(t *testing.T) {
-			fx := b.factory(t, store.Config{CheckpointInterval: 100}) // no checkpoints
+			fx := b.factory(t, store.Config{})
 
 			const n = 5
 			ids := make([]string, n)
@@ -282,12 +282,12 @@ func TestMultiTurnChain(t *testing.T) {
 	}
 }
 
-// TestCheckpointBoundary: a checkpoint fires at position K; resolve K-1 and K+1 both work.
+// TestChainBoundary: build a 4-turn chain and verify context assembly at intermediate
+// and final positions is correct (replaces the old checkpoint-boundary test).
 func TestCheckpointBoundary(t *testing.T) {
 	for _, b := range backends {
 		t.Run(b.name, func(t *testing.T) {
-			// CheckpointInterval=2: checkpoint fires at position 2 (the 3rd item, 0-indexed).
-			fx := b.factory(t, store.Config{CheckpointInterval: 2})
+			fx := b.factory(t, store.Config{})
 
 			store3 := func(id string, prevID *string, turn int) {
 				inp := fmt.Sprintf(`{"type":"message","role":"user","text":"u%d"}`, turn)
@@ -297,12 +297,12 @@ func TestCheckpointBoundary(t *testing.T) {
 				require.Equal(t, http.StatusNoContent, r.StatusCode)
 			}
 
-			store3("resp_ck0", nil, 0)             // position 0
-			store3("resp_ck1", ptr("resp_ck0"), 1) // position 1
-			store3("resp_ck2", ptr("resp_ck1"), 2) // position 2 — checkpoint written
-			store3("resp_ck3", ptr("resp_ck2"), 3) // position 3 — uses checkpoint
+			store3("resp_ck0", nil, 0)
+			store3("resp_ck1", ptr("resp_ck0"), 1)
+			store3("resp_ck2", ptr("resp_ck1"), 2)
+			store3("resp_ck3", ptr("resp_ck2"), 3)
 
-			// Resolve ck1 (no checkpoint): 2 turns × 2 items.
+			// Resolve ck1: 2 turns × 2 items.
 			r := fx.doJSON(t, "GET", "/responses/resp_ck1/context", nil)
 			defer r.Body.Close()
 			require.Equal(t, http.StatusOK, r.StatusCode)
@@ -310,7 +310,7 @@ func TestCheckpointBoundary(t *testing.T) {
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&p1))
 			assert.Len(t, p1.FlatContext, 4, "ck1 should have 4 items")
 
-			// Resolve ck3 (uses checkpoint at ck2): 4 turns × 2 items.
+			// Resolve ck3: 4 turns × 2 items.
 			r2 := fx.doJSON(t, "GET", "/responses/resp_ck3/context", nil)
 			defer r2.Body.Close()
 			require.Equal(t, http.StatusOK, r2.StatusCode)

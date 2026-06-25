@@ -62,7 +62,7 @@ func benchResolveMemory(b *testing.B, depth int) {
 	b.Helper()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	svc := store.New(memory.NewIndexStore(), memory.NewPayloadStore(),
-		store.Config{CheckpointInterval: 10}, log)
+		store.Config{}, log)
 	headID := buildChain(b, svc, depth)
 
 	b.ResetTimer()
@@ -94,7 +94,7 @@ func benchResolveSQLite(b *testing.B, depth int) {
 		b.Fatalf("open sqlite: %v", err)
 	}
 	b.Cleanup(func() { _ = cleanup() })
-	svc := store.New(idx, pay, store.Config{CheckpointInterval: 10}, log)
+	svc := store.New(idx, pay, store.Config{}, log)
 
 	headID := buildChain(b, svc, depth)
 

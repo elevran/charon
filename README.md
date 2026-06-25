@@ -66,7 +66,6 @@ charon:
   storage:
     backend: sqlite
     data_dir: /var/lib/charon
-    checkpoint_interval: 10   # checkpoint every N turns (default 10)
     ttl_days: 30              # response TTL (default 30)
     write_intent_stale_threshold: 5m
   workers:
@@ -95,13 +94,14 @@ proxy:
 | `listen` | `:8081` | Address for the Charon internal HTTP API |
 | `storage.backend` | `memory` | Storage backend: `memory` or `sqlite` |
 | `storage.data_dir` | `./data` | Root directory for SQLite database and payload files |
-| `storage.checkpoint_interval` | `10` | Write a full-context checkpoint every N turns |
 | `storage.ttl_days` | `30` | Responses expire after this many days |
 | `storage.write_intent_stale_threshold` | `5m` | Write intents older than this are recovered on startup |
 | `storage.max_chain_depth` | `1000` | Abort resolution if the chain walk exceeds this many hops. Returns `chain_too_deep` (HTTP 422). |
 | `storage.max_context_bytes` | `0` (unbounded) | Abort resolution if the assembled flat context exceeds this size. Supports unit suffixes (`MB`, `GB`). Returns `context_too_large` (HTTP 422). |
 | `workers.ttl_interval` | `1h` | How often the TTL expiry worker runs |
 | `workers.recovery_interval` | `5m` | How often the write-intent recovery worker runs |
+
+> **Context assembly**: Charon no longer writes checkpoint blobs. Each response stores only its own delta (input + output items). On `GET /responses/{id}/context`, Charon walks the `previous_response_id` chain backward and reads each payload individually, assembling context in forward order. Storage is O(N) and reconstruction is O(N) reads — one per turn.
 
 ### `telemetry`
 
