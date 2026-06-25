@@ -101,6 +101,14 @@ proxy:
 | `workers.ttl_interval` | `1h` | How often the TTL expiry worker runs |
 | `workers.recovery_interval` | `5m` | How often the write-intent recovery worker runs |
 
+### `telemetry`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `telemetry.exporter_url` | `` | OTLP HTTP endpoint (e.g. `http://localhost:4318`). Empty disables tracing (no-op, zero overhead). Can also be set via `--telemetry-exporter-url`. |
+| `telemetry.charon_service` | `charon` | OTel service name for the Charon internal API |
+| `telemetry.proxy_service` | `charon-proxy` | OTel service name for the proxy layer |
+
 ### `proxy`
 
 | Field | Default | Description |

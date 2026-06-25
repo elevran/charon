@@ -12,8 +12,9 @@ import (
 // fileConfig is a private type used only to parse YAML config files.
 // It mirrors the YAML structure so existing config files continue to work.
 type fileConfig struct {
-	Proxy  fileProxyConfig  `json:"proxy"`
-	Charon fileCharonConfig `json:"charon"`
+	Proxy     fileProxyConfig     `json:"proxy"`
+	Charon    fileCharonConfig    `json:"charon"`
+	Telemetry fileTelemetryConfig `json:"telemetry"`
 }
 
 type fileProxyConfig struct {
@@ -55,6 +56,12 @@ type fileWorkerConfig struct {
 	RecoveryInterval time.Duration `json:"recovery_interval"`
 }
 
+type fileTelemetryConfig struct {
+	ExporterURL   string `json:"exporter_url"`
+	CharonService string `json:"charon_service"`
+	ProxyService  string `json:"proxy_service"`
+}
+
 // applyFileDefaults fills in zero-valued fields in fc with built-in defaults.
 // Called twice: before and after YAML unmarshalling so that missing file fields
 // stay at their defaults.
@@ -94,6 +101,12 @@ func applyFileDefaults(fc *fileConfig) {
 	}
 	if fc.Charon.Workers.RecoveryInterval <= 0 {
 		fc.Charon.Workers.RecoveryInterval = 5 * time.Minute
+	}
+	if fc.Telemetry.CharonService == "" {
+		fc.Telemetry.CharonService = "charon"
+	}
+	if fc.Telemetry.ProxyService == "" {
+		fc.Telemetry.ProxyService = "charon-proxy"
 	}
 }
 
@@ -141,6 +154,9 @@ type ServerOptions struct {
 	// Worker settings (config-file only).
 	WorkerTTLInterval      time.Duration
 	WorkerRecoveryInterval time.Duration
+
+	// Telemetry settings.
+	Telemetry TelemetryOptions
 }
 
 // StorageOptions holds storage settings shared between ServerOptions and ReconcileOptions.
@@ -159,6 +175,22 @@ type StorageOptions struct {
 
 	Postgres PostgresConfig
 	S3       S3Config
+}
+
+// TelemetryOptions holds OpenTelemetry settings for the server.
+type TelemetryOptions struct {
+	ExporterURL   string // OTLP HTTP endpoint; empty = disabled
+	CharonService string // default "charon"
+	ProxyService  string // default "charon-proxy"
+}
+
+// ToTelemetryConfig converts TelemetryOptions to TelemetryConfig.
+func (t *TelemetryOptions) ToTelemetryConfig() TelemetryConfig {
+	return TelemetryConfig{
+		ExporterURL:   t.ExporterURL,
+		CharonService: t.CharonService,
+		ProxyService:  t.ProxyService,
+	}
 }
 
 // ReconcileOptions holds configuration for the reconcile subcommand.
@@ -187,6 +219,10 @@ func NewServerOptions() *ServerOptions {
 		},
 		WorkerTTLInterval:      time.Hour,
 		WorkerRecoveryInterval: 5 * time.Minute,
+		Telemetry: TelemetryOptions{
+			CharonService: "charon",
+			ProxyService:  "charon-proxy",
+		},
 	}
 }
 
@@ -212,6 +248,7 @@ func (o *ServerOptions) AddFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&o.ProxyEnabled, "proxy", o.ProxyEnabled, "enable the proxy layer")
 	fs.StringVar(&o.ProxyBackend, "backend", o.ProxyBackend, "inference backend base URL")
 	fs.StringVar(&o.Storage.Backend, "storage-backend", o.Storage.Backend, "storage backend (memory|sqlite|postgres|postgres+s3)")
+	fs.StringVar(&o.Telemetry.ExporterURL, "telemetry-exporter-url", o.Telemetry.ExporterURL, "OTLP HTTP exporter URL (e.g. http://localhost:4318); empty disables tracing")
 }
 
 // AddFlags registers CLI flags on fs for the reconcile subcommand.
@@ -289,6 +326,13 @@ func (o *ServerOptions) Complete(fs *flag.FlagSet) error {
 			o.ProxyCharonURL = deriveCharonURL(o.CharonListen)
 		}
 	}
+
+	// Telemetry settings are config-file-only except exporter URL which has a flag.
+	if !setFlags["telemetry-exporter-url"] {
+		o.Telemetry.ExporterURL = fc.Telemetry.ExporterURL
+	}
+	o.Telemetry.CharonService = fc.Telemetry.CharonService
+	o.Telemetry.ProxyService = fc.Telemetry.ProxyService
 
 	return nil
 }

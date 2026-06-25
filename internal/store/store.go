@@ -14,6 +14,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/openai/openai-go/responses"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/elevran/charon/internal/metrics"
 	"github.com/elevran/charon/internal/model"
@@ -22,10 +26,11 @@ import (
 
 // Config holds store-level configuration.
 type Config struct {
-	CheckpointInterval int   // create checkpoint every N turns; default 10
-	TTLDays            int   // response TTL; default 30
-	MaxResponses       int64 // max total responses in index; 0 = unbounded
-	MaxPayloadBytes    int64 // max size of a single payload blob in bytes; 0 = unbounded
+	CheckpointInterval int                  // create checkpoint every N turns; default 10
+	TTLDays            int                  // response TTL; default 30
+	MaxResponses       int64                // max total responses in index; 0 = unbounded
+	MaxPayloadBytes    int64                // max size of a single payload blob in bytes; 0 = unbounded
+	TracerProvider     trace.TracerProvider // nil = use otel.GetTracerProvider() (no-op when not configured)
 }
 
 func (c *Config) applyDefaults() {
@@ -59,6 +64,7 @@ type ContextStore struct {
 	payloads storage.PayloadStore
 	cfg      Config
 	log      *slog.Logger
+	tracer   trace.Tracer
 
 	mu      sync.Mutex
 	streams map[string]*streamStage // key: canonical response ID
@@ -67,11 +73,16 @@ type ContextStore struct {
 // New creates a ContextStore.
 func New(index storage.IndexStore, payloads storage.PayloadStore, cfg Config, log *slog.Logger) *ContextStore {
 	cfg.applyDefaults()
+	tp := cfg.TracerProvider
+	if tp == nil {
+		tp = otel.GetTracerProvider()
+	}
 	return &ContextStore{
 		index:    index,
 		payloads: payloads,
 		cfg:      cfg,
 		log:      log,
+		tracer:   tp.Tracer("charon/store"),
 		streams:  make(map[string]*streamStage),
 	}
 }
@@ -104,21 +115,40 @@ func (s *ContextStore) computeExpiresAt() *int64 {
 
 // Resolve assembles flat_context from previousID and mints a new responseID.
 func (s *ContextStore) Resolve(ctx context.Context, previousID string) (string, []json.RawMessage, error) {
+	ctx, span := s.tracer.Start(ctx, "store.Resolve",
+		trace.WithAttributes(attribute.String("response.id", previousID)))
+	defer span.End()
+
 	if _, err := s.index.Get(ctx, previousID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return "", nil, err
 	}
 
 	flatContext, err := s.buildContext(ctx, previousID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return "", nil, err
 	}
 
+	span.SetAttributes(attribute.Int("flat_context.item_count", len(flatContext)))
 	reservationID := mintID("rsrv")
 	return reservationID, flatContext, nil
 }
 
 // Store commits a completed inference response using the two-phase write-intent protocol.
-func (s *ContextStore) Store(ctx context.Context, responseID string, req model.StoreRequest) error {
+func (s *ContextStore) Store(ctx context.Context, responseID string, req model.StoreRequest) (retErr error) {
+	ctx, span := s.tracer.Start(ctx, "store.Store",
+		trace.WithAttributes(attribute.String("response.id", responseID)))
+	defer func() {
+		if retErr != nil {
+			span.RecordError(retErr)
+			span.SetStatus(codes.Error, retErr.Error())
+		}
+		span.End()
+	}()
+
 	// Enforce MaxResponses cap before accepting new entries.
 	if s.cfg.MaxResponses > 0 {
 		n, err := s.index.Count(ctx)
@@ -249,8 +279,14 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 
 // Retrieve fetches a single stored response record by ID.
 func (s *ContextStore) Retrieve(ctx context.Context, responseID string) (model.ResponseMeta, model.ResponsePayload, error) {
+	ctx, span := s.tracer.Start(ctx, "store.Retrieve",
+		trace.WithAttributes(attribute.String("response.id", responseID)))
+	defer span.End()
+
 	meta, err := s.index.Get(ctx, responseID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return model.ResponseMeta{}, model.ResponsePayload{}, err
 	}
 	// Failed responses have no payload — return meta only.

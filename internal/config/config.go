@@ -38,6 +38,15 @@ type S3Config struct {
 	PathStyle       bool   `json:"path_style"`        // true for MinIO
 }
 
+// TelemetryConfig holds OpenTelemetry tracing settings.
+// ExporterURL is the OTLP HTTP endpoint (e.g. "http://localhost:4318").
+// Empty means tracing is disabled (no-op provider, zero overhead).
+type TelemetryConfig struct {
+	ExporterURL   string `json:"exporter_url"`   // OTLP HTTP endpoint; empty = disabled
+	CharonService string `json:"charon_service"` // default "charon"
+	ProxyService  string `json:"proxy_service"`  // default "charon-proxy"
+}
+
 // deriveCharonURL returns an HTTP URL for the Charon internal API from its
 // listen address. Wildcard hosts (empty, "0.0.0.0", "::") are replaced with
 // "127.0.0.1" so the proxy connects to localhost.

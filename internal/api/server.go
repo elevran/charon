@@ -8,6 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Server wraps net/http.Server.
@@ -15,9 +16,9 @@ type Server struct {
 	srv *http.Server
 }
 
-// NewServer builds a Server using the default prometheus registry.
+// NewServer builds a Server using the default prometheus registry, no tracing.
 func NewServer(addr string, h *Handler, log *slog.Logger) *Server {
-	return NewServerWithRegistry(addr, h, log, prometheus.DefaultGatherer)
+	return NewServerWithRegistry(addr, h, log, prometheus.DefaultGatherer, nil)
 }
 
 // RegisterHandlers registers the response API routes on mux.
@@ -49,19 +50,27 @@ func newServer(addr string, handler http.Handler) *Server {
 }
 
 // NewServerFromMux builds a Server wrapping a pre-configured mux with the
-// standard middleware stack (recovery, request logging, timeout).
-func NewServerFromMux(addr string, mux *http.ServeMux, log *slog.Logger) *Server {
-	handler := Chain(mux, Recovery(log), RequestLogger(log), Timeout(30*time.Second))
+// standard middleware stack (recovery, request logging, timeout, optional tracing).
+// tp may be nil — tracing is skipped when disabled.
+func NewServerFromMux(addr string, mux *http.ServeMux, log *slog.Logger, tp trace.TracerProvider) *Server {
+	handler := Chain(mux,
+		Tracing("proxy", tp),
+		Recovery(log),
+		RequestLogger(log),
+		Timeout(30*time.Second),
+	)
 	return newServer(addr, handler)
 }
 
 // NewServerWithRegistry builds a Server with a custom prometheus Gatherer for /metrics.
-func NewServerWithRegistry(addr string, h *Handler, log *slog.Logger, reg prometheus.Gatherer) *Server {
+// tp may be nil — tracing is skipped when disabled.
+func NewServerWithRegistry(addr string, h *Handler, log *slog.Logger, reg prometheus.Gatherer, tp trace.TracerProvider) *Server {
 	mux := http.NewServeMux()
 	RegisterHandlers(mux, h)
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 
 	handler := Chain(mux,
+		Tracing("charon", tp),
 		Recovery(log),
 		RequestLogger(log),
 		Timeout(30*time.Second),
