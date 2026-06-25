@@ -184,15 +184,6 @@ type TelemetryOptions struct {
 	ProxyService  string // default "charon-proxy"
 }
 
-// ToTelemetryConfig converts TelemetryOptions to TelemetryConfig.
-func (t *TelemetryOptions) ToTelemetryConfig() TelemetryConfig {
-	return TelemetryConfig{
-		ExporterURL:   t.ExporterURL,
-		CharonService: t.CharonService,
-		ProxyService:  t.ProxyService,
-	}
-}
-
 // ReconcileOptions holds configuration for the reconcile subcommand.
 type ReconcileOptions struct {
 	// Config file path — set by --config flag.

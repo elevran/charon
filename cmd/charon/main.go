@@ -81,8 +81,7 @@ func main() {
 	}
 
 	// Initialise OTel tracing (no-op when ExporterURL is empty).
-	telCfg := opts.Telemetry.ToTelemetryConfig()
-	charonTP, err := telemetry.Init(context.Background(), telCfg.CharonService, telCfg.ExporterURL)
+	charonTP, err := telemetry.Init(context.Background(), opts.Telemetry.CharonService, opts.Telemetry.ExporterURL)
 	if err != nil {
 		log.Error("init charon tracer", "err", err)
 		os.Exit(1) //nolint:gocritic
@@ -97,7 +96,7 @@ func main() {
 
 	var proxyTP *sdktrace.TracerProvider
 	if opts.ProxyEnabled {
-		proxyTP, err = telemetry.Init(context.Background(), telCfg.ProxyService, telCfg.ExporterURL)
+		proxyTP, err = telemetry.Init(context.Background(), opts.Telemetry.ProxyService, opts.Telemetry.ExporterURL)
 		if err != nil {
 			log.Error("init proxy tracer", "err", err)
 			os.Exit(1) //nolint:gocritic

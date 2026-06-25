@@ -51,6 +51,11 @@ func Init(ctx context.Context, serviceName, exporterURL string) (*sdktrace.Trace
 	}
 
 	tp := sdktrace.NewTracerProvider(
+		// AlwaysSample is the default; making it explicit so it's visible here.
+		// For production, configure tail-based or probabilistic sampling at the
+		// collector rather than here — the bounded queue (maxQueueSize) is the
+		// primary guard against memory growth when sampling is not configured.
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithBatcher(exp,
 			sdktrace.WithMaxQueueSize(maxQueueSize),
 			sdktrace.WithMaxExportBatchSize(maxExportBatch),

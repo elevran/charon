@@ -278,15 +278,19 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 }
 
 // Retrieve fetches a single stored response record by ID.
-func (s *ContextStore) Retrieve(ctx context.Context, responseID string) (model.ResponseMeta, model.ResponsePayload, error) {
+func (s *ContextStore) Retrieve(ctx context.Context, responseID string) (_ model.ResponseMeta, _ model.ResponsePayload, retErr error) {
 	ctx, span := s.tracer.Start(ctx, "store.Retrieve",
 		trace.WithAttributes(attribute.String("response.id", responseID)))
-	defer span.End()
+	defer func() {
+		if retErr != nil {
+			span.RecordError(retErr)
+			span.SetStatus(codes.Error, retErr.Error())
+		}
+		span.End()
+	}()
 
 	meta, err := s.index.Get(ctx, responseID)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
 		return model.ResponseMeta{}, model.ResponsePayload{}, err
 	}
 	// Failed responses have no payload — return meta only.
