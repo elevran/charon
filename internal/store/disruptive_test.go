@@ -285,7 +285,7 @@ func TestChainDepthLimitExceeded(t *testing.T) {
 		lastID = id
 	}
 
-	_, _, err := svc.Resolve(context.Background(), lastID)
+	_, _, err := svc.Resolve(context.Background(), lastID, 0)
 	assert.ErrorIs(t, err, storage.ErrChainCorrupted,
 		"Resolve must return ErrChainCorrupted when chain exceeds the 1000-node depth limit")
 }

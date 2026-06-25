@@ -46,6 +46,8 @@ type fileStorageConfig struct {
 	WriteIntentStaleThreshold time.Duration  `json:"write_intent_stale_threshold"`
 	MaxResponses              int64          `json:"max_responses"`
 	MaxPayload                ByteSize       `json:"max_payload"`
+	MaxChainDepth             int            `json:"max_chain_depth"`
+	MaxContextBytes           ByteSize       `json:"max_context_bytes"`
 	Postgres                  PostgresConfig `json:"postgres"`
 	S3                        S3Config       `json:"s3"`
 }
@@ -156,6 +158,8 @@ type StorageOptions struct {
 	WriteIntentStaleThreshold time.Duration
 	MaxResponses              int64
 	MaxPayload                ByteSize
+	MaxChainDepth             int
+	MaxContextBytes           ByteSize
 
 	Postgres PostgresConfig
 	S3       S3Config
@@ -274,6 +278,8 @@ func (o *ServerOptions) Complete(fs *flag.FlagSet) error {
 	o.Storage.WriteIntentStaleThreshold = fc.Charon.Storage.WriteIntentStaleThreshold
 	o.Storage.MaxResponses = fc.Charon.Storage.MaxResponses
 	o.Storage.MaxPayload = fc.Charon.Storage.MaxPayload
+	o.Storage.MaxChainDepth = fc.Charon.Storage.MaxChainDepth
+	o.Storage.MaxContextBytes = fc.Charon.Storage.MaxContextBytes
 	o.Storage.Postgres = fc.Charon.Storage.Postgres
 	o.Storage.S3 = fc.Charon.Storage.S3
 
@@ -319,6 +325,8 @@ func (o *ReconcileOptions) Complete(fs *flag.FlagSet) error {
 	o.Storage.WriteIntentStaleThreshold = fc.Charon.Storage.WriteIntentStaleThreshold
 	o.Storage.MaxResponses = fc.Charon.Storage.MaxResponses
 	o.Storage.MaxPayload = fc.Charon.Storage.MaxPayload
+	o.Storage.MaxChainDepth = fc.Charon.Storage.MaxChainDepth
+	o.Storage.MaxContextBytes = fc.Charon.Storage.MaxContextBytes
 	o.Storage.Postgres = fc.Charon.Storage.Postgres
 	o.Storage.S3 = fc.Charon.Storage.S3
 
@@ -414,6 +422,8 @@ func (s *StorageOptions) ToStorageConfig() StorageConfig {
 		WriteIntentStaleThreshold: s.WriteIntentStaleThreshold,
 		MaxResponses:              s.MaxResponses,
 		MaxPayload:                s.MaxPayload,
+		MaxChainDepth:             s.MaxChainDepth,
+		MaxContextBytes:           s.MaxContextBytes,
 		Postgres:                  s.Postgres,
 		S3:                        s.S3,
 	}
