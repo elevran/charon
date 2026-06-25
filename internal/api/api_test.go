@@ -254,3 +254,25 @@ func TestListInputOutputItems(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, r.StatusCode)
 	})
 }
+
+// TestResolveMaxBytesExceeded verifies that GET /responses/{id}/context?max_bytes=<small>
+// returns 422 with error "context_too_large" when the assembled context exceeds the limit.
+func TestResolveMaxBytesExceeded(t *testing.T) {
+	srv := newTestServer(t)
+
+	req := model.StoreRequest{
+		Input:  toInputParam(json.RawMessage(`{"type":"message","role":"user","text":"hi"}`)),
+		Output: []json.RawMessage{json.RawMessage(`{"type":"message","role":"assistant","text":"hello"}`)},
+		Status: "completed",
+	}
+	storeResp := doJSON(t, srv, "POST", "/responses/resp_maxbytes1", req)
+	defer storeResp.Body.Close()
+	require.Equal(t, http.StatusNoContent, storeResp.StatusCode)
+
+	resolveResp := doJSON(t, srv, "GET", "/responses/resp_maxbytes1/context?max_bytes=1", nil)
+	defer resolveResp.Body.Close()
+	assert.Equal(t, http.StatusUnprocessableEntity, resolveResp.StatusCode)
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(resolveResp.Body).Decode(&body))
+	assert.Equal(t, "context_too_large", body["error"])
+}

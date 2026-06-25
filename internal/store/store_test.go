@@ -107,7 +107,7 @@ func storeRequest(prevID *string, input, output []json.RawMessage) model.StoreRe
 func testResolveNewChainNotFound(t *testing.T, factory storeFactory) {
 	t.Helper()
 	svc, _, _ := factory(store.Config{})
-	_, _, err := svc.Resolve(ctx, "resp_doesnotexist")
+	_, _, err := svc.Resolve(ctx, "resp_doesnotexist", 0)
 	if err != storage.ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
@@ -135,7 +135,7 @@ func testResolveMultiTurn(t *testing.T, factory storeFactory) {
 		lastID = responseID
 	}
 
-	_, flatContext, err := svc.Resolve(ctx, lastID)
+	_, flatContext, err := svc.Resolve(ctx, lastID, 0)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -167,7 +167,7 @@ func testResolveWithCheckpoint(t *testing.T, factory storeFactory) {
 		prevID = &responseID
 	}
 
-	_, flatContext, err := svc.Resolve(ctx, "resp_00011")
+	_, flatContext, err := svc.Resolve(ctx, "resp_00011", 0)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -361,7 +361,7 @@ func testDeleteNoCascade(t *testing.T, factory storeFactory) {
 		t.Fatalf("turn 2 still retrievable: %v", err)
 	}
 
-	_, _, err := svc.Resolve(ctx, "resp_00002")
+	_, _, err := svc.Resolve(ctx, "resp_00002", 0)
 	if err != storage.ErrChainCorrupted {
 		t.Fatalf("expected ErrChainCorrupted due to gap, got %v", err)
 	}
@@ -389,7 +389,7 @@ func testEncryptedContentRoundtrip(t *testing.T, factory storeFactory) {
 		t.Fatal(err)
 	}
 
-	_, flatContext, err := svc.Resolve(ctx, "resp_enc1")
+	_, flatContext, err := svc.Resolve(ctx, "resp_enc1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +426,7 @@ func testInstructionsNotInContext(t *testing.T, factory storeFactory) {
 		t.Fatal(err)
 	}
 
-	_, flatContext, err := svc.Resolve(ctx, "resp_noinstr1")
+	_, flatContext, err := svc.Resolve(ctx, "resp_noinstr1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +465,7 @@ func testPhaseFieldPreserved(t *testing.T, factory storeFactory) {
 		t.Fatal(err)
 	}
 
-	_, flatContext, err := svc.Resolve(ctx, "resp_phase1")
+	_, flatContext, err := svc.Resolve(ctx, "resp_phase1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +517,7 @@ func testResolveEfficiency(t *testing.T, factory storeFactory) {
 	}
 
 	counter.gets.Store(0)
-	_, _, err := svc.Resolve(ctx, "resp_00099")
+	_, _, err := svc.Resolve(ctx, "resp_00099", 0)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}

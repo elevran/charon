@@ -26,6 +26,8 @@ type Config struct {
 	TTLDays            int   // response TTL; default 30
 	MaxResponses       int64 // max total responses in index; 0 = unbounded
 	MaxPayloadBytes    int64 // max size of a single payload blob in bytes; 0 = unbounded
+	MaxChainDepth      int   // abort resolve if chain walk exceeds this many hops; 0 = default (1000)
+	MaxContextBytes    int64 // abort resolve if assembled context exceeds this many bytes; 0 = unbounded
 }
 
 func (c *Config) applyDefaults() {
@@ -34,6 +36,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.TTLDays <= 0 {
 		c.TTLDays = 30
+	}
+	if c.MaxChainDepth <= 0 {
+		c.MaxChainDepth = 1000
 	}
 }
 
@@ -103,12 +108,20 @@ func (s *ContextStore) computeExpiresAt() *int64 {
 }
 
 // Resolve assembles flat_context from previousID and mints a new responseID.
-func (s *ContextStore) Resolve(ctx context.Context, previousID string) (string, []json.RawMessage, error) {
+// maxBytes is an optional per-request size hint from the caller (0 = use server default).
+// The effective limit is min(maxBytes, cfg.MaxContextBytes) when both are non-zero.
+func (s *ContextStore) Resolve(ctx context.Context, previousID string, maxBytes int64) (string, []json.RawMessage, error) {
 	if _, err := s.index.Get(ctx, previousID); err != nil {
 		return "", nil, err
 	}
 
-	flatContext, err := s.buildContext(ctx, previousID)
+	// Compute effective context byte cap: caller hint cannot exceed server hard cap.
+	effectiveMaxBytes := s.cfg.MaxContextBytes
+	if maxBytes > 0 && (effectiveMaxBytes == 0 || maxBytes < effectiveMaxBytes) {
+		effectiveMaxBytes = maxBytes
+	}
+
+	flatContext, err := s.buildContext(ctx, previousID, s.cfg.MaxChainDepth, effectiveMaxBytes)
 	if err != nil {
 		return "", nil, err
 	}
@@ -198,7 +211,7 @@ func (s *ContextStore) Store(ctx context.Context, responseID string, req model.S
 	if isCheckpoint {
 		flatCtx := make([]json.RawMessage, 0, len(rawInput)+len(req.Output))
 		if req.PreviousResponseID != nil {
-			flatCtx, err = s.buildContext(ctx, *req.PreviousResponseID)
+			flatCtx, err = s.buildContext(ctx, *req.PreviousResponseID, s.cfg.MaxChainDepth, 0)
 			if err != nil {
 				return fmt.Errorf("build checkpoint context: %w", err)
 			}
@@ -413,7 +426,7 @@ func (s *ContextStore) CommitStream(ctx context.Context, responseID string, req 
 	if isCheckpoint {
 		flatCtx2 := make([]json.RawMessage, 0, len(rawInput)+len(allOutput))
 		if req.PreviousResponseID != nil {
-			flatCtx2, err = s.buildContext(ctx, *req.PreviousResponseID)
+			flatCtx2, err = s.buildContext(ctx, *req.PreviousResponseID, s.cfg.MaxChainDepth, 0)
 			if err != nil {
 				return fmt.Errorf("build checkpoint context: %w", err)
 			}

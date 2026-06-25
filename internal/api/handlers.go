@@ -45,15 +45,33 @@ func mapStatus(err error) (int, string) {
 		return http.StatusConflict, "chain corrupted"
 	case errors.Is(err, storage.ErrStoreFull):
 		return http.StatusInsufficientStorage, "store full"
+	case errors.Is(err, storage.ErrChainTooDeep):
+		return http.StatusUnprocessableEntity, "chain_too_deep"
+	case errors.Is(err, storage.ErrContextTooLarge):
+		return http.StatusUnprocessableEntity, "context_too_large"
 	default:
 		return http.StatusInternalServerError, "internal server error"
 	}
 }
 
 // HandleResolve handles GET /responses/{id}/context.
+// Accepts an optional max_bytes query parameter (integer bytes, e.g. ?max_bytes=1048576) to cap
+// the assembled context size. Unlike the storage.max_context_bytes config field, this parameter
+// does not accept unit suffixes (KB, MB, GB) — only bare integers are valid.
 func (h *Handler) HandleResolve(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	reservationID, flatContext, err := h.svc.Resolve(r.Context(), id)
+
+	var maxBytes int64
+	if s := r.URL.Query().Get("max_bytes"); s != "" {
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || v <= 0 {
+			writeError(w, http.StatusBadRequest, "max_bytes must be a positive integer")
+			return
+		}
+		maxBytes = v
+	}
+
+	reservationID, flatContext, err := h.svc.Resolve(r.Context(), id, maxBytes)
 	if err != nil {
 		status, msg := mapStatus(err)
 		if status == http.StatusInternalServerError {

@@ -98,6 +98,8 @@ proxy:
 | `storage.checkpoint_interval` | `10` | Write a full-context checkpoint every N turns |
 | `storage.ttl_days` | `30` | Responses expire after this many days |
 | `storage.write_intent_stale_threshold` | `5m` | Write intents older than this are recovered on startup |
+| `storage.max_chain_depth` | `1000` | Abort resolution if the chain walk exceeds this many hops. Returns `chain_too_deep` (HTTP 422). |
+| `storage.max_context_bytes` | `0` (unbounded) | Abort resolution if the assembled flat context exceeds this size. Supports unit suffixes (`MB`, `GB`). Returns `context_too_large` (HTTP 422). |
 | `workers.ttl_interval` | `1h` | How often the TTL expiry worker runs |
 | `workers.recovery_interval` | `5m` | How often the write-intent recovery worker runs |
 
