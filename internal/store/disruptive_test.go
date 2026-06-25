@@ -254,7 +254,7 @@ func TestConcurrentStoreSameID(t *testing.T) {
 
 // --- Chain depth enforcement ---
 
-// TestChainDepthLimitExceeded verifies that Resolve returns ErrChainCorrupted
+// TestChainDepthLimitExceeded verifies that Resolve returns ErrChainTooDeep
 // when the backward chain walk exceeds maxChainDepth (1000 nodes), preventing
 // unbounded memory use during context assembly.
 func TestChainDepthLimitExceeded(t *testing.T) {
@@ -285,7 +285,40 @@ func TestChainDepthLimitExceeded(t *testing.T) {
 		lastID = id
 	}
 
-	_, _, err := svc.Resolve(context.Background(), lastID)
-	assert.ErrorIs(t, err, storage.ErrChainCorrupted,
-		"Resolve must return ErrChainCorrupted when chain exceeds the 1000-node depth limit")
+	_, _, err := svc.Resolve(context.Background(), lastID, 0)
+	assert.ErrorIs(t, err, storage.ErrChainTooDeep,
+		"Resolve must return ErrChainTooDeep when chain exceeds the 1000-node depth limit")
+}
+
+// TestContextByteLimitExceeded verifies that Resolve returns ErrContextTooLarge
+// when the assembled context exceeds the per-call max_bytes limit.
+func TestContextByteLimitExceeded(t *testing.T) {
+	idx := memory.NewIndexStore()
+	pay := memory.NewPayloadStore()
+	svc := store.New(idx, pay, store.Config{}, disruptiveLogger())
+
+	// Store a response with a known-size output item (~50 bytes of JSON).
+	req := disruptiveStoreReq()
+	require.NoError(t, svc.Store(context.Background(), "resp_big0", req))
+
+	// Set max_bytes to 1 — the assembled context will always exceed this.
+	_, _, err := svc.Resolve(context.Background(), "resp_big0", 1)
+	assert.ErrorIs(t, err, storage.ErrContextTooLarge,
+		"Resolve must return ErrContextTooLarge when assembled context exceeds max_bytes limit")
+}
+
+// TestMaxContextBytesConfig verifies that MaxContextBytes in store.Config is
+// enforced even when the caller passes max_bytes=0 (unbounded per-call).
+func TestMaxContextBytesConfig(t *testing.T) {
+	idx := memory.NewIndexStore()
+	pay := memory.NewPayloadStore()
+	svc := store.New(idx, pay, store.Config{MaxContextBytes: 1}, disruptiveLogger())
+
+	req := disruptiveStoreReq()
+	require.NoError(t, svc.Store(context.Background(), "resp_cfg0", req))
+
+	// max_bytes=0 means "use config cap"; config cap is 1 byte.
+	_, _, err := svc.Resolve(context.Background(), "resp_cfg0", 0)
+	assert.ErrorIs(t, err, storage.ErrContextTooLarge,
+		"Resolve must return ErrContextTooLarge when MaxContextBytes config cap is exceeded")
 }

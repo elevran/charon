@@ -68,7 +68,7 @@ func benchResolveMemory(b *testing.B, depth int) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		_, _, err := svc.Resolve(benchCtx, headID)
+		_, _, err := svc.Resolve(benchCtx, headID, 0)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -101,7 +101,7 @@ func benchResolveSQLite(b *testing.B, depth int) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		_, _, err := svc.Resolve(benchCtx, headID)
+		_, _, err := svc.Resolve(benchCtx, headID, 0)
 		if err != nil {
 			b.Fatal(err)
 		}
