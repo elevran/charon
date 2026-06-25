@@ -254,7 +254,7 @@ func TestConcurrentStoreSameID(t *testing.T) {
 
 // --- Chain depth enforcement ---
 
-// TestChainDepthLimitExceeded verifies that Resolve returns ErrChainCorrupted
+// TestChainDepthLimitExceeded verifies that Resolve returns ErrChainTooDeep
 // when the backward chain walk exceeds maxChainDepth (1000 nodes), preventing
 // unbounded memory use during context assembly.
 func TestChainDepthLimitExceeded(t *testing.T) {
@@ -286,6 +286,6 @@ func TestChainDepthLimitExceeded(t *testing.T) {
 	}
 
 	_, _, err := svc.Resolve(context.Background(), lastID, 0)
-	assert.ErrorIs(t, err, storage.ErrChainCorrupted,
-		"Resolve must return ErrChainCorrupted when chain exceeds the 1000-node depth limit")
+	assert.ErrorIs(t, err, storage.ErrChainTooDeep,
+		"Resolve must return ErrChainTooDeep when chain exceeds the 1000-node depth limit")
 }
