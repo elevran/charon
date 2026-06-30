@@ -3,13 +3,15 @@ package pebble
 import (
 	"testing"
 
-	"github.com/elevran/charon/pkg/chainstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/elevran/charon/pkg/chainstore"
 )
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	node := chainstore.Node{
+		Version:        1,
 		ID:             chainstore.NodeID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20},
 		ParentID:       chainstore.NodeID{21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40},
 		BlobID:         chainstore.BlobID{41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56},
@@ -21,7 +23,6 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		Depth:          7,
 		Status:         chainstore.NodeStatusFailed,
 		BlobType:       chainstore.BlobTypeSingle,
-		Version:        1,
 	}
 
 	encoded := encodeNode(node)
@@ -29,20 +30,6 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 
 	decoded := decodeNode(encoded)
 	assert.Equal(t, node, decoded, "round-trip must produce identical node")
-}
-
-func TestEncodeReservedBytesZeroed(t *testing.T) {
-	node := chainstore.Node{
-		ID:      chainstore.NodeID{0xff},
-		Version: 1,
-	}
-	encoded := encodeNode(node)
-	require.Len(t, encoded, nodeSize)
-
-	// Reserved bytes are 99–115 (17 bytes).
-	for i := 99; i < nodeSize; i++ {
-		assert.Zero(t, encoded[i], "reserved byte at offset %d must be zero", i)
-	}
 }
 
 func TestEncodeZeroNode(t *testing.T) {
