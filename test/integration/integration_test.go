@@ -494,3 +494,63 @@ func TestChunkedStreamOutOfOrder(t *testing.T) {
 		})
 	}
 }
+
+// TestBackgroundFlagPersistedAndReturned verifies that background:true is stored and
+// returned by GET /responses/{id} for both store and commit-stream paths.
+func TestBackgroundFlagPersistedAndReturned(t *testing.T) {
+	for _, b := range backends {
+		t.Run(b.name+"/store_path", func(t *testing.T) {
+			fx := b.factory(t, store.Config{})
+
+			req := model.StoreRequest{
+				Input: responses.ResponseInputParam{func() responses.ResponseInputItemUnionParam {
+					var p responses.ResponseInputItemUnionParam
+					_ = json.Unmarshal(json.RawMessage(`{"type":"message","role":"user","text":"hi"}`), &p)
+					return p
+				}()},
+				Output:     []json.RawMessage{json.RawMessage(`{"type":"message","role":"assistant","text":"ok"}`)},
+				Status:     "completed",
+				Model:      "test",
+				Background: true,
+			}
+
+			r := fx.doJSON(t, "POST", "/responses/resp_bg_store1", req)
+			defer r.Body.Close()
+			require.Equal(t, http.StatusNoContent, r.StatusCode)
+
+			r2 := fx.doJSON(t, "GET", "/responses/resp_bg_store1", nil)
+			defer r2.Body.Close()
+			require.Equal(t, http.StatusOK, r2.StatusCode)
+
+			var got model.RetrieveResponse
+			require.NoError(t, json.NewDecoder(r2.Body).Decode(&got))
+			assert.True(t, got.Background, "background flag must be returned as true after store path")
+		})
+
+		t.Run(b.name+"/commit_stream_path", func(t *testing.T) {
+			fx := b.factory(t, store.Config{})
+
+			commit := model.ChunkRequest{
+				Type:       "commit",
+				Seq:        0,
+				Input:      []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","text":"hi"}`)},
+				Items:      []json.RawMessage{json.RawMessage(`{"type":"message","role":"assistant","text":"ok"}`)},
+				Status:     "completed",
+				Model:      "test",
+				Background: true,
+			}
+
+			r := fx.doJSON(t, "PATCH", "/responses/resp_bg_commit1", commit)
+			defer r.Body.Close()
+			require.Equal(t, http.StatusNoContent, r.StatusCode)
+
+			r2 := fx.doJSON(t, "GET", "/responses/resp_bg_commit1", nil)
+			defer r2.Body.Close()
+			require.Equal(t, http.StatusOK, r2.StatusCode)
+
+			var got model.RetrieveResponse
+			require.NoError(t, json.NewDecoder(r2.Body).Decode(&got))
+			assert.True(t, got.Background, "background flag must be returned as true after commit stream path")
+		})
+	}
+}

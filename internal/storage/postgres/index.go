@@ -36,11 +36,15 @@ func (s *IndexStore) Put(ctx context.Context, meta model.ResponseMeta) error {
 	if meta.CheckpointKey != nil {
 		isCheckpoint = 1
 	}
+	background := 0
+	if meta.Background {
+		background = 1
+	}
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO responses
 			(id, previous_response_id, chain_root_id, position, is_checkpoint,
-			 owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			 owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key, background)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (id) DO UPDATE SET
 			previous_response_id = EXCLUDED.previous_response_id,
 			chain_root_id        = EXCLUDED.chain_root_id,
@@ -52,10 +56,11 @@ func (s *IndexStore) Put(ctx context.Context, meta model.ResponseMeta) error {
 			created_at           = EXCLUDED.created_at,
 			expires_at           = EXCLUDED.expires_at,
 			payload_key          = EXCLUDED.payload_key,
-			checkpoint_key       = EXCLUDED.checkpoint_key`,
+			checkpoint_key       = EXCLUDED.checkpoint_key,
+			background           = EXCLUDED.background`,
 		meta.ID, meta.PreviousResponseID, meta.ChainRootID, meta.Position, isCheckpoint,
 		meta.OwnerPrincipal, meta.Model, string(meta.Status), meta.CreatedAt,
-		meta.ExpiresAt, meta.PayloadKey, meta.CheckpointKey,
+		meta.ExpiresAt, meta.PayloadKey, meta.CheckpointKey, background,
 	)
 	return err
 }
@@ -63,14 +68,14 @@ func (s *IndexStore) Put(ctx context.Context, meta model.ResponseMeta) error {
 func (s *IndexStore) Get(ctx context.Context, id string) (model.ResponseMeta, error) {
 	row := s.pool.QueryRow(ctx,
 		`SELECT id, previous_response_id, chain_root_id, position, is_checkpoint,
-		        owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key
+		        owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key, background
 		 FROM responses WHERE id = $1`, id)
 
 	var r responseRow
 	err := row.Scan(
 		&r.ID, &r.PreviousResponseID, &r.ChainRootID, &r.Position, &r.IsCheckpoint,
 		&r.OwnerPrincipal, &r.Model, &r.Status, &r.CreatedAt,
-		&r.ExpiresAt, &r.PayloadKey, &r.CheckpointKey,
+		&r.ExpiresAt, &r.PayloadKey, &r.CheckpointKey, &r.Background,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.ResponseMeta{}, storage.ErrNotFound
@@ -89,7 +94,7 @@ func (s *IndexStore) Delete(ctx context.Context, id string) error {
 
 func (s *IndexStore) List(ctx context.Context, opts storage.ListOptions) ([]model.ResponseMeta, error) {
 	query := `SELECT id, previous_response_id, chain_root_id, position, is_checkpoint,
-	                 owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key
+	                 owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key, background
 	          FROM responses`
 	args := []any{}
 
@@ -112,7 +117,7 @@ func (s *IndexStore) List(ctx context.Context, opts storage.ListOptions) ([]mode
 		if err := rows.Scan(
 			&r.ID, &r.PreviousResponseID, &r.ChainRootID, &r.Position, &r.IsCheckpoint,
 			&r.OwnerPrincipal, &r.Model, &r.Status, &r.CreatedAt,
-			&r.ExpiresAt, &r.PayloadKey, &r.CheckpointKey,
+			&r.ExpiresAt, &r.PayloadKey, &r.CheckpointKey, &r.Background,
 		); err != nil {
 			return nil, err
 		}
@@ -133,7 +138,7 @@ func (s *IndexStore) List(ctx context.Context, opts storage.ListOptions) ([]mode
 func (s *IndexStore) ListExpired(ctx context.Context, before int64) ([]model.ResponseMeta, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, previous_response_id, chain_root_id, position, is_checkpoint,
-		        owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key
+		        owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key, background
 		 FROM responses WHERE expires_at IS NOT NULL AND expires_at < $1`, before)
 	if err != nil {
 		return nil, err
@@ -213,6 +218,7 @@ type responseRow struct {
 	ExpiresAt          *int64
 	PayloadKey         string
 	CheckpointKey      *string
+	Background         int
 }
 
 func rowToMeta(r responseRow) model.ResponseMeta {
@@ -223,6 +229,7 @@ func rowToMeta(r responseRow) model.ResponseMeta {
 		Position:           r.Position,
 		OwnerPrincipal:     r.OwnerPrincipal,
 		Model:              r.Model,
+		Background:         r.Background != 0,
 		Status:             model.ResponseStatus(r.Status),
 		CreatedAt:          r.CreatedAt,
 		ExpiresAt:          r.ExpiresAt,
@@ -238,7 +245,7 @@ func scanMetaRows(rows pgx.Rows) ([]model.ResponseMeta, error) {
 		if err := rows.Scan(
 			&r.ID, &r.PreviousResponseID, &r.ChainRootID, &r.Position, &r.IsCheckpoint,
 			&r.OwnerPrincipal, &r.Model, &r.Status, &r.CreatedAt,
-			&r.ExpiresAt, &r.PayloadKey, &r.CheckpointKey,
+			&r.ExpiresAt, &r.PayloadKey, &r.CheckpointKey, &r.Background,
 		); err != nil {
 			return nil, err
 		}
@@ -282,6 +289,12 @@ func isPgUniqueViolation(err error) bool {
 func migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("postgres migrate: %w", err)
+	}
+	// Additive migrations: add background column if it does not exist yet.
+	_, err := pool.Exec(ctx, `
+		ALTER TABLE responses ADD COLUMN IF NOT EXISTS background INTEGER NOT NULL DEFAULT 0`)
+	if err != nil {
+		return fmt.Errorf("postgres migrate background column: %w", err)
 	}
 	return nil
 }

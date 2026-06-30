@@ -56,6 +56,7 @@ type wsCreateMsg struct {
 	PreviousResponseID *string           `json:"previous_response_id,omitempty"`
 	Instructions       *string           `json:"instructions,omitempty"`
 	Store              *bool             `json:"store,omitempty"`
+	Background         bool              `json:"background,omitempty"`
 	Tools              []json.RawMessage `json:"tools,omitempty"`
 	ToolChoice         json.RawMessage   `json:"tool_choice,omitempty"`
 }
@@ -207,7 +208,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 				Status: "in_progress",
 				Model:  msg.Model,
 				Output: []json.RawMessage{},
-			}, msg.PreviousResponseID, msg.ShouldStore(), createdAt, nil)
+			}, msg.PreviousResponseID, msg.ShouldStore(), msg.Background, createdAt, nil)
 			h.wsSend(conn, sseEvent{Type: "response.created", SequenceNumber: seq, Response: placeholder})
 			seq++
 			sentCreated = true
@@ -266,6 +267,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 				Usage:              usage,
 				Status:             finalInfResp.Status,
 				Model:              finalInfResp.Model,
+				Background:         msg.Background,
 			}); err != nil {
 				h.log.Error("ws charon stream commit", "id", canonicalID, "err", err)
 			}
@@ -279,6 +281,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 				Usage:              usage,
 				Status:             finalInfResp.Status,
 				Model:              finalInfResp.Model,
+				Background:         msg.Background,
 			}
 			if err := h.charon.Store(ctx, canonicalID, storeReq); err != nil {
 				h.log.Error("ws charon store", "id", canonicalID, "err", err)
@@ -294,7 +297,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 	}
 
 	completedAt := time.Now()
-	completed := buildResponseResource(finalInfResp, msg.PreviousResponseID, msg.ShouldStore(), createdAt, &completedAt)
+	completed := buildResponseResource(finalInfResp, msg.PreviousResponseID, msg.ShouldStore(), msg.Background, createdAt, &completedAt)
 	h.wsSend(conn, sseEvent{Type: "response.completed", SequenceNumber: seq, Response: completed})
 }
 

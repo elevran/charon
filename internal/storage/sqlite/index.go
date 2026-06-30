@@ -29,6 +29,7 @@ type responseRow struct {
 	ExpiresAt          *int64  `db:"expires_at"`
 	PayloadKey         string  `db:"payload_key"`
 	CheckpointKey      *string `db:"checkpoint_key"`
+	Background         int     `db:"background"`
 }
 
 var _ storage.IndexStore = (*IndexStore)(nil)
@@ -58,8 +59,8 @@ const (
 
 	sqlPutResp = `INSERT OR REPLACE INTO responses
 		(id, previous_response_id, chain_root_id, position, is_checkpoint,
-		 owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+		 owner_principal, model, status, created_at, expires_at, payload_key, checkpoint_key, background)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 	sqlDeleteResp = `DELETE FROM responses WHERE id = ?`
 
@@ -135,10 +136,14 @@ func (s *IndexStore) Put(_ context.Context, meta model.ResponseMeta) error {
 	if meta.CheckpointKey != nil {
 		isCheckpoint = 1
 	}
+	background := 0
+	if meta.Background {
+		background = 1
+	}
 	_, err := s.stmts.putResp.Exec(
 		meta.ID, meta.PreviousResponseID, meta.ChainRootID, meta.Position, isCheckpoint,
 		meta.OwnerPrincipal, meta.Model, string(meta.Status), meta.CreatedAt,
-		meta.ExpiresAt, meta.PayloadKey, meta.CheckpointKey,
+		meta.ExpiresAt, meta.PayloadKey, meta.CheckpointKey, background,
 	)
 	return err
 }
@@ -276,6 +281,7 @@ func rowToMeta(row responseRow) model.ResponseMeta {
 		Position:           row.Position,
 		OwnerPrincipal:     row.OwnerPrincipal,
 		Model:              row.Model,
+		Background:         row.Background != 0,
 		Status:             model.ResponseStatus(row.Status),
 		CreatedAt:          row.CreatedAt,
 		ExpiresAt:          row.ExpiresAt,

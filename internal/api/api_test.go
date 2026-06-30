@@ -255,6 +255,34 @@ func TestListInputOutputItems(t *testing.T) {
 	})
 }
 
+// TestStoreAndRetrieveBackgroundFlag verifies that background:true is persisted and returned.
+func TestStoreAndRetrieveBackgroundFlag(t *testing.T) {
+	srv := newTestServer(t)
+
+	inp := json.RawMessage(`{"type":"message","role":"user"}`)
+	out := json.RawMessage(`{"type":"message","role":"assistant"}`)
+	req := model.StoreRequest{
+		Input:      toInputParam(inp),
+		Output:     []json.RawMessage{out},
+		Status:     "completed",
+		Model:      "test-model",
+		Background: true,
+	}
+
+	storeResp := doJSON(t, srv, "POST", "/responses/resp_bg1", req)
+	defer storeResp.Body.Close()
+	require.Equal(t, http.StatusNoContent, storeResp.StatusCode)
+
+	getResp := doJSON(t, srv, "GET", "/responses/resp_bg1", nil)
+	defer getResp.Body.Close()
+	require.Equal(t, http.StatusOK, getResp.StatusCode)
+
+	var retrieve model.RetrieveResponse
+	require.NoError(t, json.NewDecoder(getResp.Body).Decode(&retrieve))
+	assert.Equal(t, "resp_bg1", retrieve.ID)
+	assert.True(t, retrieve.Background, "background flag must be persisted and returned as true")
+}
+
 // TestResolveMaxBytesExceeded verifies that GET /responses/{id}/context?max_bytes=<small>
 // returns 422 with error "context_too_large" when the assembled context exceeds the limit.
 func TestResolveMaxBytesExceeded(t *testing.T) {
