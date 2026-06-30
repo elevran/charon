@@ -42,7 +42,6 @@ type Node struct {
 	BlobID         BlobID   // UUID → single blob or chunked blob; indirection avoids blob copy on promotion
 	LastAccessUnix int64    // Unix seconds; updated on access (actual promotion strategy may batch to reduce write amplification)
 	CreatedAt      int64    // Unix seconds; set at store time, never updated
-	ExpiresAt      int64    // Unix seconds; 0 = no expiry; stored explicitly so TTL config is not needed at read time
 	BucketID       BucketID // bucket at last promotion; ground truth for eviction order
 	BlobSize       uint32
 	Depth          uint32 // 0 = root; enables slice preallocation in LoadChain
