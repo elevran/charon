@@ -55,6 +55,39 @@ func Close(db *sqlx.DB) error {
 }
 
 func migrate(db *sqlx.DB) error {
-	_, err := db.Exec(schema)
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	// Additive migration: add background column to pre-existing databases that
+	// were created before this column was added to the schema.
+	// We use PRAGMA table_info to check idempotently rather than relying on
+	// "IF NOT EXISTS" (not supported by the modernc SQLite driver).
+	return addColumnIfMissing(db, "responses", "background",
+		`ALTER TABLE responses ADD COLUMN background INTEGER NOT NULL DEFAULT 0`)
+}
+
+// addColumnIfMissing runs ALTER TABLE ddl only if the named column is absent.
+func addColumnIfMissing(db *sqlx.DB, table, column, ddl string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return fmt.Errorf("pragma table_info: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt interface{}
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil // column already exists
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(ddl)
 	return err
 }

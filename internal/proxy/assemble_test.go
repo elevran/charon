@@ -122,7 +122,7 @@ func TestBuildResponseResource(t *testing.T) {
 		Usage:  &inference.UsageInfo{InputTokens: 5, OutputTokens: 3, TotalTokens: 8},
 	}
 	now := time.Now()
-	r := buildResponseResource(infResp, &prevID, true, now, &now)
+	r := buildResponseResource(infResp, &prevID, true, false, now, &now)
 	if r.ID != "resp_abc" {
 		t.Errorf("ID mismatch: %q", r.ID)
 	}
@@ -138,10 +138,22 @@ func TestBuildResponseResource(t *testing.T) {
 	if r.Usage == nil || r.Usage.TotalTokens != 8 {
 		t.Errorf("Usage: %v", r.Usage)
 	}
+	if r.Background {
+		t.Error("Background should be false when not set")
+	}
 	if len(r.Tools) == 0 {
 		// Tools should be an empty slice, not nil (for JSON serialisation)
 		if r.Tools == nil {
 			t.Error("Tools should be empty slice, not nil")
 		}
+	}
+}
+
+func TestBuildResponseResource_Background(t *testing.T) {
+	infResp := &inference.Response{ID: "resp_bg", Status: "completed", Model: "test"}
+	now := time.Now()
+	r := buildResponseResource(infResp, nil, true, true, now, &now)
+	if !r.Background {
+		t.Error("Background should be true when set")
 	}
 }
