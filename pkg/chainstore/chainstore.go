@@ -110,14 +110,6 @@ type Transaction struct {
 	StatsDelta StatsDelta
 }
 
-// Manifest is the commit record for a chunked blob.
-// Written atomically as the last step of a chunked-blob store to make it readable.
-type Manifest struct {
-	BlobID     BlobID
-	ChunkCount uint32
-	TotalSize  uint64
-}
-
 // Backend is the only interface the business logic sees.
 // Each implementation maps these domain operations to its native storage primitives.
 // No key encodings, batch primitives, or scan APIs appear above this boundary.
@@ -130,7 +122,6 @@ type Backend interface {
 	GetNode(ctx context.Context, id NodeID) (Node, error)
 
 	// GetBlob fetches the opaque blob for a node. ErrNotFound if absent.
-	// Dispatches on BlobType: single-blob reads directly; chunked returns ErrNotImplemented until Phase 6.
 	GetBlob(ctx context.Context, node Node) ([]byte, error)
 
 	// Commit atomically applies all mutations in tx.
@@ -150,20 +141,6 @@ type Backend interface {
 
 	// Stats returns current entry count and total blob bytes.
 	Stats(ctx context.Context) (entries int64, bytes int64, err error)
-
-	// --- Chunked-blob support: implementations return ErrNotImplemented until Phase 6. ---
-
-	// PutChunk writes a single chunk durably.
-	PutChunk(ctx context.Context, blobID BlobID, seq uint32, data []byte) error
-
-	// PutManifest writes the manifest — the commit point that makes a chunked blob readable.
-	PutManifest(ctx context.Context, blobID BlobID, m Manifest) error
-
-	// GetManifest reads the manifest. ErrNotFound if blob is not chunked.
-	GetManifest(ctx context.Context, blobID BlobID) (Manifest, error)
-
-	// GetChunk reads one chunk by blob ID and sequence number.
-	GetChunk(ctx context.Context, blobID BlobID, seq uint32) ([]byte, error)
 
 	// Close releases all resources.
 	Close() error

@@ -2,6 +2,7 @@ package pebble
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 
 	crdbpebble "github.com/cockroachdb/pebble"
@@ -18,22 +19,21 @@ type statsMerger struct {
 	bytes   int64
 }
 
-func (m *statsMerger) add(value []byte) {
+func (m *statsMerger) add(value []byte) error {
 	if len(value) < 16 {
-		return
+		return fmt.Errorf("chainstore/pebble: corrupt stats operand (len=%d)", len(value))
 	}
 	m.entries += int64(binary.BigEndian.Uint64(value[0:8]))
 	m.bytes += int64(binary.BigEndian.Uint64(value[8:16]))
+	return nil
 }
 
 func (m *statsMerger) MergeNewer(value []byte) error {
-	m.add(value)
-	return nil
+	return m.add(value)
 }
 
 func (m *statsMerger) MergeOlder(value []byte) error {
-	m.add(value)
-	return nil
+	return m.add(value)
 }
 
 func (m *statsMerger) Finish(_ bool) ([]byte, io.Closer, error) {
@@ -49,7 +49,6 @@ var StatsMerger = &crdbpebble.Merger{
 	Name: "chainstore.stats.v1",
 	Merge: func(_ []byte, value []byte) (crdbpebble.ValueMerger, error) {
 		m := &statsMerger{}
-		m.add(value)
-		return m, nil
+		return m, m.add(value)
 	},
 }
