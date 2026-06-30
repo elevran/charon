@@ -43,10 +43,11 @@ func (b *Backend) LoadChain(_ context.Context, leaf chainstore.NodeID) ([]chains
 			if closer != nil {
 				_ = closer.Close()
 			}
-			if err == crdbpebble.ErrNotFound {
-				if len(nodes) == 0 {
-					return nil, chainstore.ErrNotFound
-				}
+			if err != crdbpebble.ErrNotFound {
+				return nil, err
+			}
+			if len(nodes) == 0 {
+				return nil, chainstore.ErrNotFound
 			}
 			return nil, chainstore.ErrChainCorrupted
 		}
@@ -71,11 +72,8 @@ func (b *Backend) GetNode(_ context.Context, id chainstore.NodeID) (chainstore.N
 	return decodeNode(val), nil
 }
 
-// GetBlob fetches the opaque blob for a node. Uses BlobType to dispatch.
+// GetBlob fetches the opaque blob for a node.
 func (b *Backend) GetBlob(_ context.Context, node chainstore.Node) ([]byte, error) {
-	if node.BlobType == chainstore.BlobTypeChunked {
-		return nil, chainstore.ErrNotImplemented
-	}
 	val, closer, err := b.db.Get(blobKey(node.BlobID))
 	if err != nil {
 		return nil, mapErr(err)
@@ -90,6 +88,7 @@ func (b *Backend) GetBlob(_ context.Context, node chainstore.Node) ([]byte, erro
 // Commit translates a domain Transaction into a pebble.Batch and commits atomically.
 func (b *Backend) Commit(_ context.Context, tx chainstore.Transaction) error {
 	batch := b.db.NewBatch()
+	defer func() { _ = batch.Close() }()
 
 	for _, n := range tx.PutNodes {
 		if err := batch.Set(metaKey(n.ID), encodeNode(n), nil); err != nil {
@@ -171,6 +170,9 @@ func (b *Backend) OldestBucket(_ context.Context) (chainstore.BucketID, error) {
 	}
 	defer func() { _ = iter.Close() }()
 	if !iter.First() {
+		if err := iter.Error(); err != nil {
+			return 0, err
+		}
 		return 0, chainstore.ErrNotFound
 	}
 	bucket := chainstore.BucketID(binary.BigEndian.Uint64(iter.Key()[1:9]))
@@ -231,26 +233,6 @@ func (b *Backend) Stats(_ context.Context) (int64, int64, error) {
 	entries := int64(binary.BigEndian.Uint64(val[0:8]))
 	bytes := int64(binary.BigEndian.Uint64(val[8:16]))
 	return entries, bytes, nil
-}
-
-// PutChunk is a Phase 6 stub.
-func (b *Backend) PutChunk(_ context.Context, _ chainstore.BlobID, _ uint32, _ []byte) error {
-	return chainstore.ErrNotImplemented
-}
-
-// PutManifest is a Phase 6 stub.
-func (b *Backend) PutManifest(_ context.Context, _ chainstore.BlobID, _ chainstore.Manifest) error {
-	return chainstore.ErrNotImplemented
-}
-
-// GetManifest is a Phase 6 stub.
-func (b *Backend) GetManifest(_ context.Context, _ chainstore.BlobID) (chainstore.Manifest, error) {
-	return chainstore.Manifest{}, chainstore.ErrNotImplemented
-}
-
-// GetChunk is a Phase 6 stub.
-func (b *Backend) GetChunk(_ context.Context, _ chainstore.BlobID, _ uint32) ([]byte, error) {
-	return nil, chainstore.ErrNotImplemented
 }
 
 // Close releases all pebble resources.
