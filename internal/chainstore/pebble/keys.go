@@ -3,7 +3,7 @@ package pebble
 import (
 	"encoding/binary"
 
-	"github.com/elevran/charon/pkg/chainstore"
+	"github.com/elevran/charon/internal/chainstore"
 )
 
 const (

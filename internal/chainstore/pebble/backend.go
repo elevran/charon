@@ -7,7 +7,7 @@ import (
 
 	crdbpebble "github.com/cockroachdb/pebble"
 
-	"github.com/elevran/charon/pkg/chainstore"
+	"github.com/elevran/charon/internal/chainstore"
 )
 
 // Backend implements chainstore.Backend using CockroachDB Pebble as the
