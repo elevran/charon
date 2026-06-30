@@ -86,6 +86,7 @@ func buildResponseResource(
 	infResp *inference.Response,
 	previousID *string,
 	shouldStore bool,
+	background bool,
 	createdAt time.Time,
 	completedAt *time.Time,
 ) *ResponseResource {
@@ -105,6 +106,7 @@ func buildResponseResource(
 		PreviousResponseID: previousID,
 		Output:             infResp.Output,
 		Store:              shouldStore,
+		Background:         background,
 		Tools:              []json.RawMessage{},
 		ToolChoice:         "auto",
 		Truncation:         "disabled",
