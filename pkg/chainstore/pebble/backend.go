@@ -99,9 +99,12 @@ func (b *Backend) Commit(_ context.Context, tx chainstore.Transaction) error {
 				return err
 			}
 		}
-		// Write lru entry for new node (only written at initial insert here; moves via BucketMoves).
-		if err := batch.Set(lruKey(n.BucketID, n.ID), nil, nil); err != nil {
-			return err
+		// Write lru entry. BucketID=0 is a sentinel for "unset" — bucket 0 would require a
+		// Unix timestamp from 1970, which never occurs in practice.
+		if n.BucketID != 0 {
+			if err := batch.Set(lruKey(n.BucketID, n.ID), nil, nil); err != nil {
+				return err
+			}
 		}
 	}
 
