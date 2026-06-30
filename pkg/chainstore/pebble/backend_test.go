@@ -5,19 +5,20 @@ import (
 	"testing"
 	"time"
 
-	gogopebble "github.com/cockroachdb/pebble"
+	crdbpebble "github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
-	"github.com/elevran/charon/pkg/chainstore"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/elevran/charon/pkg/chainstore"
 )
 
 // openMemBackend returns a Backend backed by an in-memory Pebble VFS.
 // The returned backend must be closed by the caller.
 func openMemBackend(t *testing.T) *Backend {
 	t.Helper()
-	db, err := gogopebble.Open("", &gogopebble.Options{
+	db, err := crdbpebble.Open("", &crdbpebble.Options{
 		FS:     vfs.NewMem(),
 		Merger: StatsMerger,
 	})
