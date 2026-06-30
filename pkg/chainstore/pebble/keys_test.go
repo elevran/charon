@@ -3,15 +3,16 @@ package pebble
 import (
 	"testing"
 
-	"github.com/elevran/charon/pkg/chainstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/elevran/charon/pkg/chainstore"
 )
 
 // TestKeyPrefixNoCollision verifies that all prefix constants are distinct
 // and that keys with different prefixes cannot collide.
 func TestKeyPrefixNoCollision(t *testing.T) {
-	prefixes := []byte{pfxMeta, pfxBlob, pfxLRU, pfxChildren, pfxStats, pfxStaging, pfxChunk, pfxManifest}
+	prefixes := []byte{pfxMeta, pfxBlob, pfxLRU, pfxChildren, pfxStats}
 	seen := make(map[byte]bool)
 	for _, p := range prefixes {
 		require.False(t, seen[p], "duplicate prefix: 0x%02x", p)
@@ -58,33 +59,6 @@ func TestChildKeyLayout(t *testing.T) {
 	assert.Equal(t, byte(0x11), k[1])
 	assert.Equal(t, byte(0x22), k[21])
 	assert.Len(t, k, 1+20+20)
-}
-
-func TestChunkKeyLayout(t *testing.T) {
-	var id chainstore.BlobID
-	id[0] = 0xAA
-	k := chunkKey(id, 42)
-	assert.Equal(t, pfxChunk, k[0])
-	assert.Equal(t, byte(0xAA), k[1])
-	// Sequence at [17:21] big-endian.
-	assert.Equal(t, []byte{0x00, 0x00, 0x00, 0x2A}, k[17:21])
-	assert.Len(t, k, 1+16+4)
-}
-
-func TestManifestKeyLayout(t *testing.T) {
-	var id chainstore.BlobID
-	id[0] = 0xBB
-	k := manifestKey(id)
-	assert.Equal(t, pfxManifest, k[0])
-	assert.Equal(t, byte(0xBB), k[1])
-	assert.Len(t, k, 1+16)
-}
-
-func TestStagingKeyLayout(t *testing.T) {
-	sid := []byte{0xDE, 0xAD, 0xBE, 0xEF}
-	k := stagingKey(sid)
-	assert.Equal(t, pfxStaging, k[0])
-	assert.Equal(t, []byte{0xDE, 0xAD, 0xBE, 0xEF}, k[1:])
 }
 
 // TestLruKeyOrdering verifies that lruKey(bucketA, ...) < lruKey(bucketB, ...)

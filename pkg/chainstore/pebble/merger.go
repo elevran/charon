@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 
-	gogopebble "github.com/cockroachdb/pebble"
+	crdbpebble "github.com/cockroachdb/pebble"
 )
 
 // statsMerger implements pebble.ValueMerger for the stats key.
@@ -45,9 +45,9 @@ func (m *statsMerger) Finish(_ bool) ([]byte, io.Closer, error) {
 
 // StatsMerger is the pebble.Merger that must be configured in pebble.Options
 // for the stats MERGE key to accumulate correctly across compactions and reads.
-var StatsMerger = &gogopebble.Merger{
+var StatsMerger = &crdbpebble.Merger{
 	Name: "chainstore.stats.v1",
-	Merge: func(key, value []byte) (gogopebble.ValueMerger, error) {
+	Merge: func(_ []byte, value []byte) (crdbpebble.ValueMerger, error) {
 		m := &statsMerger{}
 		m.add(value)
 		return m, nil

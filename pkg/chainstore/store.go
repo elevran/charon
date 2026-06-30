@@ -25,7 +25,6 @@ type Config struct {
 	MaxBytes         int64
 	TTL              time.Duration
 	BucketDuration   time.Duration // LRU bucket width; default 1h
-	ChunkSize        int           // Phase 6: fixed segment size for StreamStore; default 2MB (Pebble), 256KB (DynamoDB)
 	EvictionInterval time.Duration // ticker period for capacity eviction; default 1m
 	TTLInterval      time.Duration // ticker period for TTL reaper; default 5m
 	Clock            Clock         // nil = RealClock
@@ -56,11 +55,6 @@ type Store struct {
 	entries atomic.Int64
 	bytes   atomic.Int64
 
-	// nudgeEvict is buffered (capacity 1); Store signals eviction after a write
-	// that pushes the store over capacity. The eviction goroutine consumes it
-	// and runs evictOldest immediately rather than waiting for the next tick.
-	nudgeEvict chan struct{}
-
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -86,10 +80,9 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	s := &Store{
-		cfg:        cfg,
-		backend:    cfg.Backend,
-		clock:      cfg.Clock,
-		nudgeEvict: make(chan struct{}, 1),
+		cfg:     cfg,
+		backend: cfg.Backend,
+		clock:   cfg.Clock,
 	}
 
 	// Reload stats from the persistent stats key so in-memory counters survive restarts.
@@ -114,196 +107,14 @@ func (s *Store) Close() error {
 	return s.backend.Close()
 }
 
-// notifyCapacityExceeded signals the eviction goroutine to run evictOldest
-// outside its normal ticker cadence. The channel is buffered size 1: concurrent
-// Store triggers coalesce.
-func (s *Store) notifyCapacityExceeded() {
-	select {
-	case s.nudgeEvict <- struct{}{}:
-	default: // already a nudge pending; drop
-	}
-}
-
-// evictionLoop is the long-running capacity-eviction goroutine.
+// evictionLoop is the long-running capacity-eviction goroutine (Phase 3).
 func (s *Store) evictionLoop(ctx context.Context) {
 	defer s.wg.Done()
-	ticker := time.NewTicker(s.cfg.EvictionInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.evictOldest(ctx)
-		case <-s.nudgeEvict:
-			s.evictOldest(ctx)
-		}
-	}
+	<-ctx.Done()
 }
 
-// ttlLoop is the long-running TTL-reaper goroutine.
+// ttlLoop is the long-running TTL-reaper goroutine (Phase 3).
 func (s *Store) ttlLoop(ctx context.Context) {
 	defer s.wg.Done()
-	ticker := time.NewTicker(s.cfg.TTLInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.ttlReap(ctx)
-		}
-	}
-}
-
-// evictOldest removes nodes from the oldest bucket until store is under limits.
-// Optimistic: re-reads Node via GetNode before deleting to guard against
-// a concurrent Resolve that promoted the node to a newer bucket.
-func (s *Store) evictOldest(ctx context.Context) {
-	const batchSize = 100
-	for {
-		if s.cfg.MaxEntries > 0 && s.entries.Load() <= s.cfg.MaxEntries &&
-			s.cfg.MaxBytes > 0 && s.bytes.Load() <= s.cfg.MaxBytes {
-			return
-		}
-		if s.cfg.MaxEntries > 0 && s.entries.Load() > s.cfg.MaxEntries {
-			// over entry limit, continue
-		} else if s.cfg.MaxBytes > 0 && s.bytes.Load() > s.cfg.MaxBytes {
-			// over byte limit, continue
-		} else {
-			return
-		}
-
-		bucket, err := s.backend.OldestBucket(ctx)
-		if err != nil {
-			return // ErrNotFound = store is empty
-		}
-
-		candidates, err := s.backend.GetEvictionCandidates(ctx, bucket, batchSize)
-		if err != nil || len(candidates) == 0 {
-			return
-		}
-
-		for _, nid := range candidates {
-			node, err := s.backend.GetNode(ctx, nid)
-			if err != nil {
-				continue // already deleted
-			}
-			// Optimistic guard: skip if node was promoted to a newer bucket
-			if node.BucketID != bucket {
-				continue
-			}
-			s.deleteNode(ctx, node)
-		}
-	}
-}
-
-// deleteNode removes a single node and its blob atomically.
-func (s *Store) deleteNode(ctx context.Context, node Node) {
-	tx := Transaction{
-		DeleteNodes: []NodeID{node.ID},
-		DeleteBlobs: []BlobID{node.BlobID},
-		StatsDelta: StatsDelta{
-			EntryDelta: -1,
-			BytesDelta: -int64(node.BlobSize),
-		},
-	}
-	if node.ParentID != (NodeID{}) {
-		tx.DeleteChildren = []NodeID{node.ParentID}
-	}
-	// Best-effort delete; errors surface on next eviction pass.
-	if err := s.backend.Commit(ctx, tx); err == nil {
-		s.entries.Add(-1)
-		s.bytes.Add(-int64(node.BlobSize))
-	}
-}
-
-// ttlReap removes expired nodes by walking buckets oldest-first.
-func (s *Store) ttlReap(ctx context.Context) {
-	if s.cfg.TTL <= 0 {
-		return
-	}
-	cutoff := s.clock.Now().Add(-s.cfg.TTL).Unix()
-	dur := int64(s.cfg.bucketDuration().Seconds())
-	const batchSize = 100
-	const maxStaleBucketSkips = 16
-
-	staleSkips := 0
-	for {
-		bucket, err := s.backend.OldestBucket(ctx)
-		if err != nil {
-			return // store empty
-		}
-
-		// Stop when this bucket's time range is newer than the TTL cutoff.
-		if int64(bucket)*dur > cutoff {
-			return
-		}
-
-		candidates, err := s.backend.GetEvictionCandidates(ctx, bucket, batchSize)
-		if err != nil || len(candidates) == 0 {
-			return
-		}
-
-		allFresh := true
-		for _, nid := range candidates {
-			node, err := s.backend.GetNode(ctx, nid)
-			if err != nil {
-				continue
-			}
-			if node.LastAccessUnix >= cutoff {
-				// Hot node with a stale bucket entry — will self-heal on next access.
-				continue
-			}
-			allFresh = false
-			s.deleteSubtree(ctx, nid)
-		}
-		if allFresh {
-			if len(candidates) == batchSize && staleSkips < maxStaleBucketSkips {
-				staleSkips++
-				continue
-			}
-			return
-		}
-		staleSkips = 0
-	}
-}
-
-// deleteSubtree deletes root and all descendants via BFS using GetChildren.
-func (s *Store) deleteSubtree(ctx context.Context, root NodeID) {
-	frontier := []NodeID{root}
-	for len(frontier) > 0 {
-		next := []NodeID{}
-		for _, cur := range frontier {
-			children, _ := s.backend.GetChildren(ctx, cur)
-			next = append(next, children...)
-		}
-
-		const levelCap = 1000
-		for len(frontier) > 0 {
-			chunk := frontier
-			if len(chunk) > levelCap {
-				chunk = chunk[:levelCap]
-			}
-			tx := Transaction{}
-			for _, nid := range chunk {
-				node, err := s.backend.GetNode(ctx, nid)
-				if err != nil {
-					continue // already deleted
-				}
-				tx.DeleteNodes = append(tx.DeleteNodes, nid)
-				tx.DeleteBlobs = append(tx.DeleteBlobs, node.BlobID)
-				tx.StatsDelta.BytesDelta -= int64(node.BlobSize)
-				tx.StatsDelta.EntryDelta--
-				if node.ParentID != (NodeID{}) {
-					tx.DeleteChildren = append(tx.DeleteChildren, node.ParentID)
-				}
-				s.entries.Add(-1)
-				s.bytes.Add(-int64(node.BlobSize))
-			}
-			s.backend.Commit(ctx, tx) //nolint:errcheck
-			frontier = frontier[len(chunk):]
-		}
-		frontier = next
-	}
+	<-ctx.Done()
 }
