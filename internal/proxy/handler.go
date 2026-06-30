@@ -117,7 +117,7 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resource := buildResponseResource(infResp, req.PreviousResponseID, req.ShouldStore(), createdAt, &completedAt)
+	resource := buildResponseResource(infResp, req.PreviousResponseID, req.ShouldStore(), req.Background, createdAt, &completedAt)
 	writeJSON(w, http.StatusOK, resource)
 }
 

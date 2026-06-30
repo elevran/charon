@@ -208,7 +208,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 				Status: "in_progress",
 				Model:  msg.Model,
 				Output: []json.RawMessage{},
-			}, msg.PreviousResponseID, msg.ShouldStore(), createdAt, nil)
+			}, msg.PreviousResponseID, msg.ShouldStore(), msg.Background, createdAt, nil)
 			h.wsSend(conn, sseEvent{Type: "response.created", SequenceNumber: seq, Response: placeholder})
 			seq++
 			sentCreated = true
@@ -297,7 +297,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 	}
 
 	completedAt := time.Now()
-	completed := buildResponseResource(finalInfResp, msg.PreviousResponseID, msg.ShouldStore(), createdAt, &completedAt)
+	completed := buildResponseResource(finalInfResp, msg.PreviousResponseID, msg.ShouldStore(), msg.Background, createdAt, &completedAt)
 	h.wsSend(conn, sseEvent{Type: "response.completed", SequenceNumber: seq, Response: completed})
 }
 
