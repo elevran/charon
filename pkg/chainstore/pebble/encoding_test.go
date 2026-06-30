@@ -17,7 +17,6 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		BlobID:         chainstore.BlobID{41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56},
 		LastAccessUnix: 1700000000,
 		CreatedAt:      1699000000,
-		ExpiresAt:      1800000000,
 		BucketID:       chainstore.BucketID(472222),
 		BlobSize:       65536,
 		Depth:          7,
@@ -52,10 +51,6 @@ func TestEncodeAllFields(t *testing.T) {
 		{
 			name: "non-zero CreatedAt",
 			node: chainstore.Node{CreatedAt: 9999999999},
-		},
-		{
-			name: "non-zero ExpiresAt",
-			node: chainstore.Node{ExpiresAt: 1234567890},
 		},
 		{
 			name: "max BucketID",
