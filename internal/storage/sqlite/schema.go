@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS responses (
 	created_at           INTEGER NOT NULL,
 	expires_at           INTEGER,
 	payload_key          TEXT    NOT NULL,
-	checkpoint_key       TEXT
+	checkpoint_key       TEXT,
+	background           INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_responses_chain

@@ -143,7 +143,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 				Status: "in_progress",
 				Model:  req.Model,
 				Output: []json.RawMessage{},
-			}, req.PreviousResponseID, req.ShouldStore(), createdAt, nil)
+			}, req.PreviousResponseID, req.ShouldStore(), req.Background, createdAt, nil)
 			writeSSE(w, sseEvent{Type: "response.created", SequenceNumber: seq, Response: placeholder})
 			seq++
 			created = true
@@ -208,6 +208,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 				Usage:              usage,
 				Status:             finalInfResp.Status,
 				Model:              finalInfResp.Model,
+				Background:         req.Background,
 			}); err != nil {
 				h.log.Error("charon stream commit", "id", canonicalID, "err", err)
 			}
@@ -223,6 +224,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 				Usage:              usage,
 				Status:             finalInfResp.Status,
 				Model:              finalInfResp.Model,
+				Background:         req.Background,
 			}
 			if err := h.charon.Store(ctx, canonicalID, storeReq); err != nil {
 				h.log.Error("charon store after stream", "id", canonicalID, "err", err)
@@ -231,6 +233,6 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 	}
 
 	completedAt := time.Now()
-	completedResource := buildResponseResource(finalInfResp, req.PreviousResponseID, req.ShouldStore(), createdAt, &completedAt)
+	completedResource := buildResponseResource(finalInfResp, req.PreviousResponseID, req.ShouldStore(), req.Background, createdAt, &completedAt)
 	writeSSE(w, sseEvent{Type: "response.completed", SequenceNumber: seq, Response: completedResource})
 }

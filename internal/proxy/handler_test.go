@@ -189,6 +189,27 @@ func TestCompactMissingModel(t *testing.T) {
 		"expected 400 or 422, got %d", resp.StatusCode)
 }
 
+func TestBackgroundFlagRoundtrip(t *testing.T) {
+	s := startStack(t)
+
+	// POST with background:true — immediate response must echo the flag.
+	body := map[string]interface{}{
+		"model":      "test",
+		"input":      "hello",
+		"background": true,
+	}
+	r0 := doRequest(t, s.proxySrv.URL, "POST", "/responses", body)
+	resource0 := decodeBody[proxy.ResponseResource](t, r0)
+	require.Equal(t, http.StatusOK, r0.StatusCode)
+	assert.True(t, resource0.Background, "immediate POST response must echo background:true")
+
+	// GET must also return background:true (persisted in Charon).
+	r1 := doRequest(t, s.proxySrv.URL, "GET", "/responses/"+resource0.ID, nil)
+	resource1 := decodeBody[proxy.ResponseResource](t, r1)
+	require.Equal(t, http.StatusOK, r1.StatusCode)
+	assert.True(t, resource1.Background, "GET /responses/{id} must return background:true")
+}
+
 func TestStoreEquality(t *testing.T) {
 	s := startStack(t)
 
