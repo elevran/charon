@@ -52,25 +52,32 @@ func TestSmokeInsertAndRetrieve(t *testing.T) {
 	b := openMemBackend(t)
 	ctx := context.Background()
 
-	blobID := chainstore.BlobID(uuid.New())
+	requestBlobID := chainstore.BlobID(uuid.New())
+	responseBlobID := chainstore.BlobID(uuid.New())
+	requestBlob := []byte("hello request")
+	responseBlob := []byte("hello chainstore")
 	node := chainstore.Node{
-		ID:             chainstore.NodeID{0x01},
-		BlobID:         blobID,
-		LastAccessUnix: 1700000000,
-		CreatedAt:      1699000000,
-		BucketID:       chainstore.BucketID(472222),
-		BlobSize:       uint32(len("hello chainstore")),
-		Depth:          0,
-		Version:        1,
+		ID:               chainstore.NodeID{0x01},
+		RequestBlobID:    requestBlobID,
+		ResponseBlobID:   responseBlobID,
+		LastAccessUnix:   1700000000,
+		CreatedAt:        1699000000,
+		BucketID:         chainstore.BucketID(472222),
+		RequestBlobSize:  uint32(len(requestBlob)),
+		ResponseBlobSize: uint32(len(responseBlob)),
+		Depth:            0,
+		Version:          1,
 	}
-	blob := []byte("hello chainstore")
 
 	tx := chainstore.Transaction{
 		PutNodes: []chainstore.Node{node},
-		PutBlobs: []chainstore.BlobEntry{{BlobID: blobID, Data: blob}},
+		PutBlobs: []chainstore.BlobEntry{
+			{BlobID: requestBlobID, Data: requestBlob},
+			{BlobID: responseBlobID, Data: responseBlob},
+		},
 		StatsDelta: chainstore.StatsDelta{
 			EntryDelta: 1,
-			BytesDelta: int64(len(blob)),
+			BytesDelta: int64(len(requestBlob) + len(responseBlob)),
 		},
 	}
 	require.NoError(t, b.Commit(ctx, tx))
@@ -79,9 +86,10 @@ func TestSmokeInsertAndRetrieve(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, node, got)
 
-	gotBlob, err := b.GetBlob(ctx, node)
+	gotRequest, gotResponse, err := b.GetBlobs(ctx, node)
 	require.NoError(t, err)
-	assert.Equal(t, blob, gotBlob)
+	assert.Equal(t, requestBlob, gotRequest)
+	assert.Equal(t, responseBlob, gotResponse)
 }
 
 // TestGetNodeNotFound verifies ErrNotFound is returned for missing nodes.
@@ -101,16 +109,16 @@ func TestLoadChain(t *testing.T) {
 	childBlobID := chainstore.BlobID(uuid.New())
 
 	root := chainstore.Node{
-		ID:      chainstore.NodeID{0x01},
-		BlobID:  rootBlobID,
-		Version: 1,
+		ID:            chainstore.NodeID{0x01},
+		RequestBlobID: rootBlobID,
+		Version:       1,
 	}
 	child := chainstore.Node{
-		ID:       chainstore.NodeID{0x02},
-		ParentID: root.ID,
-		BlobID:   childBlobID,
-		Depth:    1,
-		Version:  1,
+		ID:            chainstore.NodeID{0x02},
+		ParentID:      root.ID,
+		RequestBlobID: childBlobID,
+		Depth:         1,
+		Version:       1,
 	}
 
 	tx := chainstore.Transaction{
@@ -174,10 +182,10 @@ func TestOldestBucketAfterInsert(t *testing.T) {
 
 	bucket := chainstore.BucketID(100)
 	node := chainstore.Node{
-		ID:       chainstore.NodeID{0x01},
-		BlobID:   chainstore.BlobID(uuid.New()),
-		BucketID: bucket,
-		Version:  1,
+		ID:            chainstore.NodeID{0x01},
+		RequestBlobID: chainstore.BlobID(uuid.New()),
+		BucketID:      bucket,
+		Version:       1,
 	}
 	tx := chainstore.Transaction{
 		PutNodes: []chainstore.Node{node},
@@ -230,10 +238,10 @@ func TestBucketMoveUpdatesLRUIndex(t *testing.T) {
 
 	// Insert with oldBucket.
 	node := chainstore.Node{
-		ID:       nodeID,
-		BlobID:   chainstore.BlobID(uuid.New()),
-		BucketID: oldBucket,
-		Version:  1,
+		ID:            nodeID,
+		RequestBlobID: chainstore.BlobID(uuid.New()),
+		BucketID:      oldBucket,
+		Version:       1,
 	}
 	require.NoError(t, b.Commit(ctx, chainstore.Transaction{PutNodes: []chainstore.Node{node}}))
 

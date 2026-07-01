@@ -11,17 +11,19 @@ import (
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	node := chainstore.Node{
-		Version:        1,
-		ID:             chainstore.NodeID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20},
-		ParentID:       chainstore.NodeID{21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40},
-		BlobID:         chainstore.BlobID{41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56},
-		LastAccessUnix: 1700000000,
-		CreatedAt:      1699000000,
-		BucketID:       chainstore.BucketID(472222),
-		BlobSize:       65536,
-		Depth:          7,
-		Status:         chainstore.NodeStatusFailed,
-		BlobType:       chainstore.BlobTypeSingle,
+		Version:          1,
+		ID:               chainstore.NodeID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20},
+		ParentID:         chainstore.NodeID{21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40},
+		RequestBlobID:    chainstore.BlobID{41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56},
+		ResponseBlobID:   chainstore.BlobID{57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72},
+		LastAccessUnix:   1700000000,
+		CreatedAt:        1699000000,
+		BucketID:         chainstore.BucketID(472222),
+		RequestBlobSize:  65536,
+		ResponseBlobSize: 131072,
+		Depth:            7,
+		Status:           chainstore.NodeStatusFailed,
+		BlobType:         chainstore.BlobTypeSingle,
 	}
 
 	encoded := encodeNode(node)
@@ -57,8 +59,12 @@ func TestEncodeAllFields(t *testing.T) {
 			node: chainstore.Node{BucketID: ^chainstore.BucketID(0)},
 		},
 		{
-			name: "max BlobSize",
-			node: chainstore.Node{BlobSize: ^uint32(0)},
+			name: "max RequestBlobSize",
+			node: chainstore.Node{RequestBlobSize: ^uint32(0)},
+		},
+		{
+			name: "max ResponseBlobSize",
+			node: chainstore.Node{ResponseBlobSize: ^uint32(0)},
 		},
 		{
 			name: "max Depth",

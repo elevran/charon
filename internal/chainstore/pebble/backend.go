@@ -72,14 +72,31 @@ func (b *Backend) GetNode(_ context.Context, id chainstore.NodeID) (chainstore.N
 	return decodeNode(val), nil
 }
 
-// GetBlob fetches the opaque blob for a node.
-func (b *Backend) GetBlob(_ context.Context, node chainstore.Node) ([]byte, error) {
-	val, closer, err := b.db.Get(blobKey(node.BlobID))
+// GetBlobs fetches both blobs for a node in one call.
+// Either blob is nil if its BlobID is zero (not yet stored).
+// Returns (requestBlob, responseBlob, err).
+func (b *Backend) GetBlobs(_ context.Context, node chainstore.Node) ([]byte, []byte, error) {
+	requestBlob, err := b.fetchBlob(node.RequestBlobID)
+	if err != nil {
+		return nil, nil, err
+	}
+	responseBlob, err := b.fetchBlob(node.ResponseBlobID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return requestBlob, responseBlob, nil
+}
+
+// fetchBlob retrieves one blob by ID; returns nil (not an error) for a zero BlobID.
+func (b *Backend) fetchBlob(id chainstore.BlobID) ([]byte, error) {
+	if id == (chainstore.BlobID{}) {
+		return nil, nil
+	}
+	val, closer, err := b.db.Get(blobKey(id))
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	defer func() { _ = closer.Close() }()
-	// Copy the value since the closer invalidates the slice.
 	out := make([]byte, len(val))
 	copy(out, val)
 	return out, nil
