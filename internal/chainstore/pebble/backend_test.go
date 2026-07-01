@@ -227,6 +227,74 @@ func TestStatsEmptyDB(t *testing.T) {
 	assert.Equal(t, int64(0), bytes)
 }
 
+// TestDeleteNodesRemovesResponseIDKey verifies that DeleteNodes removes the
+// responseIDKey entry so it cannot be retrieved after deletion.
+func TestDeleteNodesRemovesResponseIDKey(t *testing.T) {
+	b := openMemBackend(t)
+	ctx := context.Background()
+
+	node := chainstore.Node{
+		ID:         chainstore.NodeID{0x01},
+		ResponseID: "resp-abc",
+		BucketID:   chainstore.BucketID(1),
+		Version:    1,
+	}
+	putTx := chainstore.Transaction{
+		PutNodes: []chainstore.Node{node},
+	}
+	require.NoError(t, b.Commit(ctx, putTx))
+
+	// Verify ResponseID is present.
+	got, err := b.GetNode(ctx, node.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "resp-abc", got.ResponseID)
+
+	// Delete the node.
+	delTx := chainstore.Transaction{
+		DeleteNodes: []chainstore.NodeID{node.ID},
+		BucketMoves: []chainstore.BucketMove{{NodeID: node.ID, OldBucket: node.BucketID, NewBucket: 0}},
+	}
+	require.NoError(t, b.Commit(ctx, delTx))
+
+	// Node must be gone.
+	_, err = b.GetNode(ctx, node.ID)
+	assert.ErrorIs(t, err, chainstore.ErrNotFound)
+
+	// responseIDKey must also be gone — a new LoadChain of the same ID must not
+	// resurrect a ResponseID from a stale key.
+	_, err = b.LoadChain(ctx, node.ID)
+	assert.ErrorIs(t, err, chainstore.ErrNotFound)
+}
+
+// TestBucketMoveDeleteOnlyClearsLRU verifies that NewBucket=0 removes the LRU
+// entry without inserting a new one (used by deleteNode / deleteSubtree).
+func TestBucketMoveDeleteOnlyClearsLRU(t *testing.T) {
+	b := openMemBackend(t)
+	ctx := context.Background()
+
+	node := chainstore.Node{
+		ID:       chainstore.NodeID{0x01},
+		BucketID: chainstore.BucketID(5),
+		Version:  1,
+	}
+	require.NoError(t, b.Commit(ctx, chainstore.Transaction{PutNodes: []chainstore.Node{node}}))
+
+	oldest, err := b.OldestBucket(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, chainstore.BucketID(5), oldest)
+
+	// Delete-only BucketMove: remove LRU entry but write no new one.
+	delTx := chainstore.Transaction{
+		DeleteNodes: []chainstore.NodeID{node.ID},
+		BucketMoves: []chainstore.BucketMove{{NodeID: node.ID, OldBucket: node.BucketID, NewBucket: 0}},
+	}
+	require.NoError(t, b.Commit(ctx, delTx))
+
+	// LRU index must now be empty.
+	_, err = b.OldestBucket(ctx)
+	assert.ErrorIs(t, err, chainstore.ErrNotFound, "LRU index should be empty after delete-only BucketMove")
+}
+
 // TestBucketMoveUpdatesLRUIndex verifies that BucketMoves are reflected in OldestBucket.
 func TestBucketMoveUpdatesLRUIndex(t *testing.T) {
 	b := openMemBackend(t)
