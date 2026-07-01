@@ -11,6 +11,7 @@ import (
 
 	"github.com/openai/openai-go/responses"
 
+	"github.com/elevran/charon/internal/httputil"
 	"github.com/elevran/charon/internal/model"
 	"github.com/elevran/charon/internal/storage"
 	"github.com/elevran/charon/internal/store"
@@ -25,16 +26,6 @@ type Handler struct {
 // NewHandler creates a Handler.
 func NewHandler(svc *store.ContextStore, log *slog.Logger) *Handler {
 	return &Handler{svc: svc, log: log}
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
 }
 
 func mapStatus(err error) (int, string) {
@@ -65,7 +56,7 @@ func (h *Handler) HandleResolve(w http.ResponseWriter, r *http.Request) {
 	if s := r.URL.Query().Get("max_bytes"); s != "" {
 		v, err := strconv.ParseInt(s, 10, 64)
 		if err != nil || v <= 0 {
-			writeError(w, http.StatusBadRequest, "max_bytes must be a positive integer")
+			httputil.WriteError(w, http.StatusBadRequest, "max_bytes must be a positive integer")
 			return
 		}
 		maxBytes = v
@@ -77,10 +68,10 @@ func (h *Handler) HandleResolve(w http.ResponseWriter, r *http.Request) {
 		if status == http.StatusInternalServerError {
 			h.log.Error("resolve", "id", id, "err", err)
 		}
-		writeError(w, status, msg)
+		httputil.WriteError(w, status, msg)
 		return
 	}
-	writeJSON(w, http.StatusOK, model.ResolveResponse{
+	httputil.WriteJSON(w, http.StatusOK, model.ResolveResponse{
 		ReservationID: reservationID,
 		FlatContext:   flatContext,
 	})
@@ -92,7 +83,7 @@ func (h *Handler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	var req model.StoreRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = r.Body.Close()
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	_ = r.Body.Close()
@@ -101,7 +92,7 @@ func (h *Handler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		if status == http.StatusInternalServerError {
 			h.log.Error("store", "id", id, "err", err)
 		}
-		writeError(w, status, msg)
+		httputil.WriteError(w, status, msg)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -116,19 +107,19 @@ func (h *Handler) HandleRetrieve(w http.ResponseWriter, r *http.Request) {
 		if status == http.StatusInternalServerError {
 			h.log.Error("retrieve", "id", id, "err", err)
 		}
-		writeError(w, status, msg)
+		httputil.WriteError(w, status, msg)
 		return
 	}
 	if meta.Status == model.StatusDeleted {
 		h.log.Error("corrupt index: deleted record returned by retrieve", "id", meta.ID)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		httputil.WriteError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
 	input, err := unmarshalInputItems(payload.InputItems)
 	if err != nil {
 		h.log.Error("unmarshal input items", "id", id, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		httputil.WriteError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
@@ -137,12 +128,12 @@ func (h *Handler) HandleRetrieve(w http.ResponseWriter, r *http.Request) {
 		usage = new(responses.ResponseUsage)
 		if err := json.Unmarshal(payload.Usage, usage); err != nil {
 			h.log.Error("unmarshal usage", "id", id, "err", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			httputil.WriteError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
 	}
 
-	writeJSON(w, http.StatusOK, model.RetrieveResponse{
+	httputil.WriteJSON(w, http.StatusOK, model.RetrieveResponse{
 		ID:                 meta.ID,
 		PreviousResponseID: meta.PreviousResponseID,
 		Instructions:       payload.Instructions,
@@ -164,7 +155,7 @@ func (h *Handler) HandleAppendChunk(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req model.ChunkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	var err error
@@ -174,7 +165,7 @@ func (h *Handler) HandleAppendChunk(w http.ResponseWriter, r *http.Request) {
 	case "commit":
 		err = h.svc.CommitStream(r.Context(), id, req)
 	default:
-		writeError(w, http.StatusBadRequest, "unknown chunk type: must be 'chunk' or 'commit'")
+		httputil.WriteError(w, http.StatusBadRequest, "unknown chunk type: must be 'chunk' or 'commit'")
 		return
 	}
 	if err != nil {
@@ -182,7 +173,7 @@ func (h *Handler) HandleAppendChunk(w http.ResponseWriter, r *http.Request) {
 		if status == http.StatusInternalServerError {
 			h.log.Error("append chunk", "id", id, "type", req.Type, "err", err)
 		}
-		writeError(w, status, msg)
+		httputil.WriteError(w, status, msg)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -196,7 +187,7 @@ func (h *Handler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		if status == http.StatusInternalServerError {
 			h.log.Error("delete", "id", id, "err", err)
 		}
-		writeError(w, status, msg)
+		httputil.WriteError(w, status, msg)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -204,7 +195,7 @@ func (h *Handler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 
 // HandleHealthz handles GET /healthz (liveness probe).
 func (h *Handler) HandleHealthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // HandleReadyz handles GET /readyz (readiness probe).
@@ -212,10 +203,10 @@ func (h *Handler) HandleHealthz(w http.ResponseWriter, _ *http.Request) {
 func (h *Handler) HandleReadyz(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.Ping(r.Context()); err != nil {
 		h.log.Error("readyz: storage ping failed", "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "storage unavailable"})
+		httputil.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "storage unavailable"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func unmarshalInputItems(items []json.RawMessage) (responses.ResponseInputParam, error) {
@@ -240,15 +231,15 @@ func (h *Handler) HandleListInputItems(w http.ResponseWriter, r *http.Request) {
 		if status == http.StatusInternalServerError {
 			h.log.Error("retrieve for input_items", "id", id, "err", err)
 		}
-		writeError(w, status, msg)
+		httputil.WriteError(w, status, msg)
 		return
 	}
 	page, parseErr := paginateItems(r, payload.InputItems)
 	if parseErr != nil {
-		writeError(w, http.StatusBadRequest, parseErr.Error())
+		httputil.WriteError(w, http.StatusBadRequest, parseErr.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, page)
+	httputil.WriteJSON(w, http.StatusOK, page)
 }
 
 // HandleListOutputItems handles GET /responses/{id}/output_items.
@@ -261,15 +252,15 @@ func (h *Handler) HandleListOutputItems(w http.ResponseWriter, r *http.Request) 
 		if status == http.StatusInternalServerError {
 			h.log.Error("retrieve for output_items", "id", id, "err", err)
 		}
-		writeError(w, status, msg)
+		httputil.WriteError(w, status, msg)
 		return
 	}
 	page, parseErr := paginateItems(r, filterCompactionItems(payload.OutputItems))
 	if parseErr != nil {
-		writeError(w, http.StatusBadRequest, parseErr.Error())
+		httputil.WriteError(w, http.StatusBadRequest, parseErr.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, page)
+	httputil.WriteJSON(w, http.StatusOK, page)
 }
 
 const defaultPageLimit = 100

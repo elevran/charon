@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/elevran/charon/internal/httputil"
+
 	"github.com/gorilla/websocket"
 
 	"github.com/elevran/charon/internal/charon"
@@ -76,7 +78,7 @@ func (h *Handler) HandleListOrWS(w http.ResponseWriter, r *http.Request) {
 		h.HandleWebSocket(w, r)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"object":   "list",
 		"data":     []interface{}{},
 		"has_more": false,

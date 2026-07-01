@@ -9,21 +9,25 @@ import (
 	"time"
 
 	"github.com/elevran/charon/internal/charon"
+	"github.com/elevran/charon/internal/httputil"
 	"github.com/elevran/charon/internal/inference"
 )
+
+// StoreBufferUnbuffered is a sentinel for storeBufferBytes meaning "no buffering".
+const StoreBufferUnbuffered = -1
 
 // Handler is the client-facing Responses API proxy handler.
 type Handler struct {
 	charon           *charon.Client
 	inf              *inference.Client
 	log              *slog.Logger
-	storeBufferBytes int // 0 = default(64K); -1 = no buffering; N>0 = N byte threshold
+	storeBufferBytes int // 0 = default(64K); StoreBufferUnbuffered = no buffering; N>0 = N byte threshold
 }
 
 // NewHandler creates a Handler.
 // storeBufferBytes controls when the proxy flushes buffered output items to Charon:
 //   - 0  → use default (65536 = 64 KB)
-//   - -1 → no buffering: flush every output item immediately
+//   - StoreBufferUnbuffered (-1) → no buffering: flush every output item immediately
 //   - N>0 → flush when accumulated item JSON reaches N bytes
 func NewHandler(ch *charon.Client, inf *inference.Client, log *slog.Logger, storeBufferBytes int) *Handler {
 	if storeBufferBytes == 0 {
@@ -45,23 +49,23 @@ func RegisterHandlers(mux *http.ServeMux, h *Handler) {
 func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read request body")
+		httputil.WriteError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
 
 	var req CreateRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.Model == "" {
-		writeError(w, http.StatusBadRequest, "model is required")
+		httputil.WriteError(w, http.StatusBadRequest, "model is required")
 		return
 	}
 
 	var rawReq map[string]json.RawMessage
 	if err := json.Unmarshal(bodyBytes, &rawReq); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -75,7 +79,7 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 
 	inputItems, err := inputToItems(req.Input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid input")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid input")
 		return
 	}
 
@@ -95,7 +99,7 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	infResp, err := h.inf.Complete(ctx, infMap)
 	if err != nil {
 		h.log.Error("inference complete", "err", err)
-		writeError(w, http.StatusBadGateway, "inference error")
+		httputil.WriteError(w, http.StatusBadGateway, "inference error")
 		return
 	}
 	completedAt := time.Now()
@@ -113,12 +117,13 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := h.charon.Store(ctx, infResp.ID, storeReq); err != nil {
 			h.log.Error("charon store", "id", infResp.ID, "err", err)
-			// Non-fatal: response was generated, storage failed.
+			// TODO(chainstore wiring): a Pebble write failure is synchronous and durable;
+			// consider returning 500 instead of treating storage failure as non-fatal.
 		}
 	}
 
 	resource := buildResponseResource(infResp, req.PreviousResponseID, req.ShouldStore(), req.Background, createdAt, &completedAt)
-	writeJSON(w, http.StatusOK, resource)
+	httputil.WriteJSON(w, http.StatusOK, resource)
 }
 
 // HandleRetrieve handles GET /responses/{id}.
@@ -153,7 +158,7 @@ func (h *Handler) HandleRetrieve(w http.ResponseWriter, r *http.Request) {
 	if resource.Output == nil {
 		resource.Output = []json.RawMessage{}
 	}
-	writeJSON(w, http.StatusOK, resource)
+	httputil.WriteJSON(w, http.StatusOK, resource)
 }
 
 // HandleDelete handles DELETE /responses/{id}.
@@ -173,10 +178,10 @@ func (h *Handler) HandleCompact(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.Model == "" {
-		writeError(w, http.StatusBadRequest, "model is required")
+		httputil.WriteError(w, http.StatusBadRequest, "model is required")
 		return
 	}
-	writeError(w, http.StatusNotImplemented, "compact not implemented")
+	httputil.WriteError(w, http.StatusNotImplemented, "compact not implemented")
 }
 
 // HandleListOrWS is implemented in ws.go.
@@ -185,30 +190,20 @@ func (h *Handler) HandleCompact(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers ---
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
-}
-
 func (h *Handler) mapCharonError(w http.ResponseWriter, err error, notFoundCode string) {
 	switch {
 	case errors.Is(err, charon.ErrNotFound):
-		writeJSON(w, http.StatusNotFound, map[string]string{
+		httputil.WriteJSON(w, http.StatusNotFound, map[string]string{
 			"code":    notFoundCode,
 			"message": err.Error(),
 		})
 	case errors.Is(err, charon.ErrChainCorrupted):
-		writeJSON(w, http.StatusConflict, map[string]string{
+		httputil.WriteJSON(w, http.StatusConflict, map[string]string{
 			"code":    "chain_corrupted",
 			"message": err.Error(),
 		})
 	default:
 		h.log.Error("charon error", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		httputil.WriteError(w, http.StatusInternalServerError, "internal server error")
 	}
 }
