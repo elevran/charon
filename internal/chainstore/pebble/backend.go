@@ -151,6 +151,9 @@ func (b *Backend) Commit(_ context.Context, tx chainstore.Transaction) error {
 		if err := batch.Delete(metaKey(id), nil); err != nil {
 			return err
 		}
+		if err := batch.Delete(responseIDKey(id), nil); err != nil {
+			return err
+		}
 	}
 
 	for _, c := range tx.DeleteChildren {
@@ -178,11 +181,17 @@ func (b *Backend) Commit(_ context.Context, tx chainstore.Transaction) error {
 	}
 
 	for _, bm := range tx.BucketMoves {
-		if err := batch.Delete(lruKey(bm.OldBucket, bm.NodeID), nil); err != nil {
-			return err
+		// OldBucket=0 means "no old entry to delete" (reserved sentinel — never a real bucket).
+		if bm.OldBucket != 0 {
+			if err := batch.Delete(lruKey(bm.OldBucket, bm.NodeID), nil); err != nil {
+				return err
+			}
 		}
-		if err := batch.Set(lruKey(bm.NewBucket, bm.NodeID), nil, nil); err != nil {
-			return err
+		// NewBucket=0 means "delete only — no new LRU entry" (used by deleteNode/deleteSubtree).
+		if bm.NewBucket != 0 {
+			if err := batch.Set(lruKey(bm.NewBucket, bm.NodeID), nil, nil); err != nil {
+				return err
+			}
 		}
 	}
 

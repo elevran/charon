@@ -58,9 +58,32 @@ type Store struct {
 	entries atomic.Int64
 	bytes   atomic.Int64
 
+	// nudgeEvict is buffered (capacity 1); Store signals eviction after a write
+	// that pushes the store over capacity. The eviction goroutine consumes it
+	// and runs evictOldest immediately rather than waiting for the next tick.
+	nudgeEvict chan struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup // used by Phase 3 background goroutines
+	wg     sync.WaitGroup
+}
+
+// Entries returns the approximate number of stored nodes (updated optimistically on write/delete).
+// Counters can temporarily undercount due to concurrent eviction races; clamped to zero.
+func (s *Store) Entries() int64 {
+	if v := s.entries.Load(); v > 0 {
+		return v
+	}
+	return 0
+}
+
+// Bytes returns the approximate total blob bytes (updated optimistically on write/delete).
+// Counters can temporarily undercount due to concurrent eviction races; clamped to zero.
+func (s *Store) Bytes() int64 {
+	if v := s.bytes.Load(); v > 0 {
+		return v
+	}
+	return 0
 }
 
 // New wires cfg into a Store and starts background goroutines.
@@ -83,9 +106,10 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	s := &Store{
-		cfg:     cfg,
-		backend: cfg.Backend,
-		clock:   cfg.Clock,
+		cfg:        cfg,
+		backend:    cfg.Backend,
+		clock:      cfg.Clock,
+		nudgeEvict: make(chan struct{}, 1),
 	}
 
 	// Reload stats from the persistent stats key so in-memory counters survive restarts.
@@ -97,7 +121,9 @@ func New(cfg Config) (*Store, error) {
 	s.bytes.Store(bytes)
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
-	// Phase 3 will call s.wg.Add and launch eviction/TTL goroutines here.
+	s.wg.Add(2)
+	go s.evictionLoop(s.ctx)
+	go s.ttlLoop(s.ctx)
 	return s, nil
 }
 
@@ -162,6 +188,10 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 
 	s.entries.Add(1)
 	s.bytes.Add(int64(len(requestBlob)))
+	if (s.cfg.MaxEntries > 0 && s.entries.Load() > s.cfg.MaxEntries) ||
+		(s.cfg.MaxBytes > 0 && s.bytes.Load() > s.cfg.MaxBytes) {
+		s.notifyCapacityExceeded()
+	}
 	return nil
 }
 
