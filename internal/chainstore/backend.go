@@ -41,6 +41,7 @@ type Node struct {
 	Depth            uint32 // 0 = root; enables slice preallocation in LoadChain
 	Status           uint8  // NodeStatusCompleted or NodeStatusFailed
 	BlobType         uint8  // BlobTypeSingle or BlobTypeChunked (Phase 6)
+	ResponseID       string // external caller-supplied ID; stored verbatim, max 255 bytes
 }
 
 // Node status constants.

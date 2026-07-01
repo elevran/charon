@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Clock abstracts time. Injected into Store so tests can simulate days in milliseconds.
@@ -105,6 +107,105 @@ func (s *Store) Close() error {
 	s.cancel()
 	s.wg.Wait()
 	return s.backend.Close()
+}
+
+// Store writes one conversation turn and its request blob atomically.
+// previousResponseID may be empty for a root turn (start of a new conversation).
+// Returns ErrNotFound if previousResponseID is non-empty but does not exist.
+func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenantKey string, requestBlob []byte) error {
+	id := nodeID(tenantKey, responseID)
+	blobID := BlobID(uuid.New())
+	now := s.clock.Now()
+
+	node := Node{
+		Version:         1,
+		ID:              id,
+		RequestBlobID:   blobID,
+		LastAccessUnix:  now.Unix(),
+		CreatedAt:       now.Unix(),
+		BucketID:        s.cfg.BucketFor(now),
+		RequestBlobSize: uint32(len(requestBlob)),
+		ResponseID:      responseID,
+	}
+
+	tx := Transaction{
+		PutNodes: []Node{node},
+		PutBlobs: []BlobEntry{{BlobID: blobID, Data: requestBlob}},
+		StatsDelta: StatsDelta{
+			EntryDelta: 1,
+			BytesDelta: int64(len(requestBlob)),
+		},
+	}
+
+	if previousResponseID != "" {
+		parentID := nodeID(tenantKey, previousResponseID)
+		parent, err := s.backend.GetNode(ctx, parentID)
+		if err != nil {
+			return err
+		}
+		node.ParentID = parentID
+		node.Depth = parent.Depth + 1
+		tx.PutNodes[0] = node
+		tx.PutChildren = []ChildEntry{{Parent: parentID, Child: id}}
+	}
+
+	if err := s.backend.Commit(ctx, tx); err != nil {
+		return err
+	}
+
+	s.entries.Add(1)
+	s.bytes.Add(int64(len(requestBlob)))
+	return nil
+}
+
+// Resolve walks the chain from responseID to the root and returns all turns root-first.
+// Each Turn carries both request and response blobs; ResponseBlob is nil for turns not
+// yet completed (ResponseBlobID is zero). Updates LastAccessUnix and promotes LRU bucket
+// index entries only for nodes that have crossed a bucket boundary since last access.
+func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) ([]Turn, error) {
+	id := nodeID(tenantKey, responseID)
+	nodes, err := s.backend.LoadChain(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	now := s.clock.Now()
+	nowUnix := now.Unix()
+	currentBucket := s.cfg.BucketFor(now)
+
+	turns := make([]Turn, len(nodes))
+	updatedNodes := make([]Node, len(nodes))
+	var bucketMoves []BucketMove
+
+	for i, node := range nodes {
+		reqBlob, respBlob, err := s.backend.GetBlobs(ctx, node)
+		if err != nil {
+			return nil, err
+		}
+		// nodes is leaf-first; turns must be root-first.
+		turns[len(nodes)-1-i] = Turn{
+			ResponseID:   node.ResponseID,
+			RequestBlob:  reqBlob,
+			ResponseBlob: respBlob,
+		}
+
+		updated := node
+		updated.LastAccessUnix = nowUnix
+		if node.BucketID != currentBucket {
+			bucketMoves = append(bucketMoves, BucketMove{
+				NodeID:    node.ID,
+				OldBucket: node.BucketID,
+				NewBucket: currentBucket,
+			})
+			updated.BucketID = currentBucket
+		}
+		updatedNodes[i] = updated
+	}
+
+	return turns, s.backend.Commit(ctx, Transaction{
+		PutNodes:    updatedNodes,
+		BucketMoves: bucketMoves,
+	})
 }
 
 // evictionLoop is the long-running capacity-eviction goroutine (Phase 3).
