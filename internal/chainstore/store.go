@@ -64,6 +64,7 @@ type Store struct {
 	// that pushes the store over capacity. The eviction goroutine consumes it
 	// and runs evictOldest immediately rather than waiting for the next tick.
 	nudgeEvict chan struct{}
+	nudgeCount atomic.Int64 // counts successful nudge sends; exported via export_test.go
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -71,22 +72,14 @@ type Store struct {
 }
 
 // Entries returns the approximate number of stored nodes (updated optimistically on write/delete).
-// Counters can temporarily undercount due to concurrent eviction races; clamped to zero.
-func (s *Store) Entries() int64 {
-	if v := s.entries.Load(); v > 0 {
-		return v
-	}
-	return 0
-}
+// May transiently return a negative value under heavy concurrent eviction; callers should
+// treat negative as zero when computing display values.
+func (s *Store) Entries() int64 { return s.entries.Load() }
 
 // Bytes returns the approximate total blob bytes (updated optimistically on write/delete).
-// Counters can temporarily undercount due to concurrent eviction races; clamped to zero.
-func (s *Store) Bytes() int64 {
-	if v := s.bytes.Load(); v > 0 {
-		return v
-	}
-	return 0
-}
+// May transiently return a negative value under heavy concurrent eviction; callers should
+// treat negative as zero when computing display values.
+func (s *Store) Bytes() int64 { return s.bytes.Load() }
 
 // New wires cfg into a Store and starts background goroutines.
 // Callers should use pebble.Open() or dynamodb.Open() rather than calling New directly.

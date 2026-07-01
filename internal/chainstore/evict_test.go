@@ -25,7 +25,7 @@ func TestCapacityEviction(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < maxEntries*2; i++ {
-		require.NoError(t, s.Store(ctx, randomID(t), "", "", []byte("data")))
+		require.NoError(t, s.Store(ctx, fmt.Sprintf("%s_%d", t.Name(), i), "", "", []byte("data")))
 	}
 
 	s.EvictOldest(ctx)
@@ -47,6 +47,9 @@ func TestCapacityNudge(t *testing.T) {
 	require.NoError(t, s.Store(ctx, "r2", "", "", []byte("b")))
 	// Third insert exceeds MaxEntries → nudge is sent.
 	require.NoError(t, s.Store(ctx, "r3", "", "", []byte("c")))
+
+	// Verify the nudge was sent before the goroutine could drain it.
+	assert.Greater(t, s.NudgesFired(), int64(0), "Store should have nudged eviction goroutine")
 
 	// Poll for eviction to complete (the goroutine should process the nudge promptly).
 	deadline := time.Now().Add(500 * time.Millisecond)
@@ -213,7 +216,9 @@ func TestOptimisticEviction(t *testing.T) {
 				"unexpected error for hotID(%d): %v", i, err)
 		}
 	}
-	assert.GreaterOrEqual(t, s.Entries(), int64(0))
+	// Entries() may be transiently negative (documented approximate behaviour after
+	// concurrent eviction). Bound: must not exceed the total number of nodes inserted.
+	assert.GreaterOrEqual(t, s.Entries(), int64(-maxEntries*2))
 }
 
 // TestStatsReload: closing and reopening the store preserves entry/byte counts.
@@ -297,6 +302,40 @@ func TestDeleteNodeNoOrphanedLRU(t *testing.T) {
 	}
 }
 
+// TestCapacityEvictOrphanedChild: capacity-evicting a parent (non-cascading) leaves the
+// child with a dangling parent pointer. Resolve on the child must return ErrChainExpired,
+// not ErrChainCorrupted, so callers can distinguish eviction from real corruption.
+func TestCapacityEvictOrphanedChild(t *testing.T) {
+	const bucketDur = time.Hour
+	clk := &fakeClock{}
+	// MaxEntries=1: after inserting parent+child (entries=2), EvictOldest will run.
+	s := openMemStore(t, chainstore.Config{
+		Clock:          clk,
+		MaxEntries:     1,
+		BucketDuration: bucketDur,
+	})
+	ctx := context.Background()
+
+	// Store parent in bucket 1 (Unix 3600).
+	clk.t = time.Unix(int64(bucketDur.Seconds()), 0)
+	require.NoError(t, s.Store(ctx, "parent", "", "", []byte("p")))
+
+	// Store child in bucket 2 (Unix 7200) — different bucket so parent is older.
+	clk.t = time.Unix(int64(2*bucketDur.Seconds()), 0)
+	require.NoError(t, s.Store(ctx, "child", "parent", "", []byte("c")))
+
+	// entries=2 > MaxEntries=1: EvictOldest picks from bucket 1 (parent only, non-cascading).
+	s.EvictOldest(ctx)
+
+	// Parent is gone.
+	_, err := s.Resolve(ctx, "parent", "")
+	assert.ErrorIs(t, err, chainstore.ErrNotFound)
+
+	// Child exists but its ancestor chain is broken — must be ErrChainExpired, not ErrChainCorrupted.
+	_, err = s.Resolve(ctx, "child", "")
+	assert.ErrorIs(t, err, chainstore.ErrChainExpired)
+}
+
 // TestCapacityEvictionByBytes: filling the store past MaxBytes triggers eviction.
 func TestCapacityEvictionByBytes(t *testing.T) {
 	const blobSize = 10
@@ -314,11 +353,6 @@ func TestCapacityEvictionByBytes(t *testing.T) {
 }
 
 // --- helpers ---
-
-func randomID(t *testing.T) string {
-	t.Helper()
-	return t.Name() + "_" + time.Now().String()
-}
 
 func hotID(i int) string {
 	return fmt.Sprintf("hot_%d", i)

@@ -14,7 +14,23 @@ const evictBatchSize = 100
 func (s *Store) notifyCapacityExceeded() {
 	select {
 	case s.nudgeEvict <- struct{}{}:
+		s.nudgeCount.Add(1) // observable in tests via export_test.go
 	default: // already a nudge pending; drop
+	}
+}
+
+// runUntilDone runs fn on every tick and nudge until ctx is cancelled.
+// nudge may be nil, in which case only the ticker drives fn.
+func runUntilDone(ctx context.Context, tick <-chan time.Time, nudge <-chan struct{}, fn func()) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick:
+			fn()
+		case <-nudge:
+			fn()
+		}
 	}
 }
 
@@ -25,16 +41,7 @@ func (s *Store) evictionLoop(ctx context.Context) {
 	defer s.wg.Done()
 	ticker := time.NewTicker(s.cfg.EvictionInterval)
 	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.evictOldest(ctx)
-		case <-s.nudgeEvict:
-			s.evictOldest(ctx)
-		}
-	}
+	runUntilDone(ctx, ticker.C, s.nudgeEvict, func() { s.evictOldest(ctx) })
 }
 
 // ttlLoop is the long-running TTL-reaper goroutine.
@@ -42,21 +49,22 @@ func (s *Store) ttlLoop(ctx context.Context) {
 	defer s.wg.Done()
 	ticker := time.NewTicker(s.cfg.TTLInterval)
 	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.ttlReap(ctx)
-		}
-	}
+	runUntilDone(ctx, ticker.C, nil, func() { s.ttlReap(ctx) })
 }
 
 // evictOldest removes nodes from the oldest bucket until the store is under
 // configured limits. Optimistic: re-reads Node via GetNode before deleting to
 // guard against a concurrent Resolve that promoted the node to a newer bucket.
+// Bounded by maxEvictionIterations to prevent an infinite loop when all candidates
+// are concurrently promoted by Resolve on every iteration.
 func (s *Store) evictOldest(ctx context.Context) {
-	for {
+	const maxEvictionIterations = 16
+	for range maxEvictionIterations {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		if (s.cfg.MaxEntries <= 0 || s.entries.Load() <= s.cfg.MaxEntries) &&
 			(s.cfg.MaxBytes <= 0 || s.bytes.Load() <= s.cfg.MaxBytes) {
 			return

@@ -11,3 +11,6 @@ func (s *Store) TtlReap(ctx context.Context) { s.ttlReap(ctx) }
 
 // EvictOldest exposes the internal evictOldest method for testing.
 func (s *Store) EvictOldest(ctx context.Context) { s.evictOldest(ctx) }
+
+// NudgesFired returns the number of successful nudge sends since the store was opened.
+func (s *Store) NudgesFired() int64 { return s.nudgeCount.Load() }
