@@ -12,7 +12,7 @@ import (
 // TestKeyPrefixNoCollision verifies that all prefix constants are distinct
 // and that keys with different prefixes cannot collide.
 func TestKeyPrefixNoCollision(t *testing.T) {
-	prefixes := []byte{pfxMeta, pfxBlob, pfxLRU, pfxChildren, pfxStats}
+	prefixes := []byte{pfxMeta, pfxBlob, pfxLRU, pfxChildren, pfxStats, pfxResponseID}
 	seen := make(map[byte]bool)
 	for _, p := range prefixes {
 		require.False(t, seen[p], "duplicate prefix: 0x%02x", p)

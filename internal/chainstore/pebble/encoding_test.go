@@ -24,6 +24,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		Depth:            7,
 		Status:           chainstore.NodeStatusFailed,
 		BlobType:         chainstore.BlobTypeSingle,
+		// ResponseID is stored as a separate pfxResponseID key, not encoded here.
 	}
 
 	encoded := encodeNode(node)
