@@ -88,6 +88,11 @@ func (s *Store) evictOldest(ctx context.Context) {
 				continue
 			}
 			s.deleteNode(ctx, node)
+			if s.metrics != nil {
+				s.metrics.evictionsTotal.Inc()
+				s.metrics.entries.Set(float64(s.entries.Load()))
+				s.metrics.bytes.Set(float64(s.bytes.Load()))
+			}
 		}
 	}
 }
@@ -138,6 +143,11 @@ func (s *Store) ttlReap(ctx context.Context) {
 			}
 			allFresh = false
 			s.deleteSubtree(ctx, id)
+			if s.metrics != nil {
+				s.metrics.ttlExpirationsTotal.Inc()
+				s.metrics.entries.Set(float64(s.entries.Load()))
+				s.metrics.bytes.Set(float64(s.bytes.Load()))
+			}
 		}
 
 		if allFresh {
@@ -193,6 +203,11 @@ func (s *Store) deleteNode(ctx context.Context, node Node) {
 // deleteSubtree deletes root and all descendants via BFS using GetChildren.
 // Performs one Transaction per BFS level (capped at levelCap nodes) to keep
 // WAL writes bounded and let other writers interleave.
+//
+// Crash safety: deleteSubtree is crash-safe but not atomic. A crash between BFS
+// levels leaves the root deleted but children intact with dangling parent pointers.
+// Orphaned descendants are never accessed again and will be reclaimed by capacity
+// eviction. If stricter cleanup is required, add a compaction-time orphan scan.
 func (s *Store) deleteSubtree(ctx context.Context, root NodeID) {
 	frontier := []NodeID{root}
 	for len(frontier) > 0 {

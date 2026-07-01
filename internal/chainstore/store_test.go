@@ -25,7 +25,7 @@ func (c *fakeClock) Now() time.Time { return c.t }
 func openMemStore(t *testing.T, cfg chainstore.Config) *chainstore.Store {
 	t.Helper()
 	opts := &crdbpebble.Options{FS: vfs.NewMem()}
-	s, err := chainstorepebble.Open("", opts, cfg)
+	s, err := chainstorepebble.Open(context.Background(), "", opts, cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	return s
@@ -39,7 +39,7 @@ func openMemStoreAndBackend(t *testing.T, cfg chainstore.Config) (*chainstore.St
 	b, err := chainstorepebble.OpenBackend("", opts)
 	require.NoError(t, err)
 	cfg.Backend = b
-	s, err := chainstore.New(cfg)
+	s, err := chainstore.New(context.Background(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	return s, b
@@ -216,4 +216,55 @@ func TestResolveDepthThreeChain(t *testing.T) {
 	turns, err := s.Resolve(ctx, "r2", "")
 	require.NoError(t, err)
 	assert.Len(t, turns, 3)
+}
+
+func TestComplete(t *testing.T) {
+	s := openMemStore(t, chainstore.Config{})
+	ctx := context.Background()
+
+	require.NoError(t, s.Store(ctx, "resp_a", "", "", []byte("req")))
+
+	// Before Complete: ResponseBlob is nil.
+	turns, err := s.Resolve(ctx, "resp_a", "")
+	require.NoError(t, err)
+	require.Len(t, turns, 1)
+	assert.Nil(t, turns[0].ResponseBlob)
+
+	// Complete stores the response blob.
+	require.NoError(t, s.Complete(ctx, "resp_a", "", []byte("resp")))
+
+	turns, err = s.Resolve(ctx, "resp_a", "")
+	require.NoError(t, err)
+	require.Len(t, turns, 1)
+	assert.Equal(t, []byte("req"), turns[0].RequestBlob)
+	assert.Equal(t, []byte("resp"), turns[0].ResponseBlob)
+}
+
+func TestCompleteNotFound(t *testing.T) {
+	s := openMemStore(t, chainstore.Config{})
+	ctx := context.Background()
+
+	err := s.Complete(ctx, "nonexistent", "", []byte("resp"))
+	assert.True(t, errors.Is(err, chainstore.ErrNotFound))
+}
+
+func TestDelete(t *testing.T) {
+	s := openMemStore(t, chainstore.Config{})
+	ctx := context.Background()
+
+	require.NoError(t, s.Store(ctx, "r0", "", "", []byte("root")))
+	require.NoError(t, s.Store(ctx, "r1", "r0", "", []byte("child")))
+
+	require.NoError(t, s.Delete(ctx, "r0", ""))
+
+	_, err := s.Resolve(ctx, "r0", "")
+	assert.True(t, errors.Is(err, chainstore.ErrNotFound))
+}
+
+func TestDeleteNotFound(t *testing.T) {
+	s := openMemStore(t, chainstore.Config{})
+	ctx := context.Background()
+
+	err := s.Delete(ctx, "nonexistent", "")
+	assert.True(t, errors.Is(err, chainstore.ErrNotFound))
 }
