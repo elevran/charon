@@ -7,6 +7,7 @@ var (
 	ErrNotFound       = errors.New("not found")
 	ErrChainCorrupted = errors.New("chain corrupted: missing node in parent chain")
 	ErrStoreFull      = errors.New("store full: configured capacity exceeded")
+	ErrChainTooDeep   = errors.New("chain too deep: depth would overflow")
 )
 
 // Turn is the data returned to callers by Resolve.

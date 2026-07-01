@@ -31,7 +31,8 @@ var nodeIDMax = chainstore.NodeID{
 
 // LoadChain opens a Pebble snapshot for consistent reads, then walks parent pointers.
 // A snapshot prevents a concurrent deletion from causing a mid-walk ErrNotFound
-// on an otherwise intact chain.
+// on an otherwise intact chain. ResponseID is fetched from the pfxResponseID key
+// within the same snapshot so all fields of each returned Node are consistent.
 func (b *Backend) LoadChain(_ context.Context, leaf chainstore.NodeID) ([]chainstore.Node, error) {
 	snap := b.db.NewSnapshot()
 	defer func() { _ = snap.Close() }()
@@ -53,6 +54,10 @@ func (b *Backend) LoadChain(_ context.Context, leaf chainstore.NodeID) ([]chains
 		}
 		node := decodeNode(val)
 		_ = closer.Close()
+		if ridVal, ridCloser, ridErr := snap.Get(responseIDKey(cur)); ridErr == nil {
+			node.ResponseID = string(ridVal)
+			_ = ridCloser.Close()
+		}
 		nodes = append(nodes, node)
 		if node.ParentID == (chainstore.NodeID{}) {
 			break
@@ -69,12 +74,24 @@ func (b *Backend) GetNode(_ context.Context, id chainstore.NodeID) (chainstore.N
 		return chainstore.Node{}, mapErr(err)
 	}
 	defer func() { _ = closer.Close() }()
-	return decodeNode(val), nil
+	node := decodeNode(val)
+	if ridVal, ridCloser, ridErr := b.db.Get(responseIDKey(id)); ridErr == nil {
+		node.ResponseID = string(ridVal)
+		_ = ridCloser.Close()
+	}
+	return node, nil
 }
 
 // GetBlobs fetches both blobs for a node in one call.
 // Either blob is nil if its BlobID is zero (not yet stored).
 // Returns (requestBlob, responseBlob, err).
+//
+// NOTE: blob reads are not snapshot-isolated with respect to LoadChain. A
+// concurrent Store that completes a turn (writing ResponseBlobID) between
+// LoadChain and GetBlobs may cause Resolve to return an unexpectedly non-nil
+// ResponseBlob for a node that appeared incomplete in the chain snapshot. This
+// is a benign over-read (the data is valid) and will be addressed in Phase 3
+// when Resolve is refactored to use a snapshot-spanning read path.
 func (b *Backend) GetBlobs(_ context.Context, node chainstore.Node) ([]byte, []byte, error) {
 	requestBlob, err := b.fetchBlob(node.RequestBlobID)
 	if err != nil {
@@ -110,6 +127,11 @@ func (b *Backend) Commit(_ context.Context, tx chainstore.Transaction) error {
 	for _, n := range tx.PutNodes {
 		if err := batch.Set(metaKey(n.ID), encodeNode(n), nil); err != nil {
 			return err
+		}
+		if n.ResponseID != "" {
+			if err := batch.Set(responseIDKey(n.ID), []byte(n.ResponseID), nil); err != nil {
+				return err
+			}
 		}
 		if n.ParentID != (chainstore.NodeID{}) {
 			if err := batch.Set(childKey(n.ParentID, n.ID), nil, nil); err != nil {
@@ -260,11 +282,11 @@ func (b *Backend) Close() error {
 	return b.db.Close()
 }
 
-// Open creates a pebble.Backend at dir, wires it into cfg, and returns a
-// fully-started *chainstore.Store. It is the standard entry point for production use.
-// Pass dir="" with vfs.NewMem() in Options.FS for in-memory use in tests.
+// OpenBackend opens a Pebble database at dir and returns the raw Backend.
+// Use this when you need direct backend access (e.g. in tests to inspect node state).
+// For normal use prefer Open, which wires the backend into a *chainstore.Store.
 // opts may be nil; StatsMerger is always set to enable stats accumulation.
-func Open(dir string, opts *crdbpebble.Options, cfg chainstore.Config) (*chainstore.Store, error) {
+func OpenBackend(dir string, opts *crdbpebble.Options) (*Backend, error) {
 	if opts == nil {
 		opts = &crdbpebble.Options{}
 	}
@@ -273,6 +295,18 @@ func Open(dir string, opts *crdbpebble.Options, cfg chainstore.Config) (*chainst
 	if err != nil {
 		return nil, err
 	}
-	cfg.Backend = &Backend{db: db}
+	return &Backend{db: db}, nil
+}
+
+// Open creates a pebble.Backend at dir, wires it into cfg, and returns a
+// fully-started *chainstore.Store. It is the standard entry point for production use.
+// Pass dir="" with vfs.NewMem() in Options.FS for in-memory use in tests.
+// opts may be nil; StatsMerger is always set to enable stats accumulation.
+func Open(dir string, opts *crdbpebble.Options, cfg chainstore.Config) (*chainstore.Store, error) {
+	b, err := OpenBackend(dir, opts)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Backend = b
 	return chainstore.New(cfg)
 }
