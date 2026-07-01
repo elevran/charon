@@ -23,6 +23,9 @@ import (
 //	109       1    Status           (0=completed, 1=failed)
 //	110       1    BlobType         (0=single, 1=chunked — Phase 6)
 //
+// Node.ResponseID is NOT encoded here; it is stored as a separate
+// pfxResponseID key (see keys.go) to keep this record fixed-size.
+//
 // Big-endian is used for multi-byte numeric fields for consistency with lruKey,
 // where big-endian BucketID encoding is required for correct lexicographic sort order.
 const nodeSize = 111
