@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,7 @@ type Config struct {
 	EvictionInterval time.Duration // ticker period for capacity eviction; default 1m
 	TTLInterval      time.Duration // ticker period for TTL reaper; default 5m
 	Clock            Clock         // nil = RealClock
+	Log              *slog.Logger  // nil = slog.Default()
 	Backend          Backend       // required — supply via pebble.Open() or dynamodb.Open()
 }
 
@@ -104,6 +106,9 @@ func New(cfg Config) (*Store, error) {
 	if cfg.Clock == nil {
 		cfg.Clock = RealClock{}
 	}
+	if cfg.Log == nil {
+		cfg.Log = slog.Default()
+	}
 
 	s := &Store{
 		cfg:        cfg,
@@ -121,9 +126,14 @@ func New(cfg Config) (*Store, error) {
 	s.bytes.Store(bytes)
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
-	s.wg.Add(2)
-	go s.evictionLoop(s.ctx)
-	go s.ttlLoop(s.ctx)
+	if cfg.MaxEntries > 0 || cfg.MaxBytes > 0 {
+		s.wg.Add(1)
+		go s.evictionLoop(s.ctx)
+	}
+	if cfg.TTL > 0 {
+		s.wg.Add(1)
+		go s.ttlLoop(s.ctx)
+	}
 	return s, nil
 }
 
@@ -186,10 +196,10 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 		return fmt.Errorf("chainstore.Store: commit: %w", err)
 	}
 
-	s.entries.Add(1)
-	s.bytes.Add(int64(len(requestBlob)))
-	if (s.cfg.MaxEntries > 0 && s.entries.Load() > s.cfg.MaxEntries) ||
-		(s.cfg.MaxBytes > 0 && s.bytes.Load() > s.cfg.MaxBytes) {
+	entries := s.entries.Add(1)
+	totalBytes := s.bytes.Add(int64(len(requestBlob)))
+	if (s.cfg.MaxEntries > 0 && entries > s.cfg.MaxEntries) ||
+		(s.cfg.MaxBytes > 0 && totalBytes > s.cfg.MaxBytes) {
 		s.notifyCapacityExceeded()
 	}
 	return nil
@@ -206,8 +216,8 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 // over-read). A concurrent Resolve that promotes a node to a newer bucket between
 // LoadChain and this Resolve's touch commit may leave the node indexed under two
 // LRU buckets (stale OldBucket delete is a no-op; node ends up in the newer bucket
-// after the later commit). Both races are benign for Phase 2 and will be addressed
-// in Phase 3 with a snapshot-spanning read path.
+// after the later commit). Both races are benign and will be addressed in a future
+// phase with a snapshot-spanning read path.
 func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) ([]Turn, error) {
 	id := nodeID(tenantKey, responseID)
 	nodes, err := s.backend.LoadChain(ctx, id)

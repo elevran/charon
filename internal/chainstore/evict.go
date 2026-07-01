@@ -2,9 +2,11 @@ package chainstore
 
 import (
 	"context"
-	"log"
+	"slices"
 	"time"
 )
+
+const evictBatchSize = 100
 
 // notifyCapacityExceeded signals the eviction goroutine to run evictOldest
 // outside its normal ticker cadence. The channel is buffered size 1:
@@ -54,7 +56,6 @@ func (s *Store) ttlLoop(ctx context.Context) {
 // configured limits. Optimistic: re-reads Node via GetNode before deleting to
 // guard against a concurrent Resolve that promoted the node to a newer bucket.
 func (s *Store) evictOldest(ctx context.Context) {
-	const batchSize = 100
 	for {
 		if (s.cfg.MaxEntries <= 0 || s.entries.Load() <= s.cfg.MaxEntries) &&
 			(s.cfg.MaxBytes <= 0 || s.bytes.Load() <= s.cfg.MaxBytes) {
@@ -64,7 +65,7 @@ func (s *Store) evictOldest(ctx context.Context) {
 		if err != nil {
 			return // ErrNotFound = store is empty
 		}
-		candidates, err := s.backend.GetEvictionCandidates(ctx, bucket, batchSize)
+		candidates, err := s.backend.GetEvictionCandidates(ctx, bucket, evictBatchSize)
 		if err != nil || len(candidates) == 0 {
 			return
 		}
@@ -98,7 +99,6 @@ func (s *Store) ttlReap(ctx context.Context) {
 	}
 	cutoff := s.clock.Now().Add(-s.cfg.TTL).Unix()
 	dur := int64(s.cfg.bucketDuration().Seconds())
-	const batchSize = 100
 	const maxStaleBucketSkips = 16
 
 	staleSkips := 0
@@ -113,7 +113,7 @@ func (s *Store) ttlReap(ctx context.Context) {
 			return
 		}
 
-		candidates, err := s.backend.GetEvictionCandidates(ctx, bucket, batchSize)
+		candidates, err := s.backend.GetEvictionCandidates(ctx, bucket, evictBatchSize)
 		if err != nil || len(candidates) == 0 {
 			return
 		}
@@ -133,7 +133,7 @@ func (s *Store) ttlReap(ctx context.Context) {
 		}
 
 		if allFresh {
-			if len(candidates) == batchSize && staleSkips < maxStaleBucketSkips {
+			if len(candidates) == evictBatchSize && staleSkips < maxStaleBucketSkips {
 				staleSkips++
 				continue
 			}
@@ -143,32 +143,39 @@ func (s *Store) ttlReap(ctx context.Context) {
 	}
 }
 
-// deleteNode deletes a single node and its blobs (no cascade — leaves children
-// with a dangling parent pointer, which is intentional for capacity eviction).
-func (s *Store) deleteNode(ctx context.Context, node Node) {
-	blobBytes := int64(node.RequestBlobSize) + int64(node.ResponseBlobSize)
-
-	tx := Transaction{
-		DeleteNodes: []NodeID{node.ID},
-		// NewBucket=0 signals delete-only (no new LRU entry written).
-		BucketMoves: []BucketMove{{NodeID: node.ID, OldBucket: node.BucketID, NewBucket: 0}},
-		StatsDelta: StatsDelta{
-			EntryDelta: -1,
-			BytesDelta: -blobBytes,
-		},
-	}
+// appendNodeToDeleteTx appends the per-node delete mutations into tx.
+// Used by both deleteNode and deleteSubtree to avoid duplication.
+func appendNodeToDeleteTx(tx *Transaction, node Node) {
+	tx.DeleteNodes = append(tx.DeleteNodes, node.ID)
 	if node.RequestBlobID != (BlobID{}) {
 		tx.DeleteBlobs = append(tx.DeleteBlobs, node.RequestBlobID)
 	}
 	if node.ResponseBlobID != (BlobID{}) {
 		tx.DeleteBlobs = append(tx.DeleteBlobs, node.ResponseBlobID)
 	}
+	// NewBucket=0 signals delete-only (no new LRU entry written).
+	tx.BucketMoves = append(tx.BucketMoves, BucketMove{
+		NodeID:    node.ID,
+		OldBucket: node.BucketID,
+		NewBucket: 0,
+	})
 	if node.ParentID != (NodeID{}) {
-		tx.DeleteChildren = []ChildEntry{{Parent: node.ParentID, Child: node.ID}}
+		tx.DeleteChildren = append(tx.DeleteChildren, ChildEntry{Parent: node.ParentID, Child: node.ID})
 	}
+	blobBytes := int64(node.RequestBlobSize) + int64(node.ResponseBlobSize)
+	tx.StatsDelta.EntryDelta--
+	tx.StatsDelta.BytesDelta -= blobBytes
+}
+
+// deleteNode deletes a single node and its blobs (no cascade — leaves children
+// with a dangling parent pointer, which is intentional for capacity eviction).
+func (s *Store) deleteNode(ctx context.Context, node Node) {
+	tx := Transaction{}
+	appendNodeToDeleteTx(&tx, node)
+	blobBytes := int64(node.RequestBlobSize) + int64(node.ResponseBlobSize)
 
 	if err := s.backend.Commit(ctx, tx); err != nil {
-		log.Printf("chainstore: deleteNode commit error: %v", err)
+		s.cfg.Log.Error("chainstore: deleteNode commit error", "err", err)
 		return
 	}
 	s.entries.Add(-1)
@@ -184,57 +191,35 @@ func (s *Store) deleteSubtree(ctx context.Context, root NodeID) {
 		// Gather children of every node at this BFS level before deleting.
 		var next []NodeID
 		for _, cur := range frontier {
-			children, _ := s.backend.GetChildren(ctx, cur)
+			children, err := s.backend.GetChildren(ctx, cur)
+			if err != nil && err != ErrNotFound {
+				s.cfg.Log.Error("chainstore: deleteSubtree GetChildren error", "err", err)
+				return
+			}
 			next = append(next, children...)
 		}
 
 		// Delete this level in chunks to keep transaction size bounded.
 		const levelCap = 1000
-		for len(frontier) > 0 {
-			chunk := chunkNodes(frontier, levelCap)
-			frontier = frontier[len(chunk):]
-
+		for chunk := range slices.Chunk(frontier, levelCap) {
 			tx := Transaction{}
 			for _, id := range chunk {
 				node, err := s.backend.GetNode(ctx, id)
 				if err != nil {
 					continue // already deleted
 				}
-				tx.DeleteNodes = append(tx.DeleteNodes, id)
-				if node.RequestBlobID != (BlobID{}) {
-					tx.DeleteBlobs = append(tx.DeleteBlobs, node.RequestBlobID)
-				}
-				if node.ResponseBlobID != (BlobID{}) {
-					tx.DeleteBlobs = append(tx.DeleteBlobs, node.ResponseBlobID)
-				}
-				// NewBucket=0 = delete-only LRU cleanup.
-				tx.BucketMoves = append(tx.BucketMoves, BucketMove{
-					NodeID:    id,
-					OldBucket: node.BucketID,
-					NewBucket: 0,
-				})
-				tx.StatsDelta.BytesDelta -= int64(node.RequestBlobSize) + int64(node.ResponseBlobSize)
-				tx.StatsDelta.EntryDelta--
-				// Remove the upward child link (parent → this node).
-				if node.ParentID != (NodeID{}) {
-					tx.DeleteChildren = append(tx.DeleteChildren, ChildEntry{Parent: node.ParentID, Child: id})
-				}
-				s.entries.Add(-1)
-				s.bytes.Add(-int64(node.RequestBlobSize) - int64(node.ResponseBlobSize))
+				appendNodeToDeleteTx(&tx, node)
 			}
 
 			if err := s.backend.Commit(ctx, tx); err != nil {
-				log.Printf("chainstore: deleteSubtree commit error: %v", err)
+				s.cfg.Log.Error("chainstore: deleteSubtree commit error", "err", err)
+				return
 			}
+			// Update counters only after a successful commit.
+			s.entries.Add(tx.StatsDelta.EntryDelta)
+			s.bytes.Add(tx.StatsDelta.BytesDelta)
 		}
 
 		frontier = next
 	}
-}
-
-func chunkNodes(nodes []NodeID, size int) []NodeID {
-	if len(nodes) <= size {
-		return nodes
-	}
-	return nodes[:size]
 }

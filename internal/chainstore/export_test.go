@@ -11,6 +11,3 @@ func (s *Store) TtlReap(ctx context.Context) { s.ttlReap(ctx) }
 
 // EvictOldest exposes the internal evictOldest method for testing.
 func (s *Store) EvictOldest(ctx context.Context) { s.evictOldest(ctx) }
-
-// NudgeEvict returns the nudgeEvict channel for synchronisation in tests.
-func (s *Store) NudgeEvict() <-chan struct{} { return s.nudgeEvict }

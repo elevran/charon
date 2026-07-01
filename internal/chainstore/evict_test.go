@@ -2,6 +2,8 @@ package chainstore_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -160,8 +162,9 @@ func TestSubtreeEviction(t *testing.T) {
 	}
 }
 
-// TestOptimisticEviction: concurrent Resolve + eviction produces no panics and
-// no permanently dangling state. Run with -race.
+// TestOptimisticEviction: concurrent Resolve + eviction produces no panics,
+// no spurious successes on evicted nodes, and no permanently dangling state.
+// Run with -race.
 func TestOptimisticEviction(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(3600, 0)}
 	const maxEntries = 10
@@ -199,7 +202,17 @@ func TestOptimisticEviction(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	// No panic = test passes; final count must be non-negative.
+
+	// After concurrent eviction, each node is either present (Resolve succeeds)
+	// or absent (ErrNotFound / ErrChainExpired). Any other error indicates a bug.
+	for i := 0; i < maxEntries*2; i++ {
+		_, err := s.Resolve(ctx, hotID(i), "")
+		if err != nil {
+			assert.True(t,
+				errors.Is(err, chainstore.ErrNotFound) || errors.Is(err, chainstore.ErrChainExpired),
+				"unexpected error for hotID(%d): %v", i, err)
+		}
+	}
 	assert.GreaterOrEqual(t, s.Entries(), int64(0))
 }
 
@@ -284,6 +297,22 @@ func TestDeleteNodeNoOrphanedLRU(t *testing.T) {
 	}
 }
 
+// TestCapacityEvictionByBytes: filling the store past MaxBytes triggers eviction.
+func TestCapacityEvictionByBytes(t *testing.T) {
+	const blobSize = 10
+	const maxBytes = int64(blobSize * 5)
+	s := openMemStore(t, chainstore.Config{MaxBytes: maxBytes})
+	ctx := context.Background()
+
+	blob := make([]byte, blobSize)
+	for i := 0; i < 10; i++ {
+		require.NoError(t, s.Store(ctx, fmt.Sprintf("r%d", i), "", "", blob))
+	}
+
+	s.EvictOldest(ctx)
+	assert.LessOrEqual(t, s.Bytes(), maxBytes)
+}
+
 // --- helpers ---
 
 func randomID(t *testing.T) string {
@@ -292,5 +321,5 @@ func randomID(t *testing.T) string {
 }
 
 func hotID(i int) string {
-	return "hot_" + string(rune('a'+i%26)) + string(rune('0'+i/26))
+	return fmt.Sprintf("hot_%d", i)
 }
