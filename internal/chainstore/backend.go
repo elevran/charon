@@ -117,7 +117,8 @@ type Transaction struct {
 // No key encodings, batch primitives, or scan APIs appear above this boundary.
 type Backend interface {
 	// LoadChain walks from leaf to root and returns nodes leaf-first.
-	// Returns ErrNotFound if leaf is absent; ErrChainCorrupted if a parent pointer dangles.
+	// Returns ErrNotFound if leaf is absent; ErrChainExpired if an ancestor was
+	// capacity-evicted; ErrChainCorrupted if a parent pointer dangles unexpectedly.
 	LoadChain(ctx context.Context, leaf NodeID) ([]Node, error)
 
 	// GetNode fetches a single node's metadata. ErrNotFound if absent.
