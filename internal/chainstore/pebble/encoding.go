@@ -6,9 +6,7 @@ import (
 	"github.com/elevran/charon/internal/chainstore"
 )
 
-// Node wire layout — fixed header (111 bytes) followed by a variable-length ResponseID.
-//
-// Fixed header (big-endian for multi-byte fields):
+// Node wire layout (111 bytes, big-endian for multi-byte fields):
 //
 //	offset  size  field
 //	  0       1    Version
@@ -25,21 +23,15 @@ import (
 //	109       1    Status           (0=completed, 1=failed)
 //	110       1    BlobType         (0=single, 1=chunked — Phase 6)
 //
-// Variable-length trailer (immediately after byte 110):
-//
-//	111       1    len(ResponseID)  (0–255)
-//	112       N    ResponseID       (UTF-8, N = byte at offset 111)
+// Node.ResponseID is NOT encoded here; it is stored as a separate
+// pfxResponseID key (see keys.go) to keep this record fixed-size.
 //
 // Big-endian is used for multi-byte numeric fields for consistency with lruKey,
 // where big-endian BucketID encoding is required for correct lexicographic sort order.
-const nodeFixedSize = 111
+const nodeSize = 111
 
 func encodeNode(n chainstore.Node) []byte {
-	id := []byte(n.ResponseID)
-	if len(id) > 255 {
-		id = id[:255]
-	}
-	b := make([]byte, nodeFixedSize+1+len(id))
+	b := make([]byte, nodeSize)
 	b[0] = n.Version
 	copy(b[1:21], n.ID[:])
 	copy(b[21:41], n.ParentID[:])
@@ -53,8 +45,6 @@ func encodeNode(n chainstore.Node) []byte {
 	binary.BigEndian.PutUint32(b[105:109], n.Depth)
 	b[109] = n.Status
 	b[110] = n.BlobType
-	b[nodeFixedSize] = byte(len(id))
-	copy(b[nodeFixedSize+1:], id)
 	return b
 }
 
@@ -73,11 +63,5 @@ func decodeNode(b []byte) chainstore.Node {
 	n.Depth = binary.BigEndian.Uint32(b[105:109])
 	n.Status = b[109]
 	n.BlobType = b[110]
-	if len(b) > nodeFixedSize {
-		idLen := int(b[nodeFixedSize])
-		if idLen > 0 && len(b) >= nodeFixedSize+1+idLen {
-			n.ResponseID = string(b[nodeFixedSize+1 : nodeFixedSize+1+idLen])
-		}
-	}
 	return n
 }

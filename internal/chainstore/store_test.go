@@ -31,6 +31,20 @@ func openMemStore(t *testing.T, cfg chainstore.Config) *chainstore.Store {
 	return s
 }
 
+// openMemStoreAndBackend opens a Store and returns the raw Backend alongside it.
+// Use when tests need to inspect node state directly (e.g. LastAccessUnix, BucketID).
+func openMemStoreAndBackend(t *testing.T, cfg chainstore.Config) (*chainstore.Store, *chainstorepebble.Backend) {
+	t.Helper()
+	opts := &crdbpebble.Options{FS: vfs.NewMem()}
+	b, err := chainstorepebble.OpenBackend("", opts)
+	require.NoError(t, err)
+	cfg.Backend = b
+	s, err := chainstore.New(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	return s, b
+}
+
 func TestStoreRootTurn(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
 	s := openMemStore(t, chainstore.Config{Clock: clk})
@@ -87,7 +101,7 @@ func TestResolveLastAccessUnixUpdated(t *testing.T) {
 	storeTime := time.Unix(1_700_000_000, 0)
 	resolveTime := storeTime.Add(30 * time.Minute)
 	clk := &fakeClock{t: storeTime}
-	s := openMemStore(t, chainstore.Config{Clock: clk, BucketDuration: time.Hour})
+	s, b := openMemStoreAndBackend(t, chainstore.Config{Clock: clk, BucketDuration: time.Hour})
 	ctx := context.Background()
 
 	require.NoError(t, s.Store(ctx, "resp_a", "", "", []byte("data")))
@@ -96,11 +110,9 @@ func TestResolveLastAccessUnixUpdated(t *testing.T) {
 	_, err := s.Resolve(ctx, "resp_a", "")
 	require.NoError(t, err)
 
-	// Re-resolve to get the updated node through a fresh chain walk.
-	// If LastAccessUnix was not updated the bucket promotion below would not happen,
-	// so we verify indirectly via a second Resolve that the commit succeeded.
-	_, err = s.Resolve(ctx, "resp_a", "")
+	node, err := b.GetNode(ctx, chainstore.NodeIDFor("", "resp_a"))
 	require.NoError(t, err)
+	assert.Equal(t, resolveTime.Unix(), node.LastAccessUnix)
 }
 
 func TestResolveBucketMoveOnBucketCross(t *testing.T) {
@@ -108,7 +120,7 @@ func TestResolveBucketMoveOnBucketCross(t *testing.T) {
 	bucket1Time := time.Unix(3600, 0) // bucket 1 (3600/3600=1)
 	bucket2Time := time.Unix(7200, 0) // bucket 2 (7200/3600=2)
 	clk := &fakeClock{t: bucket1Time}
-	s := openMemStore(t, chainstore.Config{Clock: clk, BucketDuration: time.Hour})
+	s, b := openMemStoreAndBackend(t, chainstore.Config{Clock: clk, BucketDuration: time.Hour})
 	ctx := context.Background()
 
 	require.NoError(t, s.Store(ctx, "resp_a", "", "", []byte("data")))
@@ -118,6 +130,11 @@ func TestResolveBucketMoveOnBucketCross(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, turns, 1)
 	assert.Equal(t, []byte("data"), turns[0].RequestBlob)
+
+	bucket2 := chainstore.Config{BucketDuration: time.Hour}.BucketFor(bucket2Time)
+	node, err := b.GetNode(ctx, chainstore.NodeIDFor("", "resp_a"))
+	require.NoError(t, err)
+	assert.Equal(t, bucket2, node.BucketID)
 }
 
 func TestResolveBucketMoveSkippedSameBucket(t *testing.T) {
@@ -126,16 +143,21 @@ func TestResolveBucketMoveSkippedSameBucket(t *testing.T) {
 	t0 := time.Unix(3600, 0)
 	t1 := t0.Add(10 * time.Minute)
 	clk := &fakeClock{t: t0}
-	s := openMemStore(t, chainstore.Config{Clock: clk, BucketDuration: time.Hour})
+	s, b := openMemStoreAndBackend(t, chainstore.Config{Clock: clk, BucketDuration: time.Hour})
 	ctx := context.Background()
 
 	require.NoError(t, s.Store(ctx, "resp_a", "", "", []byte("data")))
+	originalBucket := chainstore.Config{BucketDuration: time.Hour}.BucketFor(t0)
 
 	clk.t = t1
 	turns, err := s.Resolve(ctx, "resp_a", "")
 	require.NoError(t, err)
 	require.Len(t, turns, 1)
 	assert.Equal(t, []byte("data"), turns[0].RequestBlob)
+
+	node, err := b.GetNode(ctx, chainstore.NodeIDFor("", "resp_a"))
+	require.NoError(t, err)
+	assert.Equal(t, originalBucket, node.BucketID)
 }
 
 func TestMultiTenancyIsolation(t *testing.T) {
@@ -182,15 +204,7 @@ func TestResolveResponseBlobNilBeforeComplete(t *testing.T) {
 	assert.Nil(t, turns[0].ResponseBlob, "ResponseBlob must be nil before Complete is called")
 }
 
-func TestResolveChainCorruptedOnMissingMidNode(t *testing.T) {
-	// This is enforced by the backend's LoadChain; Resolve must surface it.
-	// We test it indirectly: store root+child, then store a grandchild that points
-	// at a parent we inject by manipulating the transaction directly via the backend.
-	// For the Store/Resolve API test, the simplest path is a chain with a dangling
-	// parent pointer produced by a direct pebble.Backend Commit — but since that
-	// requires package-internal access, we rely on the Backend-level test for the
-	// corruption case and only verify Store/Resolve surface errors correctly here.
-	// See backend_test.go:TestLoadChainCorrupted for the exhaustive case.
+func TestResolveDepthThreeChain(t *testing.T) {
 	s := openMemStore(t, chainstore.Config{})
 	ctx := context.Background()
 

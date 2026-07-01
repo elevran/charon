@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,7 +60,7 @@ type Store struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	wg     sync.WaitGroup // used by Phase 3 background goroutines
 }
 
 // New wires cfg into a Store and starts background goroutines.
@@ -96,9 +97,7 @@ func New(cfg Config) (*Store, error) {
 	s.bytes.Store(bytes)
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
-	s.wg.Add(2)
-	go s.evictionLoop(s.ctx)
-	go s.ttlLoop(s.ctx)
+	// Phase 3 will call s.wg.Add and launch eviction/TTL goroutines here.
 	return s, nil
 }
 
@@ -111,8 +110,14 @@ func (s *Store) Close() error {
 
 // Store writes one conversation turn and its request blob atomically.
 // previousResponseID may be empty for a root turn (start of a new conversation).
+// responseID must not exceed 255 bytes.
 // Returns ErrNotFound if previousResponseID is non-empty but does not exist.
+// Returns ErrChainTooDeep if the parent's depth is at the maximum uint32 value.
 func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenantKey string, requestBlob []byte) error {
+	if len(responseID) > 255 {
+		return fmt.Errorf("chainstore.Store: responseID exceeds 255 bytes (len=%d)", len(responseID))
+	}
+
 	id := nodeID(tenantKey, responseID)
 	blobID := BlobID(uuid.New())
 	now := s.clock.Now()
@@ -128,29 +133,31 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 		ResponseID:      responseID,
 	}
 
-	tx := Transaction{
-		PutNodes: []Node{node},
-		PutBlobs: []BlobEntry{{BlobID: blobID, Data: requestBlob}},
-		StatsDelta: StatsDelta{
-			EntryDelta: 1,
-			BytesDelta: int64(len(requestBlob)),
-		},
-	}
-
+	var children []ChildEntry
 	if previousResponseID != "" {
 		parentID := nodeID(tenantKey, previousResponseID)
 		parent, err := s.backend.GetNode(ctx, parentID)
 		if err != nil {
-			return err
+			return fmt.Errorf("chainstore.Store: parent lookup: %w", err)
+		}
+		if parent.Depth == math.MaxUint32 {
+			return ErrChainTooDeep
 		}
 		node.ParentID = parentID
 		node.Depth = parent.Depth + 1
-		tx.PutNodes[0] = node
-		tx.PutChildren = []ChildEntry{{Parent: parentID, Child: id}}
+		children = []ChildEntry{{Parent: parentID, Child: id}}
 	}
 
-	if err := s.backend.Commit(ctx, tx); err != nil {
-		return err
+	if err := s.backend.Commit(ctx, Transaction{
+		PutNodes:    []Node{node},
+		PutBlobs:    []BlobEntry{{BlobID: blobID, Data: requestBlob}},
+		PutChildren: children,
+		StatsDelta: StatsDelta{
+			EntryDelta: 1,
+			BytesDelta: int64(len(requestBlob)),
+		},
+	}); err != nil {
+		return fmt.Errorf("chainstore.Store: commit: %w", err)
 	}
 
 	s.entries.Add(1)
@@ -162,6 +169,15 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 // Each Turn carries both request and response blobs; ResponseBlob is nil for turns not
 // yet completed (ResponseBlobID is zero). Updates LastAccessUnix and promotes LRU bucket
 // index entries only for nodes that have crossed a bucket boundary since last access.
+//
+// NOTE: LoadChain and GetBlobs use independent Pebble snapshots. A concurrent Store
+// completing a turn between the two reads will cause Resolve to see a non-nil
+// ResponseBlob for a node that appeared incomplete in the chain snapshot (benign
+// over-read). A concurrent Resolve that promotes a node to a newer bucket between
+// LoadChain and this Resolve's touch commit may leave the node indexed under two
+// LRU buckets (stale OldBucket delete is a no-op; node ends up in the newer bucket
+// after the later commit). Both races are benign for Phase 2 and will be addressed
+// in Phase 3 with a snapshot-spanning read path.
 func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) ([]Turn, error) {
 	id := nodeID(tenantKey, responseID)
 	nodes, err := s.backend.LoadChain(ctx, id)
@@ -175,7 +191,7 @@ func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) ([]Tu
 
 	turns := make([]Turn, len(nodes))
 	updatedNodes := make([]Node, len(nodes))
-	var bucketMoves []BucketMove
+	bucketMoves := make([]BucketMove, 0, len(nodes))
 
 	for i, node := range nodes {
 		reqBlob, respBlob, err := s.backend.GetBlobs(ctx, node)
@@ -206,16 +222,4 @@ func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) ([]Tu
 		PutNodes:    updatedNodes,
 		BucketMoves: bucketMoves,
 	})
-}
-
-// evictionLoop is the long-running capacity-eviction goroutine (Phase 3).
-func (s *Store) evictionLoop(ctx context.Context) {
-	defer s.wg.Done()
-	<-ctx.Done()
-}
-
-// ttlLoop is the long-running TTL-reaper goroutine (Phase 3).
-func (s *Store) ttlLoop(ctx context.Context) {
-	defer s.wg.Done()
-	<-ctx.Done()
 }

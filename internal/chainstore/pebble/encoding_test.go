@@ -24,11 +24,11 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		Depth:            7,
 		Status:           chainstore.NodeStatusFailed,
 		BlobType:         chainstore.BlobTypeSingle,
-		ResponseID:       "resp_abc123xyz",
+		// ResponseID is stored as a separate pfxResponseID key, not encoded here.
 	}
 
 	encoded := encodeNode(node)
-	require.GreaterOrEqual(t, len(encoded), nodeFixedSize+1, "encoded size must cover fixed header + length byte")
+	require.Len(t, encoded, nodeSize, "encoded size must be nodeSize")
 
 	decoded := decodeNode(encoded)
 	assert.Equal(t, node, decoded, "round-trip must produce identical node")
@@ -82,10 +82,6 @@ func TestEncodeAllFields(t *testing.T) {
 		{
 			name: "version 1",
 			node: chainstore.Node{Version: 1},
-		},
-		{
-			name: "non-empty ResponseID",
-			node: chainstore.Node{ResponseID: "resp_hello"},
 		},
 	}
 
