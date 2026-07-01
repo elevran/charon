@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,7 @@ type Config struct {
 	EvictionInterval time.Duration // ticker period for capacity eviction; default 1m
 	TTLInterval      time.Duration // ticker period for TTL reaper; default 5m
 	Clock            Clock         // nil = RealClock
+	Log              *slog.Logger  // nil = slog.Default()
 	Backend          Backend       // required — supply via pebble.Open() or dynamodb.Open()
 }
 
@@ -58,10 +60,26 @@ type Store struct {
 	entries atomic.Int64
 	bytes   atomic.Int64
 
+	// nudgeEvict is buffered (capacity 1); Store signals eviction after a write
+	// that pushes the store over capacity. The eviction goroutine consumes it
+	// and runs evictOldest immediately rather than waiting for the next tick.
+	nudgeEvict chan struct{}
+	nudgeCount atomic.Int64 // counts successful nudge sends; exported via export_test.go
+
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup // used by Phase 3 background goroutines
+	wg     sync.WaitGroup
 }
+
+// Entries returns the approximate number of stored nodes (updated optimistically on write/delete).
+// May transiently return a negative value under heavy concurrent eviction; callers should
+// treat negative as zero when computing display values.
+func (s *Store) Entries() int64 { return s.entries.Load() }
+
+// Bytes returns the approximate total blob bytes (updated optimistically on write/delete).
+// May transiently return a negative value under heavy concurrent eviction; callers should
+// treat negative as zero when computing display values.
+func (s *Store) Bytes() int64 { return s.bytes.Load() }
 
 // New wires cfg into a Store and starts background goroutines.
 // Callers should use pebble.Open() or dynamodb.Open() rather than calling New directly.
@@ -81,11 +99,15 @@ func New(cfg Config) (*Store, error) {
 	if cfg.Clock == nil {
 		cfg.Clock = RealClock{}
 	}
+	if cfg.Log == nil {
+		cfg.Log = slog.Default()
+	}
 
 	s := &Store{
-		cfg:     cfg,
-		backend: cfg.Backend,
-		clock:   cfg.Clock,
+		cfg:        cfg,
+		backend:    cfg.Backend,
+		clock:      cfg.Clock,
+		nudgeEvict: make(chan struct{}, 1),
 	}
 
 	// Reload stats from the persistent stats key so in-memory counters survive restarts.
@@ -97,7 +119,14 @@ func New(cfg Config) (*Store, error) {
 	s.bytes.Store(bytes)
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
-	// Phase 3 will call s.wg.Add and launch eviction/TTL goroutines here.
+	if cfg.MaxEntries > 0 || cfg.MaxBytes > 0 {
+		s.wg.Add(1)
+		go s.evictionLoop(s.ctx)
+	}
+	if cfg.TTL > 0 {
+		s.wg.Add(1)
+		go s.ttlLoop(s.ctx)
+	}
 	return s, nil
 }
 
@@ -160,8 +189,12 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 		return fmt.Errorf("chainstore.Store: commit: %w", err)
 	}
 
-	s.entries.Add(1)
-	s.bytes.Add(int64(len(requestBlob)))
+	entries := s.entries.Add(1)
+	totalBytes := s.bytes.Add(int64(len(requestBlob)))
+	if (s.cfg.MaxEntries > 0 && entries > s.cfg.MaxEntries) ||
+		(s.cfg.MaxBytes > 0 && totalBytes > s.cfg.MaxBytes) {
+		s.notifyCapacityExceeded()
+	}
 	return nil
 }
 
@@ -176,8 +209,8 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 // over-read). A concurrent Resolve that promotes a node to a newer bucket between
 // LoadChain and this Resolve's touch commit may leave the node indexed under two
 // LRU buckets (stale OldBucket delete is a no-op; node ends up in the newer bucket
-// after the later commit). Both races are benign for Phase 2 and will be addressed
-// in Phase 3 with a snapshot-spanning read path.
+// after the later commit). Both races are benign and will be addressed in a future
+// phase with a snapshot-spanning read path.
 func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) ([]Turn, error) {
 	id := nodeID(tenantKey, responseID)
 	nodes, err := s.backend.LoadChain(ctx, id)

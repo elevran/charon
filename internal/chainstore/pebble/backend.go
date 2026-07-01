@@ -50,7 +50,9 @@ func (b *Backend) LoadChain(_ context.Context, leaf chainstore.NodeID) ([]chains
 			if len(nodes) == 0 {
 				return nil, chainstore.ErrNotFound
 			}
-			return nil, chainstore.ErrChainCorrupted
+			// Ancestor absent after finding at least one node: the parent was
+			// capacity-evicted (non-cascading deleteNode). Not disk corruption.
+			return nil, chainstore.ErrChainExpired
 		}
 		node := decodeNode(val)
 		_ = closer.Close()
@@ -90,8 +92,8 @@ func (b *Backend) GetNode(_ context.Context, id chainstore.NodeID) (chainstore.N
 // concurrent Store that completes a turn (writing ResponseBlobID) between
 // LoadChain and GetBlobs may cause Resolve to return an unexpectedly non-nil
 // ResponseBlob for a node that appeared incomplete in the chain snapshot. This
-// is a benign over-read (the data is valid) and will be addressed in Phase 3
-// when Resolve is refactored to use a snapshot-spanning read path.
+// is a benign over-read (the data is valid) and will be addressed in a future
+// phase when Resolve is refactored to use a snapshot-spanning read path.
 func (b *Backend) GetBlobs(_ context.Context, node chainstore.Node) ([]byte, []byte, error) {
 	requestBlob, err := b.fetchBlob(node.RequestBlobID)
 	if err != nil {
@@ -120,7 +122,10 @@ func (b *Backend) fetchBlob(id chainstore.BlobID) ([]byte, error) {
 }
 
 // Commit translates a domain Transaction into a pebble.Batch and commits atomically.
-func (b *Backend) Commit(_ context.Context, tx chainstore.Transaction) error {
+func (b *Backend) Commit(ctx context.Context, tx chainstore.Transaction) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	batch := b.db.NewBatch()
 	defer func() { _ = batch.Close() }()
 
@@ -151,6 +156,9 @@ func (b *Backend) Commit(_ context.Context, tx chainstore.Transaction) error {
 		if err := batch.Delete(metaKey(id), nil); err != nil {
 			return err
 		}
+		if err := batch.Delete(responseIDKey(id), nil); err != nil {
+			return err
+		}
 	}
 
 	for _, c := range tx.DeleteChildren {
@@ -178,11 +186,17 @@ func (b *Backend) Commit(_ context.Context, tx chainstore.Transaction) error {
 	}
 
 	for _, bm := range tx.BucketMoves {
-		if err := batch.Delete(lruKey(bm.OldBucket, bm.NodeID), nil); err != nil {
-			return err
+		// OldBucket=0 means "no old entry to delete" (reserved sentinel — never a real bucket).
+		if bm.OldBucket != 0 {
+			if err := batch.Delete(lruKey(bm.OldBucket, bm.NodeID), nil); err != nil {
+				return err
+			}
 		}
-		if err := batch.Set(lruKey(bm.NewBucket, bm.NodeID), nil, nil); err != nil {
-			return err
+		// NewBucket=0 means "delete only — no new LRU entry" (used by deleteNode/deleteSubtree).
+		if bm.NewBucket != 0 {
+			if err := batch.Set(lruKey(bm.NewBucket, bm.NodeID), nil, nil); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -224,7 +238,13 @@ func (b *Backend) OldestBucket(_ context.Context) (chainstore.BucketID, error) {
 // GetEvictionCandidates scans lru entries for the given bucket, returns up to limit NodeIDs.
 func (b *Backend) GetEvictionCandidates(_ context.Context, bucket chainstore.BucketID, limit int) ([]chainstore.NodeID, error) {
 	lower := lruKey(bucket, chainstore.NodeID{})
-	upper := lruKey(bucket+1, chainstore.NodeID{})
+	// Guard against bucket+1 wrapping to 0 when bucket == MaxUint64.
+	var upper []byte
+	if bucket == ^chainstore.BucketID(0) {
+		upper = []byte{pfxLRU + 1}
+	} else {
+		upper = lruKey(bucket+1, chainstore.NodeID{})
+	}
 	iter, err := b.db.NewIter(&crdbpebble.IterOptions{LowerBound: lower, UpperBound: upper})
 	if err != nil {
 		return nil, err
