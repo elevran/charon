@@ -68,6 +68,9 @@ func (s *Store) reapStaging(ctx context.Context) {
 		s.cfg.Log.Error("chainstore: reapStaging scan error", "err", err)
 		return
 	}
+	if len(entries) == 0 {
+		return
+	}
 	tx := Transaction{}
 	for _, se := range entries {
 		tx.DeleteStagingNodes = append(tx.DeleteStagingNodes, se.StagingID)
@@ -77,6 +80,13 @@ func (s *Store) reapStaging(ctx context.Context) {
 	}
 	if err := s.backend.Commit(ctx, tx); err != nil {
 		s.cfg.Log.Error("chainstore: reapStaging commit error", "count", len(entries), "err", err)
+		if s.metrics != nil {
+			s.metrics.stagingReapErrTotal.Inc()
+		}
+		return
+	}
+	if s.metrics != nil {
+		s.metrics.stagingReapedTotal.Add(float64(len(entries)))
 	}
 }
 

@@ -300,9 +300,10 @@ func TestReapStaging_OrphanCleaned(t *testing.T) {
 	require.NoError(t, err)
 	sid := parseStagingID(t, stagingID)
 
-	// Staging record must be present before TTL expires.
-	_, err = b.GetStagingNode(ctx, sid)
+	// Capture the staged node so we can verify its blob is also deleted.
+	staged, err := b.GetStagingNode(ctx, sid)
 	require.NoError(t, err, "staging record must exist before reaping")
+	require.NotEqual(t, chainstore.BlobID{}, staged.RequestBlobID, "staged node must have a request blob")
 
 	// Advance clock to just before the TTL — reaper must leave it alone.
 	clk.Advance(stagingTTL - time.Second)
@@ -310,11 +311,14 @@ func TestReapStaging_OrphanCleaned(t *testing.T) {
 	_, err = b.GetStagingNode(ctx, sid)
 	require.NoError(t, err, "staging record must survive before StagingTTL elapses")
 
-	// Advance clock past the TTL — reaper must delete the record and its blob.
+	// Advance clock past the TTL — reaper must delete the record and its request blob.
 	clk.Advance(2 * time.Second)
 	s.ReapStaging(ctx)
 	_, err = b.GetStagingNode(ctx, sid)
 	assert.True(t, errors.Is(err, chainstore.ErrUnknownStaging), "staging record must be gone after reaping")
+	reqBlob, _, err := b.GetBlobs(ctx, staged)
+	assert.Error(t, err, "request blob must be gone after reaping")
+	assert.Nil(t, reqBlob)
 }
 
 // TestReapStaging_ActiveNotCleaned verifies that a staging record whose age is

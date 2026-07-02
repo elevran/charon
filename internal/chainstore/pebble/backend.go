@@ -299,7 +299,7 @@ func (b *Backend) GetChildren(_ context.Context, parentID chainstore.NodeID) ([]
 }
 
 // GetStagingNode fetches the partial Node stored under a staging key.
-// Returns ErrNotFound if the staging record is absent.
+// Returns ErrUnknownStaging if the staging record is absent.
 func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID) (chainstore.Node, error) {
 	val, closer, err := b.db.Get(stagingKey(stagingID))
 	if err != nil {
