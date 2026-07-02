@@ -151,6 +151,33 @@ func (s *Store) Close() error {
 	return s.backend.Close()
 }
 
+// buildNode constructs a partially-initialised Node with all fields that are
+// independent of the final responseID and blob IDs: timestamps, bucket, and
+// parent linkage. Callers must fill in ID, ResponseID, and blob fields.
+// Returns ErrNotFound or ErrChainTooDeep if the parent cannot be resolved.
+func (s *Store) buildNode(ctx context.Context, tenantKey, previousResponseID string) (Node, error) {
+	now := s.clock.Now()
+	node := Node{
+		Version:        1,
+		LastAccessUnix: now.Unix(),
+		CreatedAt:      now.Unix(),
+		BucketID:       s.cfg.BucketFor(now),
+	}
+	if previousResponseID != "" {
+		parentID := nodeID(tenantKey, previousResponseID)
+		parent, err := s.backend.GetNode(ctx, parentID)
+		if err != nil {
+			return Node{}, fmt.Errorf("parent lookup: %w", err)
+		}
+		if parent.Depth == math.MaxUint32 {
+			return Node{}, ErrChainTooDeep
+		}
+		node.ParentID = parentID
+		node.Depth = parent.Depth + 1
+	}
+	return node, nil
+}
+
 // Store writes one conversation turn and its request blob atomically.
 // previousResponseID may be empty for a root turn (start of a new conversation).
 // responseID must not exceed 255 bytes.
@@ -163,32 +190,19 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 
 	id := nodeID(tenantKey, responseID)
 	blobID := BlobID(uuid.New())
-	now := s.clock.Now()
 
-	node := Node{
-		Version:         1,
-		ID:              id,
-		RequestBlobID:   blobID,
-		LastAccessUnix:  now.Unix(),
-		CreatedAt:       now.Unix(),
-		BucketID:        s.cfg.BucketFor(now),
-		RequestBlobSize: uint32(len(requestBlob)),
-		ResponseID:      responseID,
+	node, err := s.buildNode(ctx, tenantKey, previousResponseID)
+	if err != nil {
+		return fmt.Errorf("chainstore.Store: %w", err)
 	}
+	node.ID = id
+	node.RequestBlobID = blobID
+	node.RequestBlobSize = uint32(len(requestBlob))
+	node.ResponseID = responseID
 
 	var children []ChildEntry
-	if previousResponseID != "" {
-		parentID := nodeID(tenantKey, previousResponseID)
-		parent, err := s.backend.GetNode(ctx, parentID)
-		if err != nil {
-			return fmt.Errorf("chainstore.Store: parent lookup: %w", err)
-		}
-		if parent.Depth == math.MaxUint32 {
-			return ErrChainTooDeep
-		}
-		node.ParentID = parentID
-		node.Depth = parent.Depth + 1
-		children = []ChildEntry{{Parent: parentID, Child: id}}
+	if node.ParentID != (NodeID{}) {
+		children = []ChildEntry{{Parent: node.ParentID, Child: id}}
 	}
 
 	if err := s.backend.Commit(ctx, Transaction{
@@ -249,7 +263,6 @@ func (s *Store) StoreWithStaging(ctx context.Context, stagingID, responseID, pre
 	respBlobID := BlobID(uuid.New())
 
 	tx := Transaction{
-		PutNodes: []Node{},
 		PutBlobs: []BlobEntry{{BlobID: respBlobID, Data: responseBlob}},
 		StatsDelta: StatsDelta{
 			EntryDelta: 1,
@@ -275,25 +288,10 @@ func (s *Store) StoreWithStaging(ctx context.Context, stagingID, responseID, pre
 			tx.StatsDelta.BytesDelta += int64(staged.RequestBlobSize)
 		}
 	} else {
-		// No staging: build a minimal node from the supplied arguments.
-		now := s.clock.Now()
-		node = Node{
-			Version:        1,
-			LastAccessUnix: now.Unix(),
-			CreatedAt:      now.Unix(),
-			BucketID:       s.cfg.BucketFor(now),
-		}
-		if previousResponseID != "" {
-			parentID := nodeID(tenantKey, previousResponseID)
-			parent, err := s.backend.GetNode(ctx, parentID)
-			if err != nil {
-				return fmt.Errorf("chainstore.StoreWithStaging: parent lookup: %w", err)
-			}
-			if parent.Depth == math.MaxUint32 {
-				return ErrChainTooDeep
-			}
-			node.ParentID = parentID
-			node.Depth = parent.Depth + 1
+		var err error
+		node, err = s.buildNode(ctx, tenantKey, previousResponseID)
+		if err != nil {
+			return fmt.Errorf("chainstore.StoreWithStaging: %w", err)
 		}
 	}
 
@@ -465,7 +463,8 @@ func (s *Store) ResolveAndStage(ctx context.Context, previousResponseID, tenantK
 	}
 
 	now := s.clock.Now()
-	sid := BlobID(uuid.New())
+	sidUUID := uuid.New()
+	sid := BlobID(sidUUID)
 	reqBlobID := BlobID(uuid.New())
 
 	staging := Node{
@@ -486,5 +485,5 @@ func (s *Store) ResolveAndStage(ctx context.Context, previousResponseID, tenantK
 		return "", nil, fmt.Errorf("chainstore.ResolveAndStage: commit staging: %w", err)
 	}
 
-	return uuid.UUID(sid).String(), turns, nil
+	return sidUUID.String(), turns, nil
 }

@@ -104,7 +104,7 @@ func TestStoreWithStaging_RoundTrip(t *testing.T) {
 	assert.True(t, errors.Is(err, chainstore.ErrNotFound), "staging record must be deleted after commit")
 }
 
-// TestStoreWithStaging_StagingGone checks that blobs are retrievable via Resolve after commit.
+// TestStoreWithStaging_BlobsAccessibleViaResolve checks that both blobs are retrievable via Resolve after a full staging round-trip.
 func TestStoreWithStaging_BlobsAccessibleViaResolve(t *testing.T) {
 	ctx := context.Background()
 	s := openMemStore(t, chainstore.Config{})
