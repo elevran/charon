@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/elevran/charon/internal/charon"
+	"github.com/elevran/charon/internal/httputil"
 	"github.com/elevran/charon/internal/inference"
 )
 
@@ -42,13 +43,13 @@ func (b *streamBuffer) add(item json.RawMessage) {
 }
 
 // shouldFlush returns true when the buffer is non-empty and either:
-//   - limitBytes == -1 (no buffering: flush every item), or
+//   - limitBytes == StoreBufferUnbuffered (no buffering: flush every item), or
 //   - limitBytes > 0 and accumulated bytes have reached the threshold.
 func (b *streamBuffer) shouldFlush(limitBytes int) bool {
 	if len(b.items) == 0 {
 		return false
 	}
-	return limitBytes < 0 || b.totalBytes >= limitBytes
+	return limitBytes == StoreBufferUnbuffered || b.totalBytes >= limitBytes
 }
 
 func (b *streamBuffer) drain() []json.RawMessage {
@@ -77,7 +78,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 
 	inputItems, err := inputToItems(req.Input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid input")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid input")
 		return
 	}
 
@@ -98,7 +99,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 	ch, err := h.inf.Stream(ctx, infMap)
 	if err != nil {
 		h.log.Error("inference stream", "err", err)
-		writeError(w, http.StatusBadGateway, "inference error")
+		httputil.WriteError(w, http.StatusBadGateway, "inference error")
 		return
 	}
 

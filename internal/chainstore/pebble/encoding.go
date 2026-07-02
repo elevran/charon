@@ -2,11 +2,12 @@ package pebble
 
 import (
 	"encoding/binary"
+	"fmt"
 
 	"github.com/elevran/charon/internal/chainstore"
 )
 
-// Node wire layout (111 bytes, big-endian for multi-byte fields):
+// Node wire layout (110 bytes, big-endian for multi-byte fields):
 //
 //	offset  size  field
 //	  0       1    Version
@@ -21,14 +22,13 @@ import (
 //	101       4    ResponseBlobSize
 //	105       4    Depth
 //	109       1    Status           (0=completed, 1=failed)
-//	110       1    BlobType         (0=single, 1=chunked — Phase 6)
 //
 // Node.ResponseID is NOT encoded here; it is stored as a separate
 // pfxResponseID key (see keys.go) to keep this record fixed-size.
 //
 // Big-endian is used for multi-byte numeric fields for consistency with lruKey,
 // where big-endian BucketID encoding is required for correct lexicographic sort order.
-const nodeSize = 111
+const nodeSize = 110
 
 func encodeNode(n chainstore.Node) []byte {
 	b := make([]byte, nodeSize)
@@ -44,11 +44,16 @@ func encodeNode(n chainstore.Node) []byte {
 	binary.BigEndian.PutUint32(b[101:105], n.ResponseBlobSize)
 	binary.BigEndian.PutUint32(b[105:109], n.Depth)
 	b[109] = n.Status
-	b[110] = n.BlobType
 	return b
 }
 
-func decodeNode(b []byte) chainstore.Node {
+func decodeNode(b []byte) (chainstore.Node, error) {
+	if len(b) < nodeSize {
+		return chainstore.Node{}, fmt.Errorf("short node record: len=%d", len(b))
+	}
+	if b[0] != 1 {
+		return chainstore.Node{}, fmt.Errorf("unsupported node version: %d", b[0])
+	}
 	var n chainstore.Node
 	n.Version = b[0]
 	copy(n.ID[:], b[1:21])
@@ -62,6 +67,5 @@ func decodeNode(b []byte) chainstore.Node {
 	n.ResponseBlobSize = binary.BigEndian.Uint32(b[101:105])
 	n.Depth = binary.BigEndian.Uint32(b[105:109])
 	n.Status = b[109]
-	n.BlobType = b[110]
-	return n
+	return n, nil
 }
