@@ -73,7 +73,7 @@ func TestTTLEviction(t *testing.T) {
 	require.NoError(t, s.Store(ctx, "resp_old", "", "", []byte("old")))
 
 	// Advance clock past TTL cutoff.
-	clk.t = clk.t.Add(ttl + time.Second)
+	clk.Advance(ttl + time.Second)
 
 	s.TtlReap(ctx)
 
@@ -111,13 +111,13 @@ func TestStaleBucketSkip(t *testing.T) {
 	require.NoError(t, s.Store(ctx, "expired", "", "", []byte("old")))
 
 	// Insert 100 hot nodes (bucket 2, LastAccessUnix=2h; then resolved at 2.5h).
-	clk.t = hotStoreTime
+	clk.Set(hotStoreTime)
 	for i := 0; i < 100; i++ {
 		require.NoError(t, s.Store(ctx, hotID(i), "", "", []byte("hot")))
 	}
 	// Resolve all hot nodes within the same bucket to update LastAccessUnix without
 	// a bucket move.
-	clk.t = hotResolveTime
+	clk.Set(hotResolveTime)
 	for i := 0; i < 100; i++ {
 		_, err := s.Resolve(ctx, hotID(i), "")
 		require.NoError(t, err)
@@ -131,7 +131,7 @@ func TestStaleBucketSkip(t *testing.T) {
 	assert.Equal(t, bucket2, node.BucketID)
 
 	// Run the TTL reaper at currentTime (cutoff = 2h).
-	clk.t = currentTime
+	clk.Set(currentTime)
 	s.TtlReap(ctx)
 
 	// The expired node should be gone.
@@ -156,7 +156,7 @@ func TestSubtreeEviction(t *testing.T) {
 	require.NoError(t, s.Store(ctx, "child2", "root", "", []byte("c2")))
 	require.NoError(t, s.Store(ctx, "grandchild", "child1", "", []byte("gc")))
 
-	clk.t = clk.t.Add(ttl + time.Second)
+	clk.Advance(ttl + time.Second)
 	s.TtlReap(ctx)
 
 	for _, id := range []string{"root", "child1", "child2", "grandchild"} {
@@ -265,7 +265,7 @@ func TestEvictionCounterConsistency(t *testing.T) {
 	assert.Equal(t, int64(6), bytesBefore)
 
 	// Expire all nodes.
-	clk.t = clk.t.Add(ttl + time.Second)
+	clk.Advance(ttl + time.Second)
 	s.TtlReap(ctx)
 
 	assert.Equal(t, int64(0), s.Entries())
@@ -284,7 +284,7 @@ func TestDeleteNodeNoOrphanedLRU(t *testing.T) {
 	assert.Equal(t, int64(1), s.Entries())
 
 	// Expire and reap.
-	clk.t = clk.t.Add(ttl + time.Second)
+	clk.Advance(ttl + time.Second)
 	s.TtlReap(ctx)
 
 	assert.Equal(t, int64(0), s.Entries())
@@ -317,11 +317,11 @@ func TestCapacityEvictOrphanedChild(t *testing.T) {
 	ctx := context.Background()
 
 	// Store parent in bucket 1 (Unix 3600).
-	clk.t = time.Unix(int64(bucketDur.Seconds()), 0)
+	clk.Set(time.Unix(int64(bucketDur.Seconds()), 0))
 	require.NoError(t, s.Store(ctx, "parent", "", "", []byte("p")))
 
 	// Store child in bucket 2 (Unix 7200) — different bucket so parent is older.
-	clk.t = time.Unix(int64(2*bucketDur.Seconds()), 0)
+	clk.Set(time.Unix(int64(2*bucketDur.Seconds()), 0))
 	require.NoError(t, s.Store(ctx, "child", "parent", "", []byte("c")))
 
 	// entries=2 > MaxEntries=1: EvictOldest picks from bucket 1 (parent only, non-cascading).
@@ -350,6 +350,73 @@ func TestCapacityEvictionByBytes(t *testing.T) {
 
 	s.EvictOldest(ctx)
 	assert.LessOrEqual(t, s.Bytes(), maxBytes)
+}
+
+// TestGoroutineStopsCleanly verifies that Close() terminates all background
+// goroutines (eviction and TTL reaper) promptly. Port of TestTTLWorkerStopsCleanly
+// from internal/worker/worker_test.go.
+func TestGoroutineStopsCleanly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping goroutine-stop test under -short")
+	}
+	// Open the store directly (no t.Cleanup) so we own the Close() call.
+	opts := &crdbpebble.Options{FS: vfs.NewMem()}
+	s, err := chainstorepebble.Open(context.Background(), "", opts, chainstore.Config{
+		MaxEntries:       10,
+		TTL:              time.Hour,
+		StagingTTL:       time.Hour,
+		EvictionInterval: 10 * 365 * 24 * time.Hour,
+		TTLInterval:      10 * 365 * 24 * time.Hour,
+	})
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		_ = s.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// success: Close returned promptly
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not stop background goroutines within 1s")
+	}
+}
+
+// TestTTLWorkerDeletesExpiredNodes verifies the background TTL loop removes
+// expired nodes without needing a manual TtlReap call.
+// Port of TestTTLWorkerDeletesExpired from internal/worker/worker_test.go.
+func TestTTLWorkerDeletesExpiredNodes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timer-based worker test under -short")
+	}
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	const ttl = time.Hour
+
+	// Use a very short TTLInterval so the background goroutine fires quickly.
+	s := openMemStore(t, chainstore.Config{
+		Clock:       clk,
+		TTL:         ttl,
+		TTLInterval: 20 * time.Millisecond,
+	})
+	ctx := context.Background()
+
+	require.NoError(t, s.Store(ctx, "exp1", "", "", []byte("a")))
+	require.NoError(t, s.Store(ctx, "exp2", "", "", []byte("b")))
+	require.NoError(t, s.Store(ctx, "exp3", "", "", []byte("c")))
+
+	// Advance the clock past TTL — the background goroutine will run at the next tick.
+	clk.Advance(ttl + time.Second)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if s.Entries() == 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	assert.Equal(t, int64(0), s.Entries(), "background TTL goroutine must have deleted expired nodes")
 }
 
 // --- helpers ---

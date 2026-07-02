@@ -315,6 +315,34 @@ func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID)
 	return node, nil
 }
 
+// ListStagingOlderThan scans all pfxStaging keys and returns entries whose
+// Node.CreatedAt is less than cutoffUnixSecs. The caller uses these to delete
+// orphaned staging records left by a proxy crash.
+func (b *Backend) ListStagingOlderThan(_ context.Context, cutoffUnixSecs int64) ([]chainstore.StagingEntry, error) {
+	lower := []byte{pfxStaging}
+	upper := []byte{pfxStaging + 1}
+	iter, err := b.db.NewIter(&crdbpebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, fmt.Errorf("chainstore/pebble: ListStagingOlderThan iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	var results []chainstore.StagingEntry
+	for iter.First(); iter.Valid(); iter.Next() {
+		node, err := decodeNode(iter.Value())
+		if err != nil {
+			continue // skip corrupt records
+		}
+		if node.CreatedAt >= cutoffUnixSecs {
+			continue
+		}
+		var sid chainstore.BlobID
+		copy(sid[:], iter.Key()[1:]) // key = pfxStaging(1) + stagingID(16)
+		results = append(results, chainstore.StagingEntry{StagingID: sid, Node: node})
+	}
+	return results, iter.Error()
+}
+
 // Stats returns the persistent entry count and total blob bytes.
 func (b *Backend) Stats(_ context.Context) (int64, int64, error) {
 	val, closer, err := b.db.Get(statsKey)

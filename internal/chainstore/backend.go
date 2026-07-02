@@ -156,8 +156,13 @@ type Backend interface {
 	GetChildren(ctx context.Context, parentID NodeID) ([]NodeID, error)
 
 	// GetStagingNode fetches the partial Node stored under a staging key.
-	// Returns ErrNotFound if the staging record is absent.
+	// Returns ErrUnknownStaging if the staging record is absent.
 	GetStagingNode(ctx context.Context, stagingID BlobID) (Node, error)
+
+	// ListStagingOlderThan returns all staging entries whose Node.CreatedAt
+	// is less than cutoffUnixSecs. Used by the staging TTL reaper to clean
+	// orphaned records left by a proxy crash between ResolveAndStage and StoreWithStaging.
+	ListStagingOlderThan(ctx context.Context, cutoffUnixSecs int64) ([]StagingEntry, error)
 
 	// Stats returns current entry count and total blob bytes.
 	Stats(ctx context.Context) (entries int64, bytes int64, err error)

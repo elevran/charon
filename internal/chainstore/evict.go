@@ -45,11 +45,41 @@ func (s *Store) evictionLoop(ctx context.Context) {
 }
 
 // ttlLoop is the long-running TTL-reaper goroutine.
+// It drives both node TTL reaping and staging-record TTL reaping.
 func (s *Store) ttlLoop(ctx context.Context) {
 	defer s.wg.Done()
 	ticker := time.NewTicker(s.cfg.TTLInterval)
 	defer ticker.Stop()
-	runUntilDone(ctx, ticker.C, nil, func() { s.ttlReap(ctx) })
+	runUntilDone(ctx, ticker.C, nil, func() {
+		s.ttlReap(ctx)
+		s.reapStaging(ctx)
+	})
+}
+
+// reapStaging deletes staging records (and their associated request blobs)
+// whose Node.CreatedAt is older than Config.StagingTTL. These are orphaned
+// records left by a proxy crash between ResolveAndStage and StoreWithStaging.
+func (s *Store) reapStaging(ctx context.Context) {
+	if s.cfg.StagingTTL <= 0 {
+		return
+	}
+	cutoff := s.clock.Now().Add(-s.cfg.StagingTTL).Unix()
+	entries, err := s.backend.ListStagingOlderThan(ctx, cutoff)
+	if err != nil {
+		s.cfg.Log.Error("chainstore: reapStaging scan error", "err", err)
+		return
+	}
+	for _, se := range entries {
+		tx := Transaction{
+			DeleteStagingNodes: []BlobID{se.StagingID},
+		}
+		if se.Node.RequestBlobID != (BlobID{}) {
+			tx.DeleteBlobs = []BlobID{se.Node.RequestBlobID}
+		}
+		if err := s.backend.Commit(ctx, tx); err != nil {
+			s.cfg.Log.Error("chainstore: reapStaging commit error", "stagingID", se.StagingID, "err", err)
+		}
+	}
 }
 
 // evictOldest removes nodes from the oldest bucket until the store is under
