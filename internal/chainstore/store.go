@@ -258,15 +258,25 @@ func (s *Store) Delete(ctx context.Context, responseID, tenantKey string) error 
 // LRU buckets (stale OldBucket delete is a no-op; node ends up in the newer bucket
 // after the later commit). Both races are benign and will be addressed in a future
 // phase with a snapshot-spanning read path.
-func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) ([]Turn, error) {
+func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) (turns []Turn, err error) {
 	start := time.Now()
+	defer func() {
+		if s.metrics == nil {
+			return
+		}
+		status := "ok"
+		if err != nil {
+			status = "error"
+		}
+		s.metrics.resolveLatency.WithLabelValues(status).Observe(time.Since(start).Seconds())
+		if err == nil {
+			s.metrics.chainDepth.Observe(float64(len(turns)))
+		}
+	}()
 
 	id := nodeID(tenantKey, responseID)
 	nodes, err := s.backend.LoadChain(ctx, id)
 	if err != nil {
-		if s.metrics != nil {
-			s.metrics.resolveLatency.WithLabelValues("error").Observe(time.Since(start).Seconds())
-		}
 		return nil, err
 	}
 
@@ -274,12 +284,13 @@ func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) ([]Tu
 	nowUnix := now.Unix()
 	currentBucket := s.cfg.BucketFor(now)
 
-	turns := make([]Turn, len(nodes))
+	turns = make([]Turn, len(nodes))
 	updatedNodes := make([]Node, len(nodes))
 	bucketMoves := make([]BucketMove, 0, len(nodes))
 
 	for i, node := range nodes {
-		reqBlob, respBlob, err := s.backend.GetBlobs(ctx, node)
+		var reqBlob, respBlob []byte
+		reqBlob, respBlob, err = s.backend.GetBlobs(ctx, node)
 		if err != nil {
 			return nil, err
 		}
@@ -303,17 +314,8 @@ func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) ([]Tu
 		updatedNodes[i] = updated
 	}
 
-	commitErr := s.backend.Commit(ctx, Transaction{
+	return turns, s.backend.Commit(ctx, Transaction{
 		PutNodes:    updatedNodes,
 		BucketMoves: bucketMoves,
 	})
-	if s.metrics != nil {
-		status := "ok"
-		if commitErr != nil {
-			status = "error"
-		}
-		s.metrics.resolveLatency.WithLabelValues(status).Observe(time.Since(start).Seconds())
-		s.metrics.chainDepth.Observe(float64(len(nodes)))
-	}
-	return turns, commitErr
 }
