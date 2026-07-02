@@ -339,7 +339,7 @@ func (b *Backend) ListStagingOlderThan(_ context.Context, cutoff time.Time) ([]c
 			continue
 		}
 		var sid chainstore.BlobID
-		copy(sid[:], iter.Key()[1:]) // key = pfxStaging(1) + stagingID(16)
+		copy(sid[:], iter.Key()[1:]) // skip 1-byte prefix, copy 16-byte staging UUID
 		results = append(results, chainstore.StagingEntry{StagingID: sid, Node: node})
 	}
 	return results, iter.Error()
