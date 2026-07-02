@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	crdbpebble "github.com/cockroachdb/pebble"
 
@@ -298,7 +299,7 @@ func (b *Backend) GetChildren(_ context.Context, parentID chainstore.NodeID) ([]
 }
 
 // GetStagingNode fetches the partial Node stored under a staging key.
-// Returns ErrNotFound if the staging record is absent.
+// Returns ErrUnknownStaging if the staging record is absent.
 func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID) (chainstore.Node, error) {
 	val, closer, err := b.db.Get(stagingKey(stagingID))
 	if err != nil {
@@ -313,6 +314,35 @@ func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID)
 		return chainstore.Node{}, fmt.Errorf("chainstore/pebble: decode staging node %x: %w", stagingID, err)
 	}
 	return node, nil
+}
+
+// ListStagingOlderThan scans all pfxStaging keys and returns entries whose
+// Node.CreatedAt is before cutoff. The caller uses these to delete orphaned
+// staging records left by a proxy crash.
+func (b *Backend) ListStagingOlderThan(_ context.Context, cutoff time.Time) ([]chainstore.StagingEntry, error) {
+	lower := []byte{pfxStaging}
+	upper := []byte{pfxStaging + 1}
+	iter, err := b.db.NewIter(&crdbpebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, fmt.Errorf("chainstore/pebble: ListStagingOlderThan iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	cutoffSecs := cutoff.Unix()
+	var results []chainstore.StagingEntry
+	for iter.First(); iter.Valid(); iter.Next() {
+		node, err := decodeNode(iter.Value())
+		if err != nil {
+			continue // skip corrupt records
+		}
+		if node.CreatedAt >= cutoffSecs {
+			continue
+		}
+		var sid chainstore.BlobID
+		copy(sid[:], iter.Key()[1:]) // skip 1-byte prefix, copy 16-byte staging UUID
+		results = append(results, chainstore.StagingEntry{StagingID: sid, Node: node})
+	}
+	return results, iter.Error()
 }
 
 // Stats returns the persistent entry count and total blob bytes.

@@ -201,12 +201,49 @@ func TestPublicFromNode_NoTTL(t *testing.T) {
 	assert.Equal(t, int64(0), pub.ExpiresAt)
 }
 
-// TestRetrieve_NotImplemented checks the stub returns ErrNotImplemented.
-func TestRetrieve_NotImplemented(t *testing.T) {
+// TestRetrieve_RoundTrip checks that Retrieve returns the stored node and blobs.
+func TestRetrieve_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	s := openMemStore(t, chainstore.Config{})
-	_, err := s.Retrieve(ctx, "r0", "")
-	assert.True(t, errors.Is(err, chainstore.ErrNotImplemented))
+
+	require.NoError(t, s.Store(ctx, "r0", "", "", []byte("req")))
+	require.NoError(t, s.Complete(ctx, "r0", "", []byte("resp")))
+
+	node, turn, err := s.Retrieve(ctx, "r0", "")
+	require.NoError(t, err)
+	assert.Equal(t, "r0", turn.ResponseID)
+	assert.Equal(t, []byte("req"), turn.RequestBlob)
+	assert.Equal(t, []byte("resp"), turn.ResponseBlob)
+	assert.Equal(t, uint32(0), node.Depth)
+}
+
+// TestRetrieve_NotFound returns ErrNotFound for a missing node.
+func TestRetrieve_NotFound(t *testing.T) {
+	ctx := context.Background()
+	s := openMemStore(t, chainstore.Config{})
+	_, _, err := s.Retrieve(ctx, "nonexistent", "")
+	assert.True(t, errors.Is(err, chainstore.ErrNotFound))
+}
+
+// TestRetrieve_NoLRUUpdate checks that Retrieve does not promote the LRU bucket.
+func TestRetrieve_NoLRUUpdate(t *testing.T) {
+	bucket1Time := time.Unix(3600, 0)
+	bucket2Time := time.Unix(7200, 0)
+	clk := &fakeClock{t: bucket1Time}
+	s, b := openMemStoreAndBackend(t, chainstore.Config{Clock: clk, BucketDuration: time.Hour})
+	ctx := context.Background()
+
+	require.NoError(t, s.Store(ctx, "r0", "", "", []byte("data")))
+	bucket1 := chainstore.Config{BucketDuration: time.Hour}.BucketFor(bucket1Time)
+
+	// Advance to bucket 2 and Retrieve — bucket must stay at 1.
+	clk.Set(bucket2Time)
+	_, _, err := s.Retrieve(ctx, "r0", "")
+	require.NoError(t, err)
+
+	node, err := b.GetNode(ctx, chainstore.NodeIDFor("", "r0"))
+	require.NoError(t, err)
+	assert.Equal(t, bucket1, node.BucketID, "Retrieve must not promote the LRU bucket")
 }
 
 // TestPing_ReachableBackend checks Ping returns nil for a healthy backend.
@@ -244,4 +281,65 @@ func TestStagingID_CrossStoreAccess(t *testing.T) {
 	// s2 commits the staged turn — succeeds because the UUID is the only gate.
 	err = s2.StoreWithStaging(ctx, stagingID, "r1", "", "", []byte("resp"))
 	assert.NoError(t, err, "cross-store StoreWithStaging must succeed: staging ID is unguessable UUID, not a per-store token")
+}
+
+// TestReapStaging_OrphanCleaned verifies that an orphaned staging record
+// (proxy crashed after ResolveAndStage but before StoreWithStaging) is deleted
+// by the staging TTL reaper once its age exceeds StagingTTL.
+func TestReapStaging_OrphanCleaned(t *testing.T) {
+	ctx := context.Background()
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	const stagingTTL = time.Hour
+	s, b := openMemStoreAndBackend(t, chainstore.Config{
+		Clock:      clk,
+		StagingTTL: stagingTTL,
+	})
+
+	// Simulate a staging record created by ResolveAndStage.
+	stagingID, _, err := s.ResolveAndStage(ctx, "", "", []byte("req"))
+	require.NoError(t, err)
+	sid := parseStagingID(t, stagingID)
+
+	// Capture the staged node so we can verify its blob is also deleted.
+	staged, err := b.GetStagingNode(ctx, sid)
+	require.NoError(t, err, "staging record must exist before reaping")
+	require.NotEqual(t, chainstore.BlobID{}, staged.RequestBlobID, "staged node must have a request blob")
+
+	// Advance clock to just before the TTL — reaper must leave it alone.
+	clk.Advance(stagingTTL - time.Second)
+	s.ReapStaging(ctx)
+	_, err = b.GetStagingNode(ctx, sid)
+	require.NoError(t, err, "staging record must survive before StagingTTL elapses")
+
+	// Advance clock past the TTL — reaper must delete the record and its request blob.
+	clk.Advance(2 * time.Second)
+	s.ReapStaging(ctx)
+	_, err = b.GetStagingNode(ctx, sid)
+	assert.True(t, errors.Is(err, chainstore.ErrUnknownStaging), "staging record must be gone after reaping")
+	reqBlob, _, err := b.GetBlobs(ctx, staged)
+	assert.Error(t, err, "request blob must be gone after reaping")
+	assert.Nil(t, reqBlob)
+}
+
+// TestReapStaging_ActiveNotCleaned verifies that a staging record whose age is
+// below StagingTTL is not deleted by the reaper.
+func TestReapStaging_ActiveNotCleaned(t *testing.T) {
+	ctx := context.Background()
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	const stagingTTL = time.Hour
+	s, b := openMemStoreAndBackend(t, chainstore.Config{
+		Clock:      clk,
+		StagingTTL: stagingTTL,
+	})
+
+	stagingID, _, err := s.ResolveAndStage(ctx, "", "", []byte("req"))
+	require.NoError(t, err)
+	sid := parseStagingID(t, stagingID)
+
+	// Advance by less than StagingTTL.
+	clk.Advance(stagingTTL / 2)
+	s.ReapStaging(ctx)
+
+	_, err = b.GetStagingNode(ctx, sid)
+	assert.NoError(t, err, "active staging record must not be reaped before StagingTTL")
 }

@@ -38,6 +38,10 @@ type Config struct {
 	Log              *slog.Logger          // nil = slog.Default()
 	Backend          Backend               // required — supply via pebble.Open() or dynamodb.Open()
 	Registerer       prometheus.Registerer // nil = no metrics
+	// StagingTTL is the maximum lifetime of an orphaned staging record.
+	// Staging records older than this are deleted by the background reaper.
+	// Set to 0 to disable staging reaping. Default when non-zero: 1h.
+	StagingTTL time.Duration
 }
 
 func (c Config) bucketDuration() time.Duration {
@@ -137,7 +141,7 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		s.wg.Add(1)
 		go s.evictionLoop(s.ctx)
 	}
-	if cfg.TTL > 0 {
+	if cfg.TTL > 0 || cfg.StagingTTL > 0 {
 		s.wg.Add(1)
 		go s.ttlLoop(s.ctx)
 	}
@@ -319,11 +323,24 @@ func (s *Store) StoreWithStaging(ctx context.Context, stagingID, responseID, pre
 	return nil
 }
 
-// Retrieve fetches a single node's metadata without updating LastAccessUnix or the
-// LRU index. Returns ErrNotFound if responseID does not exist.
-// TODO(phase-4b): implement — stub present to satisfy the HTTP handler interface.
-func (s *Store) Retrieve(_ context.Context, _, _ string) (PublicNode, error) {
-	return PublicNode{}, ErrNotImplemented
+// Retrieve fetches a single node and both its blobs without updating
+// LastAccessUnix or the LRU index. Returns ErrNotFound if responseID does not exist.
+func (s *Store) Retrieve(ctx context.Context, responseID, tenantKey string) (Node, Turn, error) {
+	id := nodeID(tenantKey, responseID)
+	node, err := s.backend.GetNode(ctx, id)
+	if err != nil {
+		return Node{}, Turn{}, fmt.Errorf("chainstore.Retrieve: %w", err)
+	}
+	reqBlob, respBlob, err := s.backend.GetBlobs(ctx, node)
+	if err != nil {
+		return Node{}, Turn{}, fmt.Errorf("chainstore.Retrieve: get blobs: %w", err)
+	}
+	turn := Turn{
+		ResponseID:   responseID,
+		RequestBlob:  reqBlob,
+		ResponseBlob: respBlob,
+	}
+	return node, turn, nil
 }
 
 // Ping performs a metadata read to verify the backend is reachable.
