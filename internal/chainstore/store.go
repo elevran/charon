@@ -280,7 +280,9 @@ func (s *Store) StoreWithStaging(ctx context.Context, stagingID, responseID, pre
 		sid := BlobID(uid)
 		staged, err := s.backend.GetStagingNode(ctx, sid)
 		if err != nil {
-			return fmt.Errorf("chainstore.StoreWithStaging: staging lookup: %w", err)
+			// ErrUnknownStaging propagates as-is so callers can distinguish
+			// "staging record absent" from "node not found" via errors.Is.
+			return fmt.Errorf("chainstore.StoreWithStaging: %w", err)
 		}
 		node = staged
 		tx.DeleteStagingNodes = []BlobID{sid}
@@ -319,6 +321,7 @@ func (s *Store) StoreWithStaging(ctx context.Context, stagingID, responseID, pre
 
 // Retrieve fetches a single node's metadata without updating LastAccessUnix or the
 // LRU index. Returns ErrNotFound if responseID does not exist.
+// TODO(phase-4b): implement — stub present to satisfy the HTTP handler interface.
 func (s *Store) Retrieve(_ context.Context, _, _ string) (PublicNode, error) {
 	return PublicNode{}, ErrNotImplemented
 }
@@ -333,6 +336,11 @@ func (s *Store) Ping(ctx context.Context) error {
 // or only the named node (keepDescendants=true, leaving descendants with dangling
 // parent pointers — caller's responsibility).
 // Returns ErrNotFound if responseID does not exist.
+//
+// TODO(phase-4b): if a staging record targeting responseID as its parent exists
+// at delete time (caller did ResolveAndStage then Delete before StoreWithStaging),
+// neither the staging record nor its request blob are reaped here — they are
+// stranded in pfxStaging/pfxBlob with no path to eviction.
 func (s *Store) Delete(ctx context.Context, responseID, tenantKey string, keepDescendants bool) error {
 	id := nodeID(tenantKey, responseID)
 	node, err := s.backend.GetNode(ctx, id)
@@ -472,10 +480,20 @@ func (s *Store) ResolveAndStage(ctx context.Context, previousResponseID, tenantK
 		RequestBlobSize: uint32(len(requestBlob)),
 		CreatedAt:       now.Unix(),
 		LastAccessUnix:  now.Unix(),
-		BucketID:        s.cfg.BucketFor(now),
-		Depth:           depth,
+		// BucketID is stored so encodeNode/decodeNode round-trips cleanly, but the
+		// staging prefix (pfxStaging=0x07) is outside chain-walk and eviction scan
+		// ranges, so this bucket value is never read or promoted.
+		BucketID: s.cfg.BucketFor(now),
+		Depth:    depth,
 	}
 
+	// TODO(phase-4b): staging bytes (reqBlobID) are written to pfxBlob but not
+	// reflected in s.bytes, so a caller that spams ResolveAndStage without calling
+	// StoreWithStaging can accumulate bytes below the capacity trigger.  Fixing this
+	// requires incrementing s.bytes here and decrementing it in StoreWithStaging to
+	// avoid double-counting, plus a startup sweeper for crash-orphaned staging blobs
+	// (staging record survives a crash between this Commit and the StoreWithStaging
+	// Commit; the request blob is then stranded in pfxBlob forever).
 	if err = s.backend.Commit(ctx, Transaction{
 		PutStagingNodes: []StagingEntry{{StagingID: sid, Node: staging}},
 		PutBlobs:        []BlobEntry{{BlobID: reqBlobID, Data: requestBlob}},

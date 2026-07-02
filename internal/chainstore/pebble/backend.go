@@ -302,7 +302,10 @@ func (b *Backend) GetChildren(_ context.Context, parentID chainstore.NodeID) ([]
 func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID) (chainstore.Node, error) {
 	val, closer, err := b.db.Get(stagingKey(stagingID))
 	if err != nil {
-		return chainstore.Node{}, mapErr(err)
+		if err == crdbpebble.ErrNotFound {
+			return chainstore.Node{}, chainstore.ErrUnknownStaging
+		}
+		return chainstore.Node{}, err
 	}
 	defer func() { _ = closer.Close() }()
 	node, err := decodeNode(val)

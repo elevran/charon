@@ -13,6 +13,7 @@ var (
 	ErrStoreFull      = errors.New("store full: configured capacity exceeded")
 	ErrChainTooDeep   = errors.New("chain too deep: depth would overflow")
 	ErrNotImplemented = errors.New("not implemented")
+	ErrUnknownStaging = errors.New("unknown staging id: staging record absent or already committed")
 )
 
 // Turn is the data returned to callers by Resolve.

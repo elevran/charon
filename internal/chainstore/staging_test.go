@@ -6,11 +6,14 @@ import (
 	"testing"
 	"time"
 
+	crdbpebble "github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/elevran/charon/internal/chainstore"
+	chainstorepebble "github.com/elevran/charon/internal/chainstore/pebble"
 )
 
 // parseStagingID converts the opaque stagingID string returned by ResolveAndStage
@@ -90,7 +93,7 @@ func TestStoreWithStaging_RoundTrip(t *testing.T) {
 	// Staging record must be gone.
 	sid := parseStagingID(t, stagingID)
 	_, err = b.GetStagingNode(ctx, sid)
-	assert.True(t, errors.Is(err, chainstore.ErrNotFound), "staging record must be deleted after commit")
+	assert.True(t, errors.Is(err, chainstore.ErrUnknownStaging), "staging record must be deleted after commit")
 }
 
 // TestStoreWithStaging_BlobsAccessibleViaResolve checks that both blobs are retrievable via Resolve after a full staging round-trip.
@@ -109,14 +112,14 @@ func TestStoreWithStaging_BlobsAccessibleViaResolve(t *testing.T) {
 	assert.Equal(t, []byte("resp1"), turns[0].ResponseBlob)
 }
 
-// TestStoreWithStaging_UnknownStagingID returns ErrNotFound for a bogus ID.
+// TestStoreWithStaging_UnknownStagingID returns ErrUnknownStaging for a bogus ID.
 func TestStoreWithStaging_UnknownStagingID(t *testing.T) {
 	ctx := context.Background()
 	s := openMemStore(t, chainstore.Config{})
 
 	bogus := uuid.New().String()
 	err := s.StoreWithStaging(ctx, bogus, "r1", "", "", []byte("resp"))
-	assert.True(t, errors.Is(err, chainstore.ErrNotFound))
+	assert.True(t, errors.Is(err, chainstore.ErrUnknownStaging))
 }
 
 // TestStoreWithStaging_NoStaging checks that stagingID="" writes responseBlob directly.
@@ -211,4 +214,34 @@ func TestPing_ReachableBackend(t *testing.T) {
 	ctx := context.Background()
 	s := openMemStore(t, chainstore.Config{})
 	assert.NoError(t, s.Ping(ctx))
+}
+
+// TestStagingID_CrossStoreAccess documents the design intent: staging IDs are
+// unguessable UUIDs but carry no per-Store ownership token.  A second *Store
+// wired to the same backend can call StoreWithStaging with a staging ID that
+// another Store created, and it succeeds — the UUID's cryptographic randomness
+// is the only guard, not an authenticator.
+func TestStagingID_CrossStoreAccess(t *testing.T) {
+	ctx := context.Background()
+	opts := &crdbpebble.Options{FS: vfs.NewMem()}
+	b, err := chainstorepebble.OpenBackend("", opts)
+	require.NoError(t, err)
+
+	s1, err := chainstore.New(ctx, chainstore.Config{Backend: b})
+	require.NoError(t, err)
+	// s1.Close() closes the shared backend; s2 must not call Close again.
+	t.Cleanup(func() { _ = s1.Close() })
+
+	// s2 shares the backend with s1. With a default Config (no MaxEntries/MaxBytes/TTL)
+	// no background goroutines are started, so no cleanup is needed — s1.Close() will
+	// shut down the shared Pebble backend.
+	s2, err := chainstore.New(ctx, chainstore.Config{Backend: b})
+	require.NoError(t, err)
+
+	stagingID, _, err := s1.ResolveAndStage(ctx, "", "", []byte("req"))
+	require.NoError(t, err)
+
+	// s2 commits the staged turn — succeeds because the UUID is the only gate.
+	err = s2.StoreWithStaging(ctx, stagingID, "r1", "", "", []byte("resp"))
+	assert.NoError(t, err, "cross-store StoreWithStaging must succeed: staging ID is unguessable UUID, not a per-store token")
 }
