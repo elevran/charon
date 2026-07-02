@@ -54,8 +54,11 @@ func (b *Backend) LoadChain(_ context.Context, leaf chainstore.NodeID) ([]chains
 			// capacity-evicted (non-cascading deleteNode). Not disk corruption.
 			return nil, chainstore.ErrChainExpired
 		}
-		node := decodeNode(val)
+		node, err := decodeNode(val)
 		_ = closer.Close()
+		if err != nil {
+			return nil, fmt.Errorf("chainstore/pebble: decode node %x: %w", cur, err)
+		}
 		if ridVal, ridCloser, ridErr := snap.Get(responseIDKey(cur)); ridErr == nil {
 			node.ResponseID = string(ridVal)
 			_ = ridCloser.Close()
@@ -76,7 +79,10 @@ func (b *Backend) GetNode(_ context.Context, id chainstore.NodeID) (chainstore.N
 		return chainstore.Node{}, mapErr(err)
 	}
 	defer func() { _ = closer.Close() }()
-	node := decodeNode(val)
+	node, err := decodeNode(val)
+	if err != nil {
+		return chainstore.Node{}, fmt.Errorf("chainstore/pebble: decode node %x: %w", id, err)
+	}
 	if ridVal, ridCloser, ridErr := b.db.Get(responseIDKey(id)); ridErr == nil {
 		node.ResponseID = string(ridVal)
 		_ = ridCloser.Close()
@@ -322,11 +328,11 @@ func OpenBackend(dir string, opts *crdbpebble.Options) (*Backend, error) {
 // fully-started *chainstore.Store. It is the standard entry point for production use.
 // Pass dir="" with vfs.NewMem() in Options.FS for in-memory use in tests.
 // opts may be nil; StatsMerger is always set to enable stats accumulation.
-func Open(dir string, opts *crdbpebble.Options, cfg chainstore.Config) (*chainstore.Store, error) {
+func Open(ctx context.Context, dir string, opts *crdbpebble.Options, cfg chainstore.Config) (*chainstore.Store, error) {
 	b, err := OpenBackend(dir, opts)
 	if err != nil {
 		return nil, err
 	}
 	cfg.Backend = b
-	return chainstore.New(cfg)
+	return chainstore.New(ctx, cfg)
 }

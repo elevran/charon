@@ -23,22 +23,38 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		ResponseBlobSize: 131072,
 		Depth:            7,
 		Status:           chainstore.NodeStatusFailed,
-		BlobType:         chainstore.BlobTypeSingle,
 		// ResponseID is stored as a separate pfxResponseID key, not encoded here.
 	}
 
 	encoded := encodeNode(node)
 	require.Len(t, encoded, nodeSize, "encoded size must be nodeSize")
 
-	decoded := decodeNode(encoded)
+	decoded, err := decodeNode(encoded)
+	require.NoError(t, err)
 	assert.Equal(t, node, decoded, "round-trip must produce identical node")
 }
 
 func TestEncodeZeroNode(t *testing.T) {
-	var node chainstore.Node
+	// Version 0 is not valid; set version=1 for a clean round-trip test.
+	node := chainstore.Node{Version: 1}
 	encoded := encodeNode(node)
-	decoded := decodeNode(encoded)
+	decoded, err := decodeNode(encoded)
+	require.NoError(t, err)
 	assert.Equal(t, node, decoded)
+}
+
+func TestDecodeUnsupportedVersion(t *testing.T) {
+	node := chainstore.Node{Version: 2}
+	encoded := encodeNode(node)
+	_, err := decodeNode(encoded)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported node version")
+}
+
+func TestDecodeShortRecord(t *testing.T) {
+	_, err := decodeNode(make([]byte, nodeSize-1))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "short node record")
 }
 
 func TestEncodeAllFields(t *testing.T) {
@@ -49,45 +65,38 @@ func TestEncodeAllFields(t *testing.T) {
 	}{
 		{
 			name: "non-zero LastAccessUnix",
-			node: chainstore.Node{LastAccessUnix: -1},
+			node: chainstore.Node{Version: 1, LastAccessUnix: -1},
 		},
 		{
 			name: "non-zero CreatedAt",
-			node: chainstore.Node{CreatedAt: 9999999999},
+			node: chainstore.Node{Version: 1, CreatedAt: 9999999999},
 		},
 		{
 			name: "max BucketID",
-			node: chainstore.Node{BucketID: ^chainstore.BucketID(0)},
+			node: chainstore.Node{Version: 1, BucketID: ^chainstore.BucketID(0)},
 		},
 		{
 			name: "max RequestBlobSize",
-			node: chainstore.Node{RequestBlobSize: ^uint32(0)},
+			node: chainstore.Node{Version: 1, RequestBlobSize: ^uint32(0)},
 		},
 		{
 			name: "max ResponseBlobSize",
-			node: chainstore.Node{ResponseBlobSize: ^uint32(0)},
+			node: chainstore.Node{Version: 1, ResponseBlobSize: ^uint32(0)},
 		},
 		{
 			name: "max Depth",
-			node: chainstore.Node{Depth: ^uint32(0)},
+			node: chainstore.Node{Version: 1, Depth: ^uint32(0)},
 		},
 		{
 			name: "status failed",
-			node: chainstore.Node{Status: chainstore.NodeStatusFailed},
-		},
-		{
-			name: "blob type chunked",
-			node: chainstore.Node{BlobType: chainstore.BlobTypeChunked},
-		},
-		{
-			name: "version 1",
-			node: chainstore.Node{Version: 1},
+			node: chainstore.Node{Version: 1, Status: chainstore.NodeStatusFailed},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			decoded := decodeNode(encodeNode(tc.node))
+			decoded, err := decodeNode(encodeNode(tc.node))
+			require.NoError(t, err)
 			assert.Equal(t, tc.node, decoded)
 		})
 	}

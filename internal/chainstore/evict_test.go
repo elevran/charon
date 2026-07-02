@@ -227,7 +227,7 @@ func TestStatsReload(t *testing.T) {
 	opts := &crdbpebble.Options{FS: memFS}
 	ctx := context.Background()
 
-	s1, err := chainstorepebble.Open("", opts, chainstore.Config{})
+	s1, err := chainstorepebble.Open(ctx, "", opts, chainstore.Config{})
 	require.NoError(t, err)
 
 	require.NoError(t, s1.Store(ctx, "r1", "", "", []byte("hello")))
@@ -240,7 +240,7 @@ func TestStatsReload(t *testing.T) {
 	require.NoError(t, s1.Close())
 
 	// Reopen using the same in-memory FS.
-	s2, err := chainstorepebble.Open("", opts, chainstore.Config{})
+	s2, err := chainstorepebble.Open(ctx, "", opts, chainstore.Config{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s2.Close() })
 

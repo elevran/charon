@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Clock abstracts time. Injected into Store so tests can simulate days in milliseconds.
@@ -25,15 +26,18 @@ func (RealClock) Now() time.Time { return time.Now() }
 
 // Config holds all parameters for a Store.
 type Config struct {
-	MaxEntries       int64
-	MaxBytes         int64
+	MaxEntries int64
+	MaxBytes   int64
+	// TTL is the maximum age of a chain. Set to 0 to disable TTL-based eviction.
+	// Effective TTL precision is ±BucketDuration; set BucketDuration < TTL/100 for sub-percent accuracy.
 	TTL              time.Duration
-	BucketDuration   time.Duration // LRU bucket width; default 1h
-	EvictionInterval time.Duration // ticker period for capacity eviction; default 1m
-	TTLInterval      time.Duration // ticker period for TTL reaper; default 5m
-	Clock            Clock         // nil = RealClock
-	Log              *slog.Logger  // nil = slog.Default()
-	Backend          Backend       // required — supply via pebble.Open() or dynamodb.Open()
+	BucketDuration   time.Duration         // LRU bucket width; default 1h
+	EvictionInterval time.Duration         // ticker period for capacity eviction; default 1m
+	TTLInterval      time.Duration         // ticker period for TTL reaper; default 5m
+	Clock            Clock                 // nil = RealClock
+	Log              *slog.Logger          // nil = slog.Default()
+	Backend          Backend               // required — supply via pebble.Open() or dynamodb.Open()
+	Registerer       prometheus.Registerer // nil = no metrics
 }
 
 func (c Config) bucketDuration() time.Duration {
@@ -66,24 +70,24 @@ type Store struct {
 	nudgeEvict chan struct{}
 	nudgeCount atomic.Int64 // counts successful nudge sends; exported via export_test.go
 
+	metrics *storeMetrics
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
 // Entries returns the approximate number of stored nodes (updated optimistically on write/delete).
-// May transiently return a negative value under heavy concurrent eviction; callers should
-// treat negative as zero when computing display values.
-func (s *Store) Entries() int64 { return s.entries.Load() }
+func (s *Store) Entries() int64 { return max(s.entries.Load(), 0) }
 
 // Bytes returns the approximate total blob bytes (updated optimistically on write/delete).
-// May transiently return a negative value under heavy concurrent eviction; callers should
-// treat negative as zero when computing display values.
-func (s *Store) Bytes() int64 { return s.bytes.Load() }
+func (s *Store) Bytes() int64 { return max(s.bytes.Load(), 0) }
 
 // New wires cfg into a Store and starts background goroutines.
+// ctx is used only for the initial Stats() call to reload persistent counters;
+// the store's own background goroutines run on an internal context.
 // Callers should use pebble.Open() or dynamodb.Open() rather than calling New directly.
-func New(cfg Config) (*Store, error) {
+func New(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.Backend == nil {
 		return nil, errors.New("chainstore.New: Backend is required")
 	}
@@ -103,20 +107,30 @@ func New(cfg Config) (*Store, error) {
 		cfg.Log = slog.Default()
 	}
 
+	m, err := newStoreMetrics(cfg.Registerer)
+	if err != nil {
+		return nil, fmt.Errorf("chainstore.New: register metrics: %w", err)
+	}
+
 	s := &Store{
 		cfg:        cfg,
 		backend:    cfg.Backend,
 		clock:      cfg.Clock,
 		nudgeEvict: make(chan struct{}, 1),
+		metrics:    m,
 	}
 
 	// Reload stats from the persistent stats key so in-memory counters survive restarts.
-	entries, bytes, err := cfg.Backend.Stats(context.Background())
+	entries, bytes, err := cfg.Backend.Stats(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("chainstore.New: reload stats: %w", err)
 	}
 	s.entries.Store(entries)
 	s.bytes.Store(bytes)
+	if m != nil {
+		m.entries.Set(float64(entries))
+		m.bytes.Set(float64(bytes))
+	}
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	if cfg.MaxEntries > 0 || cfg.MaxBytes > 0 {
@@ -198,6 +212,39 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 	return nil
 }
 
+// Complete stores the response blob for a previously stored turn.
+// Returns ErrNotFound if responseID does not exist.
+func (s *Store) Complete(ctx context.Context, responseID, tenantKey string, responseBlob []byte) error {
+	id := nodeID(tenantKey, responseID)
+	node, err := s.backend.GetNode(ctx, id)
+	if err != nil {
+		return fmt.Errorf("chainstore.Complete: node lookup: %w", err)
+	}
+	blobID := BlobID(uuid.New())
+	node.ResponseBlobID = blobID
+	node.ResponseBlobSize = uint32(len(responseBlob))
+	if err := s.backend.Commit(ctx, Transaction{
+		PutNodes:   []Node{node},
+		PutBlobs:   []BlobEntry{{BlobID: blobID, Data: responseBlob}},
+		StatsDelta: StatsDelta{BytesDelta: int64(len(responseBlob))},
+	}); err != nil {
+		return fmt.Errorf("chainstore.Complete: commit: %w", err)
+	}
+	s.bytes.Add(int64(len(responseBlob)))
+	return nil
+}
+
+// Delete removes a turn and all its descendants.
+// Returns ErrNotFound if responseID does not exist.
+func (s *Store) Delete(ctx context.Context, responseID, tenantKey string) error {
+	id := nodeID(tenantKey, responseID)
+	if _, err := s.backend.GetNode(ctx, id); err != nil {
+		return fmt.Errorf("chainstore.Delete: %w", err)
+	}
+	s.deleteSubtree(ctx, id)
+	return nil
+}
+
 // Resolve walks the chain from responseID to the root and returns all turns root-first.
 // Each Turn carries both request and response blobs; ResponseBlob is nil for turns not
 // yet completed (ResponseBlobID is zero). Updates LastAccessUnix and promotes LRU bucket
@@ -211,7 +258,22 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 // LRU buckets (stale OldBucket delete is a no-op; node ends up in the newer bucket
 // after the later commit). Both races are benign and will be addressed in a future
 // phase with a snapshot-spanning read path.
-func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) ([]Turn, error) {
+func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) (turns []Turn, err error) {
+	start := time.Now()
+	defer func() {
+		if s.metrics == nil {
+			return
+		}
+		status := "ok"
+		if err != nil {
+			status = "error"
+		}
+		s.metrics.resolveLatency.WithLabelValues(status).Observe(time.Since(start).Seconds())
+		if err == nil {
+			s.metrics.chainDepth.Observe(float64(len(turns)))
+		}
+	}()
+
 	id := nodeID(tenantKey, responseID)
 	nodes, err := s.backend.LoadChain(ctx, id)
 	if err != nil {
@@ -222,12 +284,13 @@ func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) ([]Tu
 	nowUnix := now.Unix()
 	currentBucket := s.cfg.BucketFor(now)
 
-	turns := make([]Turn, len(nodes))
+	turns = make([]Turn, len(nodes))
 	updatedNodes := make([]Node, len(nodes))
 	bucketMoves := make([]BucketMove, 0, len(nodes))
 
 	for i, node := range nodes {
-		reqBlob, respBlob, err := s.backend.GetBlobs(ctx, node)
+		var reqBlob, respBlob []byte
+		reqBlob, respBlob, err = s.backend.GetBlobs(ctx, node)
 		if err != nil {
 			return nil, err
 		}
