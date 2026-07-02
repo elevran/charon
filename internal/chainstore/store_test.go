@@ -3,6 +3,7 @@ package chainstore_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,9 +17,30 @@ import (
 )
 
 // fakeClock is an injectable clock whose value advances only when set explicitly.
-type fakeClock struct{ t time.Time }
+// Thread-safe: Now() and Set() may be called from concurrent goroutines (e.g. when
+// the test advances time while a background goroutine holds a reference to the clock).
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
 
-func (c *fakeClock) Now() time.Time { return c.t }
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = t
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
 
 // openMemStore opens a fully-wired *chainstore.Store backed by an in-memory Pebble VFS.
 // The returned store must be closed by the caller.
@@ -106,7 +128,7 @@ func TestResolveLastAccessUnixUpdated(t *testing.T) {
 
 	require.NoError(t, s.Store(ctx, "resp_a", "", "", []byte("data")))
 
-	clk.t = resolveTime
+	clk.Set(resolveTime)
 	_, err := s.Resolve(ctx, "resp_a", "")
 	require.NoError(t, err)
 
@@ -125,7 +147,7 @@ func TestResolveBucketMoveOnBucketCross(t *testing.T) {
 
 	require.NoError(t, s.Store(ctx, "resp_a", "", "", []byte("data")))
 
-	clk.t = bucket2Time
+	clk.Set(bucket2Time)
 	turns, err := s.Resolve(ctx, "resp_a", "")
 	require.NoError(t, err)
 	require.Len(t, turns, 1)
@@ -149,7 +171,7 @@ func TestResolveBucketMoveSkippedSameBucket(t *testing.T) {
 	require.NoError(t, s.Store(ctx, "resp_a", "", "", []byte("data")))
 	originalBucket := chainstore.Config{BucketDuration: time.Hour}.BucketFor(t0)
 
-	clk.t = t1
+	clk.Set(t1)
 	turns, err := s.Resolve(ctx, "resp_a", "")
 	require.NoError(t, err)
 	require.Len(t, turns, 1)
