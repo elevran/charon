@@ -38,13 +38,14 @@ func TestCrashRecovery(t *testing.T) {
 	s1, err := chainstore.New(ctx, chainstore.Config{Backend: b1})
 	require.NoError(t, err)
 
+	rid := func(i int) string { return fmt.Sprintf("resp_%04d", i) }
+
 	for i := range nodeCount {
-		respID := fmt.Sprintf("resp_%04d", i)
 		var prevID string
 		if i > 0 {
-			prevID = fmt.Sprintf("resp_%04d", i-1)
+			prevID = rid(i - 1)
 		}
-		require.NoError(t, s1.Store(ctx, respID, prevID, "", []byte(fmt.Sprintf("blob-%d", i))))
+		require.NoError(t, s1.Store(ctx, rid(i), prevID, "", []byte(fmt.Sprintf("blob-%d", i))))
 	}
 
 	// Simulate a crash: close ONLY the backend without calling Store.Close().
@@ -62,12 +63,11 @@ func TestCrashRecovery(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s2.Close() })
 
-	// Spot-check every node via Resolve from the leaf.
-	for i := range nodeCount {
-		respID := fmt.Sprintf("resp_%04d", i)
-		turns, err := s2.Resolve(ctx, respID, "")
-		require.NoError(t, err, "node %d must be readable after crash recovery", i)
-		assert.Len(t, turns, i+1, "chain depth must match position")
-		assert.Equal(t, respID, turns[len(turns)-1].ResponseID)
+	// Resolve from the leaf: one call returns the full chain, validating every node.
+	turns, err := s2.Resolve(ctx, rid(nodeCount-1), "")
+	require.NoError(t, err, "leaf must be readable after crash recovery")
+	require.Len(t, turns, nodeCount, "chain must be complete after crash recovery")
+	for i, turn := range turns {
+		assert.Equal(t, rid(i), turn.ResponseID, "turn %d has wrong ResponseID", i)
 	}
 }

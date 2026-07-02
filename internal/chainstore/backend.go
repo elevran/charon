@@ -3,6 +3,7 @@ package chainstore
 import (
 	"context"
 	"crypto/sha256"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -160,9 +161,9 @@ type Backend interface {
 	GetStagingNode(ctx context.Context, stagingID BlobID) (Node, error)
 
 	// ListStagingOlderThan returns all staging entries whose Node.CreatedAt
-	// is less than cutoffUnixSecs. Used by the staging TTL reaper to clean
-	// orphaned records left by a proxy crash between ResolveAndStage and StoreWithStaging.
-	ListStagingOlderThan(ctx context.Context, cutoffUnixSecs int64) ([]StagingEntry, error)
+	// is before cutoff. Used by the staging TTL reaper to clean orphaned records
+	// left by a proxy crash between ResolveAndStage and StoreWithStaging.
+	ListStagingOlderThan(ctx context.Context, cutoff time.Time) ([]StagingEntry, error)
 
 	// Stats returns current entry count and total blob bytes.
 	Stats(ctx context.Context) (entries int64, bytes int64, err error)

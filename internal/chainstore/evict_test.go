@@ -409,14 +409,9 @@ func TestTTLWorkerDeletesExpiredNodes(t *testing.T) {
 	// Advance the clock past TTL — the background goroutine will run at the next tick.
 	clk.Advance(ttl + time.Second)
 
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if s.Entries() == 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	assert.Equal(t, int64(0), s.Entries(), "background TTL goroutine must have deleted expired nodes")
+	assert.Eventually(t, func() bool { return s.Entries() == 0 },
+		500*time.Millisecond, 5*time.Millisecond,
+		"background TTL goroutine must have deleted expired nodes")
 }
 
 // --- helpers ---

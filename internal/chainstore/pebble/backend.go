@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	crdbpebble "github.com/cockroachdb/pebble"
 
@@ -316,9 +317,9 @@ func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID)
 }
 
 // ListStagingOlderThan scans all pfxStaging keys and returns entries whose
-// Node.CreatedAt is less than cutoffUnixSecs. The caller uses these to delete
-// orphaned staging records left by a proxy crash.
-func (b *Backend) ListStagingOlderThan(_ context.Context, cutoffUnixSecs int64) ([]chainstore.StagingEntry, error) {
+// Node.CreatedAt is before cutoff. The caller uses these to delete orphaned
+// staging records left by a proxy crash.
+func (b *Backend) ListStagingOlderThan(_ context.Context, cutoff time.Time) ([]chainstore.StagingEntry, error) {
 	lower := []byte{pfxStaging}
 	upper := []byte{pfxStaging + 1}
 	iter, err := b.db.NewIter(&crdbpebble.IterOptions{LowerBound: lower, UpperBound: upper})
@@ -327,13 +328,14 @@ func (b *Backend) ListStagingOlderThan(_ context.Context, cutoffUnixSecs int64) 
 	}
 	defer func() { _ = iter.Close() }()
 
+	cutoffSecs := cutoff.Unix()
 	var results []chainstore.StagingEntry
 	for iter.First(); iter.Valid(); iter.Next() {
 		node, err := decodeNode(iter.Value())
 		if err != nil {
 			continue // skip corrupt records
 		}
-		if node.CreatedAt >= cutoffUnixSecs {
+		if node.CreatedAt >= cutoffSecs {
 			continue
 		}
 		var sid chainstore.BlobID

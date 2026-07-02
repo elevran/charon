@@ -63,22 +63,23 @@ func (s *Store) reapStaging(ctx context.Context) {
 	if s.cfg.StagingTTL <= 0 {
 		return
 	}
-	cutoff := s.clock.Now().Add(-s.cfg.StagingTTL).Unix()
-	entries, err := s.backend.ListStagingOlderThan(ctx, cutoff)
+	entries, err := s.backend.ListStagingOlderThan(ctx, s.clock.Now().Add(-s.cfg.StagingTTL))
 	if err != nil {
 		s.cfg.Log.Error("chainstore: reapStaging scan error", "err", err)
 		return
 	}
+	if len(entries) == 0 {
+		return
+	}
+	tx := Transaction{}
 	for _, se := range entries {
-		tx := Transaction{
-			DeleteStagingNodes: []BlobID{se.StagingID},
-		}
+		tx.DeleteStagingNodes = append(tx.DeleteStagingNodes, se.StagingID)
 		if se.Node.RequestBlobID != (BlobID{}) {
-			tx.DeleteBlobs = []BlobID{se.Node.RequestBlobID}
+			tx.DeleteBlobs = append(tx.DeleteBlobs, se.Node.RequestBlobID)
 		}
-		if err := s.backend.Commit(ctx, tx); err != nil {
-			s.cfg.Log.Error("chainstore: reapStaging commit error", "stagingID", se.StagingID, "err", err)
-		}
+	}
+	if err := s.backend.Commit(ctx, tx); err != nil {
+		s.cfg.Log.Error("chainstore: reapStaging commit error", "count", len(entries), "err", err)
 	}
 }
 
