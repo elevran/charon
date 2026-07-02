@@ -206,6 +206,18 @@ func (b *Backend) Commit(ctx context.Context, tx chainstore.Transaction) error {
 		}
 	}
 
+	for _, se := range tx.PutStagingNodes {
+		if err := batch.Set(stagingKey(se.StagingID), encodeNode(se.Node), nil); err != nil {
+			return err
+		}
+	}
+
+	for _, sid := range tx.DeleteStagingNodes {
+		if err := batch.Delete(stagingKey(sid), nil); err != nil {
+			return err
+		}
+	}
+
 	if err := b.applyStatsDelta(batch, tx.StatsDelta); err != nil {
 		return err
 	}
@@ -283,6 +295,21 @@ func (b *Backend) GetChildren(_ context.Context, parentID chainstore.NodeID) ([]
 		children = append(children, child)
 	}
 	return children, iter.Error()
+}
+
+// GetStagingNode fetches the partial Node stored under a staging key.
+// Returns ErrNotFound if the staging record is absent.
+func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID) (chainstore.Node, error) {
+	val, closer, err := b.db.Get(stagingKey(stagingID))
+	if err != nil {
+		return chainstore.Node{}, mapErr(err)
+	}
+	defer func() { _ = closer.Close() }()
+	node, err := decodeNode(val)
+	if err != nil {
+		return chainstore.Node{}, fmt.Errorf("chainstore/pebble: decode staging node %x: %w", stagingID, err)
+	}
+	return node, nil
 }
 
 // Stats returns the persistent entry count and total blob bytes.
