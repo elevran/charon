@@ -323,7 +323,7 @@ func (s *Store) StoreWithStaging(ctx context.Context, stagingID, responseID, pre
 
 // Retrieve fetches a single node's metadata without updating LastAccessUnix or the
 // LRU index. Returns ErrNotFound if responseID does not exist.
-func (s *Store) Retrieve(ctx context.Context, responseID, tenantKey string) (PublicNode, error) {
+func (s *Store) Retrieve(_ context.Context, _, _ string) (PublicNode, error) {
 	return PublicNode{}, ErrNotImplemented
 }
 
@@ -428,7 +428,7 @@ func (s *Store) walkAndTouch(ctx context.Context, leaf NodeID) (nodes []Node, tu
 		updatedNodes[i] = updated
 	}
 
-	if err = s.backend.Commit(ctx, Transaction{
+	if err := s.backend.Commit(ctx, Transaction{
 		PutNodes:    updatedNodes,
 		BucketMoves: bucketMoves,
 	}); err != nil {
