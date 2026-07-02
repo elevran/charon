@@ -255,7 +255,7 @@ func TestDelete(t *testing.T) {
 	require.NoError(t, s.Store(ctx, "r0", "", "", []byte("root")))
 	require.NoError(t, s.Store(ctx, "r1", "r0", "", []byte("child")))
 
-	require.NoError(t, s.Delete(ctx, "r0", ""))
+	require.NoError(t, s.Delete(ctx, "r0", "", false))
 
 	_, err := s.Resolve(ctx, "r0", "")
 	assert.True(t, errors.Is(err, chainstore.ErrNotFound))
@@ -265,6 +265,6 @@ func TestDeleteNotFound(t *testing.T) {
 	s := openMemStore(t, chainstore.Config{})
 	ctx := context.Background()
 
-	err := s.Delete(ctx, "nonexistent", "")
+	err := s.Delete(ctx, "nonexistent", "", false)
 	assert.True(t, errors.Is(err, chainstore.ErrNotFound))
 }
