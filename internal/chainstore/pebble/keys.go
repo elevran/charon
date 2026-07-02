@@ -13,6 +13,7 @@ const (
 	pfxChildren   = byte(0x04) // childKey(parent, child)   → empty value; enables GetChildren scan
 	pfxStats      = byte(0x05) // statsKey                  → counters
 	pfxResponseID = byte(0x06) // responseIDKey(nodeID)     → caller-supplied responseID string
+	pfxStaging    = byte(0x07) // stagingKey(stagingID)     → partial Node (invisible to chain walks)
 )
 
 func metaKey(id chainstore.NodeID) []byte {
@@ -48,6 +49,13 @@ func childKey(parent, child chainstore.NodeID) []byte {
 func responseIDKey(id chainstore.NodeID) []byte {
 	k := make([]byte, 1+20)
 	k[0] = pfxResponseID
+	copy(k[1:], id[:])
+	return k
+}
+
+func stagingKey(id chainstore.BlobID) []byte {
+	k := make([]byte, 1+16)
+	k[0] = pfxStaging
 	copy(k[1:], id[:])
 	return k
 }
