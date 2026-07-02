@@ -13,6 +13,8 @@ type storeMetrics struct {
 	chainDepth          prometheus.Histogram
 	evictionsTotal      prometheus.Counter
 	ttlExpirationsTotal prometheus.Counter
+	stagingReapedTotal  prometheus.Counter
+	stagingReapErrTotal prometheus.Counter
 	entries             prometheus.Gauge
 	bytes               prometheus.Gauge
 }
@@ -38,6 +40,12 @@ func newStoreMetrics(reg prometheus.Registerer) (*storeMetrics, error) {
 		ttlExpirationsTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "chainstore_ttl_expirations_total",
 		}),
+		stagingReapedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "chainstore_staging_reaped_total",
+		}),
+		stagingReapErrTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "chainstore_staging_reap_errors_total",
+		}),
 		entries: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "chainstore_entries",
 		}),
@@ -50,6 +58,8 @@ func newStoreMetrics(reg prometheus.Registerer) (*storeMetrics, error) {
 		m.chainDepth,
 		m.evictionsTotal,
 		m.ttlExpirationsTotal,
+		m.stagingReapedTotal,
+		m.stagingReapErrTotal,
 		m.entries,
 		m.bytes,
 	} {
