@@ -192,12 +192,15 @@ func (s *Store) deleteNode(ctx context.Context, node Node) {
 	appendNodeToDeleteTx(&tx, node)
 	blobBytes := int64(node.RequestBlobSize) + int64(node.ResponseBlobSize)
 
-	if err := s.backend.Commit(ctx, tx); err != nil {
-		s.cfg.Log.Error("chainstore: deleteNode commit error", "err", err)
-		return
-	}
+	// Decrement before commit so concurrent capacity checks see the updated count
+	// immediately. If the commit fails, compensate to restore the correct count.
 	s.entries.Add(-1)
 	s.bytes.Add(-blobBytes)
+	if err := s.backend.Commit(ctx, tx); err != nil {
+		s.entries.Add(1)
+		s.bytes.Add(blobBytes)
+		s.cfg.Log.Error("chainstore: deleteNode commit error", "err", err)
+	}
 }
 
 // deleteSubtree deletes root and all descendants via BFS using GetChildren.
