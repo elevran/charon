@@ -2,20 +2,25 @@ package chainstore
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 
 	"github.com/google/uuid"
 )
 
 // NodeID is a 20-byte opaque node identifier computed by Charon.
-// NodeID = sha1(tenantKey + responseID). Callers never construct NodeIDs directly —
-// all public Store methods accept string response IDs and an optional tenant key.
+// NodeID = first 20 bytes of sha256(tenantKey + "\x00" + responseID).
+// Callers never construct NodeIDs directly — all public Store methods accept
+// string response IDs and an optional tenant key.
 type NodeID [20]byte
 
-// nodeID computes the internal NodeID from an external response ID and tenant key.
+// nodeID derives a NodeID from an external response ID and tenant key.
+// sha256 used for namespace derivation — collision resistance required; not a MAC.
 // tenantKey may be empty for single-tenant deployments.
 func nodeID(tenantKey, responseID string) NodeID {
-	return NodeID(sha1.Sum([]byte(tenantKey + responseID)))
+	h := sha256.Sum256([]byte(tenantKey + "\x00" + responseID))
+	var id NodeID
+	copy(id[:], h[:])
+	return id
 }
 
 // BucketID identifies an LRU time bucket: BucketID = UnixSeconds / BucketDuration.
@@ -40,7 +45,6 @@ type Node struct {
 	ResponseBlobSize uint32
 	Depth            uint32 // 0 = root; enables slice preallocation in LoadChain
 	Status           uint8  // NodeStatusCompleted or NodeStatusFailed
-	BlobType         uint8  // BlobTypeSingle or BlobTypeChunked (Phase 6)
 	ResponseID       string // external caller-supplied ID; stored verbatim, max 255 bytes
 }
 
@@ -48,12 +52,6 @@ type Node struct {
 const (
 	NodeStatusCompleted uint8 = iota
 	NodeStatusFailed
-)
-
-// Blob type constants.
-const (
-	BlobTypeSingle  uint8 = iota // blob stored as one key
-	BlobTypeChunked              // blob stored as N chunks with a manifest (Phase 6)
 )
 
 // BlobEntry carries a blob's ID and raw bytes in a Transaction.
