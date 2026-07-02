@@ -378,7 +378,6 @@ func TestGoroutineStopsCleanly(t *testing.T) {
 
 	select {
 	case <-done:
-		// success: Close returned promptly
 	case <-time.After(time.Second):
 		t.Fatal("Close() did not stop background goroutines within 1s")
 	}

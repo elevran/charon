@@ -15,5 +15,4 @@ func (s *Store) EvictOldest(ctx context.Context) { s.evictOldest(ctx) }
 // NudgesFired returns the number of successful nudge sends since the store was opened.
 func (s *Store) NudgesFired() int64 { return s.nudgeCount.Load() }
 
-// ReapStaging exposes the internal reapStaging method for testing.
 func (s *Store) ReapStaging(ctx context.Context) { s.reapStaging(ctx) }

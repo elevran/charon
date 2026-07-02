@@ -28,8 +28,7 @@ func TestCrashRecovery(t *testing.T) {
 
 	// --- Phase 1: store 1000 nodes, then close backend abruptly ---
 
-	opts := &crdbpebble.Options{}
-	b1, err := chainstorepebble.OpenBackend(dir, opts)
+	b1, err := chainstorepebble.OpenBackend(dir, &crdbpebble.Options{})
 	require.NoError(t, err)
 
 	// Wire the backend into a Store so we can call the domain-level Store method.
@@ -56,8 +55,7 @@ func TestCrashRecovery(t *testing.T) {
 
 	// --- Phase 2: reopen, verify all 1000 nodes are readable ---
 
-	opts2 := &crdbpebble.Options{}
-	b2, err := chainstorepebble.OpenBackend(dir, opts2)
+	b2, err := chainstorepebble.OpenBackend(dir, &crdbpebble.Options{})
 	require.NoError(t, err)
 	s2, err := chainstore.New(ctx, chainstore.Config{Backend: b2})
 	require.NoError(t, err)

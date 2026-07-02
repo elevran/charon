@@ -68,9 +68,6 @@ func (s *Store) reapStaging(ctx context.Context) {
 		s.cfg.Log.Error("chainstore: reapStaging scan error", "err", err)
 		return
 	}
-	if len(entries) == 0 {
-		return
-	}
 	tx := Transaction{}
 	for _, se := range entries {
 		tx.DeleteStagingNodes = append(tx.DeleteStagingNodes, se.StagingID)
