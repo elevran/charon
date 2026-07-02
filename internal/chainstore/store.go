@@ -284,9 +284,7 @@ func (s *Store) StoreWithStaging(ctx context.Context, stagingID, responseID, pre
 		}
 		node = staged
 		tx.DeleteStagingNodes = []BlobID{sid}
-		if staged.RequestBlobID != (BlobID{}) {
-			tx.StatsDelta.BytesDelta += int64(staged.RequestBlobSize)
-		}
+		tx.StatsDelta.BytesDelta += int64(staged.RequestBlobSize)
 	} else {
 		var err error
 		node, err = s.buildNode(ctx, tenantKey, previousResponseID)

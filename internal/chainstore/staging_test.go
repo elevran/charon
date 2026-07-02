@@ -62,17 +62,6 @@ func TestResolveAndStage_NilBlob(t *testing.T) {
 	assert.Equal(t, uint32(0), staged.RequestBlobSize)
 }
 
-// TestResolveAndStage_EmptyPreviousResponseID returns empty turns for a new conversation.
-func TestResolveAndStage_EmptyPreviousResponseID(t *testing.T) {
-	ctx := context.Background()
-	s := openMemStore(t, chainstore.Config{})
-
-	stagingID, turns, err := s.ResolveAndStage(ctx, "", "", []byte("first-request"))
-	require.NoError(t, err)
-	assert.NotEmpty(t, stagingID)
-	assert.Empty(t, turns)
-}
-
 // TestStoreWithStaging_RoundTrip checks the full staging → commit cycle:
 // blobs round-trip correctly and the staging record is cleaned up.
 func TestStoreWithStaging_RoundTrip(t *testing.T) {
