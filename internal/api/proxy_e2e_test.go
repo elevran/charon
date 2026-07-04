@@ -1,257 +1,166 @@
 package api_test
 
-// Proxy end-to-end tests simulate the three operations a proxy performs:
+// Proxy E2E tests verify the Charon internal API operations as the proxy performs them:
 //
-//  1. Store a completed LLM response          POST /responses/{id}
-//  2. Resolve previous context for next turn  GET  /responses/{id}/context
-//  3. Retrieve or delete a stored response    GET/DELETE /responses/{id}
+//  1. Store a root response       POST /responses/{id}/store (no staging ID)
+//  2. Resolve for continuation    POST /responses/{id}/resolve → staging_id + turns
+//  3. Store continuation          POST /responses/{id}/store  with X-Staging-ID
+//  4. Retrieve / Delete           GET/DELETE /responses/{id}
 //
-// Tests use a real TCP httptest.Server so the full HTTP stack (routing,
-// middleware, serialisation) is exercised.  In-memory stores keep tests fast
-// and hermetic.
+// The flat context is assembled by the proxy from turns; these tests verify
+// turn counts and blob round-trips.
 
 import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/openai/openai-go/responses"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/elevran/charon/internal/api"
-	"github.com/elevran/charon/internal/model"
-	"github.com/elevran/charon/internal/storage/memory"
-	"github.com/elevran/charon/internal/store"
 )
 
-// newE2EServer wires the full stack and starts a real TCP listener.
-func newE2EServer(t *testing.T) (*httptest.Server, *http.Client) {
-	t.Helper()
-	idx := memory.NewIndexStore()
-	pay := memory.NewPayloadStore()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := store.New(idx, pay, store.Config{CheckpointInterval: 10}, log)
-	h := api.NewHandler(svc, log)
+// --- helpers re-used across e2e scenarios ---
 
-	mux := http.NewServeMux()
-	api.RegisterHandlers(mux, h)
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv, srv.Client()
+type resolveResult struct {
+	StagingID string            `json:"staging_id"`
+	Turns     []json.RawMessage `json:"turns"`
 }
 
-// --- proxy helpers (mirror what the real proxy does) ---
-
-func storeResponse(t *testing.T, client *http.Client, base, responseID string, req model.StoreRequest) {
+func resolve(t *testing.T, srv *httptest.Server, prevID string, requestBlob []byte) resolveResult {
 	t.Helper()
-	body, err := json.Marshal(req)
-	require.NoError(t, err)
-
-	resp, err := client.Post(base+"/responses/"+responseID, "application/json", bytes.NewReader(body))
+	url := srv.URL + "/responses"
+	if prevID != "" {
+		url += "?prev=" + prevID
+	}
+	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(requestBlob))
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode, "POST /responses/%s", responseID)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var r resolveResult
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&r))
+	return r
 }
 
-func resolveContext(t *testing.T, client *http.Client, base, previousID string) model.ResolveResponse {
+func retrieve(t *testing.T, srv *httptest.Server, id string) ([]byte, http.Header) {
 	t.Helper()
-	resp, err := client.Get(base + "/responses/" + previousID + "/context")
+	resp, err := http.DefaultClient.Do(mustNewGET(srv.URL + "/responses/" + id))
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode, "GET /responses/%s/context", previousID)
-
-	var resolved model.ResolveResponse
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&resolved))
-	require.NotEmpty(t, resolved.ReservationID, "server must return a reservation_id")
-	return resolved
+	body, _ := io.ReadAll(resp.Body)
+	return body, resp.Header
 }
 
-func retrieveResponse(t *testing.T, client *http.Client, base, responseID string) model.RetrieveResponse {
+func del(t *testing.T, srv *httptest.Server, id string) int {
 	t.Helper()
-	resp, err := client.Get(base + "/responses/" + responseID)
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/responses/"+id, nil)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode, "GET /responses/%s", responseID)
-
-	var retrieved model.RetrieveResponse
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&retrieved))
-	return retrieved
+	return resp.StatusCode
 }
 
-func deleteResponse(t *testing.T, client *http.Client, base, responseID string) {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodDelete, base+"/responses/"+responseID, nil)
-	require.NoError(t, err)
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode, "DELETE /responses/%s", responseID)
+func mustNewGET(url string) *http.Request {
+	r, _ := http.NewRequest(http.MethodGet, url, nil)
+	return r
 }
 
-func item(role, text string) json.RawMessage {
-	b, _ := json.Marshal(map[string]string{"type": "message", "role": role, "text": text})
+func blob(id, status string) []byte {
+	b, _ := json.Marshal(map[string]interface{}{
+		"id":     id,
+		"status": status,
+		"output": []interface{}{map[string]string{"type": "message", "role": "assistant"}},
+	})
 	return b
-}
-
-func inputItem(role, text string) responses.ResponseInputItemUnionParam {
-	var p responses.ResponseInputItemUnionParam
-	_ = json.Unmarshal(item(role, text), &p)
-	return p
 }
 
 // --- E2E scenarios ---
 
-// TestProxyNewChain verifies the proxy can store the first turn of a new chain.
-func TestProxyNewChain(t *testing.T) {
-	srv, client := newE2EServer(t)
+func TestE2EStoreAndRetrieve(t *testing.T) {
+	srv := newTestServer(t)
 
-	req := model.StoreRequest{
-		Input:  responses.ResponseInputParam{inputItem("user", "hello")},
-		Output: []json.RawMessage{item("assistant", "hi")},
-		Status: "completed",
-		Model:  "test-model",
-	}
-	storeResponse(t, client, srv.URL, "resp_chain0_t0", req)
+	b := blob("resp_e2e0", "completed")
+	storeRoot(t, srv, "resp_e2e0", b, "")
 
-	retrieved := retrieveResponse(t, client, srv.URL, "resp_chain0_t0")
-	assert.Equal(t, "resp_chain0_t0", retrieved.ID)
-	assert.Equal(t, responses.ResponseStatusCompleted, retrieved.Status)
-	assert.Equal(t, "test-model", retrieved.Model)
-	assert.Len(t, retrieved.Input, 1)
-	assert.Len(t, retrieved.Output, 1)
+	got, hdr := retrieve(t, srv, "resp_e2e0")
+	assert.JSONEq(t, string(b), string(got))
+	assert.NotEmpty(t, hdr.Get("X-Created-At"))
+	assert.Equal(t, "0", hdr.Get("X-Depth"))
 }
 
-// TestProxyMultiTurnChain validates the full proxy loop across three turns:
-//
-//	proxy loop per turn:
-//	  1. GET /responses/{prev_id}/context  → mint new id + flat_context
-//	  2. POST /responses/{new_id}          → store result
-//
-// After each turn the flat_context must grow by exactly 2 items (1 input + 1 output).
-func TestProxyMultiTurnChain(t *testing.T) {
-	srv, client := newE2EServer(t)
+func TestE2EThreeTurnChain(t *testing.T) {
+	srv := newTestServer(t)
 
-	// Turn 0: new chain — no resolve, proxy stores directly.
-	t0req := model.StoreRequest{
-		Input:  responses.ResponseInputParam{inputItem("user", "turn 0")},
-		Output: []json.RawMessage{item("assistant", "turn 0 reply")},
-		Status: "completed",
-		Model:  "test-model",
-	}
-	const t0ID = "resp_multi_t0"
-	storeResponse(t, client, srv.URL, t0ID, t0req)
+	// Turn 0: root
+	b0 := blob("resp_e2e_t0", "completed")
+	storeRoot(t, srv, "resp_e2e_t0", b0, "")
 
-	// Turn 1: proxy resolves from t0; inference server assigns t1ID.
-	resolved1 := resolveContext(t, client, srv.URL, t0ID)
-	assert.Len(t, resolved1.FlatContext, 2, "turn 1 context: t0 input + t0 output")
+	// Turn 1: continuation
+	r1 := resolve(t, srv, "resp_e2e_t0", nil)
+	assert.Len(t, r1.Turns, 1, "t1 resolve sees 1 prior turn")
+	b1 := blob("resp_e2e_t1", "completed")
+	storeWithStaging(t, srv, "resp_e2e_t1", r1.StagingID, b1, "")
 
-	const t1ID = "resp_multi_t1"
-	prevID := t0ID
-	t1req := model.StoreRequest{
-		ReservationID:      resolved1.ReservationID,
-		PreviousResponseID: &prevID,
-		Input:              responses.ResponseInputParam{inputItem("user", "turn 1")},
-		Output:             []json.RawMessage{item("assistant", "turn 1 reply")},
-		Status:             "completed",
-		Model:              "test-model",
-	}
-	storeResponse(t, client, srv.URL, t1ID, t1req)
+	// Turn 2: continuation
+	r2 := resolve(t, srv, "resp_e2e_t1", nil)
+	assert.Len(t, r2.Turns, 2, "t2 resolve sees 2 prior turns")
+	b2 := blob("resp_e2e_t2", "completed")
+	storeWithStaging(t, srv, "resp_e2e_t2", r2.StagingID, b2, "")
 
-	// Turn 2: proxy resolves from t1; inference server assigns t2ID.
-	resolved2 := resolveContext(t, client, srv.URL, t1ID)
-	assert.Len(t, resolved2.FlatContext, 4, "turn 2 context: t0 + t1 (2 items each)")
-
-	const t2ID = "resp_multi_t2"
-	prev1ID := t1ID
-	t2req := model.StoreRequest{
-		ReservationID:      resolved2.ReservationID,
-		PreviousResponseID: &prev1ID,
-		Input:              responses.ResponseInputParam{inputItem("user", "turn 2")},
-		Output:             []json.RawMessage{item("assistant", "turn 2 reply")},
-		Status:             "completed",
-		Model:              "test-model",
-	}
-	storeResponse(t, client, srv.URL, t2ID, t2req)
-
-	// Resolve from t2 should include all three turns.
-	resolved3 := resolveContext(t, client, srv.URL, t2ID)
-	assert.Len(t, resolved3.FlatContext, 6, "turn 3 context: t0 + t1 + t2 (2 items each)")
+	// Verify all nodes stored correctly
+	got0, _ := retrieve(t, srv, "resp_e2e_t0")
+	assert.JSONEq(t, string(b0), string(got0))
+	got2, hdr2 := retrieve(t, srv, "resp_e2e_t2")
+	assert.JSONEq(t, string(b2), string(got2))
+	assert.Equal(t, "2", hdr2.Get("X-Depth"))
 }
 
-// TestProxyFailedInferenceAndBrokenChain covers two failure modes:
-//
-//  1. A failed LLM inference is stored with status="failed".
-//     The proxy can still retrieve it; subsequent turns treat it as a dead end.
-//
-//  2. A mid-chain response is deleted (e.g. point-deleted by an operator).
-//     Any resolve that walks through the gap returns 500 with X-Charon-Error:
-//     chain_corrupted.
-func TestProxyFailedInferenceAndBrokenChain(t *testing.T) {
-	srv, client := newE2EServer(t)
+func TestE2EDeleteAndRetrieve(t *testing.T) {
+	srv := newTestServer(t)
 
-	// Build a 3-turn chain: t0 → t1 → t2.
-	const t0ID = "resp_broken_t0"
-	storeResponse(t, client, srv.URL, t0ID, model.StoreRequest{
-		Input:  responses.ResponseInputParam{inputItem("user", "turn 0")},
-		Output: []json.RawMessage{item("assistant", "turn 0 reply")},
-		Status: "completed",
-	})
+	b := blob("resp_e2e_del", "completed")
+	storeRoot(t, srv, "resp_e2e_del", b, "")
 
-	res1 := resolveContext(t, client, srv.URL, t0ID)
-	const t1ID = "resp_broken_t1"
-	prev0 := t0ID
-	storeResponse(t, client, srv.URL, t1ID, model.StoreRequest{
-		ReservationID:      res1.ReservationID,
-		PreviousResponseID: &prev0,
-		Input:              responses.ResponseInputParam{inputItem("user", "turn 1")},
-		Output:             []json.RawMessage{item("assistant", "turn 1 reply")},
-		Status:             "completed",
-	})
+	assert.Equal(t, http.StatusNoContent, del(t, srv, "resp_e2e_del"))
 
-	res2 := resolveContext(t, client, srv.URL, t1ID)
-	const t2ID = "resp_broken_t2"
-	prev1 := t1ID
-	storeResponse(t, client, srv.URL, t2ID, model.StoreRequest{
-		ReservationID:      res2.ReservationID,
-		PreviousResponseID: &prev1,
-		Input:              responses.ResponseInputParam{inputItem("user", "turn 2")},
-		Output:             []json.RawMessage{item("assistant", "turn 2 reply")},
-		Status:             "completed",
-	})
-
-	// Scenario A: failed inference stored after t2.
-	res3 := resolveContext(t, client, srv.URL, t2ID)
-	const t3FailedID = "resp_broken_t3_failed"
-	prev2 := t2ID
-	storeResponse(t, client, srv.URL, t3FailedID, model.StoreRequest{
-		ReservationID:      res3.ReservationID,
-		PreviousResponseID: &prev2,
-		Input:              responses.ResponseInputParam{inputItem("user", "turn 3")},
-		Output:             nil,
-		Status:             "failed",
-	})
-
-	retrieved := retrieveResponse(t, client, srv.URL, t3FailedID)
-	assert.Equal(t, responses.ResponseStatusFailed, retrieved.Status, "failed response must be retrievable with correct status")
-
-	// Scenario B: delete t1 (mid-chain), then attempt resolve from t2.
-	deleteResponse(t, client, srv.URL, t1ID)
-
-	// t2's chain walks: t2 → t1 (deleted) → chain corrupted.
-	req, err := http.NewRequest(http.MethodGet, srv.URL+"/responses/"+t2ID+"/context", nil)
-	require.NoError(t, err)
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(mustNewGET(srv.URL + "/responses/resp_e2e_del"))
 	require.NoError(t, err)
 	defer resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
 
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "broken chain must return 409")
+func TestE2EDeleteSubtreeEvictsDescendants(t *testing.T) {
+	srv := newTestServer(t)
 
-	var errBody map[string]string
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&errBody))
-	assert.Equal(t, "chain corrupted", errBody["error"])
+	// Build chain t0 → t1 → t2
+	storeRoot(t, srv, "resp_bc_t0", blob("resp_bc_t0", "completed"), "")
+
+	r1 := resolve(t, srv, "resp_bc_t0", nil)
+	storeWithStaging(t, srv, "resp_bc_t1", r1.StagingID, blob("resp_bc_t1", "completed"), "")
+
+	r2 := resolve(t, srv, "resp_bc_t1", nil)
+	storeWithStaging(t, srv, "resp_bc_t2", r2.StagingID, blob("resp_bc_t2", "completed"), "")
+
+	// Delete t1 (mid-chain): HTTP DELETE always removes the full subtree.
+	// t2, as a descendant of t1, is also removed.
+	assert.Equal(t, http.StatusNoContent, del(t, srv, "resp_bc_t1"))
+
+	// t1 is gone
+	resp1, err := http.DefaultClient.Do(mustNewGET(srv.URL + "/responses/resp_bc_t1"))
+	require.NoError(t, err)
+	defer resp1.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp1.StatusCode)
+
+	// t2 (descendant of t1) is also gone — deleted as part of the subtree
+	resp2, err := http.DefaultClient.Do(mustNewGET(srv.URL + "/responses/resp_bc_t2"))
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)
+
+	// t0 (ancestor of t1) is unaffected
+	got0, _ := retrieve(t, srv, "resp_bc_t0")
+	assert.JSONEq(t, string(blob("resp_bc_t0", "completed")), string(got0))
 }

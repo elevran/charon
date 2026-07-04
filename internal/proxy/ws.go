@@ -122,12 +122,12 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		// Strip the WebSocket protocol field before forwarding to inference.
 		delete(rawMsg, "type")
 
-		h.wsTurn(ctx, conn, cache, msg, rawMsg)
+		h.wsTurn(ctx, conn, cache, msg, rawMsg, r.Header.Get("X-Tenant-Key"))
 	}
 }
 
 // wsTurn processes one response.create turn.
-func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCache, msg wsCreateMsg, rawMsg map[string]json.RawMessage) {
+func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCache, msg wsCreateMsg, rawMsg map[string]json.RawMessage, tenantKey string) {
 	createdAt := time.Now()
 
 	inputItems, err := inputToItems(msg.Input)
@@ -136,21 +136,37 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 		return
 	}
 
-	var reservationID string
+	var stagingID string
 	var flatCtx []json.RawMessage
 
 	if msg.PreviousResponseID != nil {
 		// Check connection-local cache first (for store:false responses).
 		if cached, ok := cache.get(*msg.PreviousResponseID); ok {
+			// Cache hit: flat context reconstructed in-memory; no staging needed
+			// because the prior turn was store:false and not persisted in Charon.
 			flatCtx = cached
 		} else {
-			reservationID, flatCtx, err = h.charon.Resolve(ctx, *msg.PreviousResponseID)
+			requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
+			var turns []charon.ResolveTurn
+			stagingID, turns, err = h.charon.Resolve(ctx, *msg.PreviousResponseID, tenantKey, requestBlob)
 			if err != nil {
 				h.wsSendError(conn, 400, "previous_response_not_found",
 					"previous response not found")
 				return
 			}
+			flatCtx = turnsToFlatCtx(turns)
 		}
+	} else {
+		// First turn: stage the request blob so its input is preserved for
+		// future flat context reconstruction.
+		requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
+		var turns []charon.ResolveTurn
+		stagingID, turns, err = h.charon.Resolve(ctx, "", tenantKey, requestBlob)
+		if err != nil {
+			h.wsSendError(conn, 502, "staging_error", "failed to stage request")
+			return
+		}
+		flatCtx = turnsToFlatCtx(turns) // always empty for first turn
 	}
 
 	// Validate: function_call_output without a matching function_call is invalid.
@@ -179,25 +195,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 	var sentCreated bool
 	var finalInfResp *inference.Response
 
-	var sw *charon.StreamWriter
 	buf := &streamBuffer{}
-
-	flushToCharonWS := func() {
-		if !msg.ShouldStore() || canonicalID == "" {
-			buf.drain()
-			return
-		}
-		items := buf.drain()
-		if len(items) == 0 {
-			return
-		}
-		if sw == nil {
-			sw = h.charon.NewStreamWriter(ctx, canonicalID)
-		}
-		if err := sw.Append(items); err != nil {
-			h.log.Error("ws charon stream append", "id", canonicalID, "err", err)
-		}
-	}
 
 	for evt := range ch {
 		if evt.Response != nil && evt.Response.ID != "" && canonicalID == "" {
@@ -224,9 +222,6 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 			h.wsSend(conn, sseEvent{Type: evt.Type, SequenceNumber: seq, OutputIndex: &outIdx, Item: evt.Item})
 			seq++
 			buf.add(evt.Item)
-			if buf.shouldFlush(h.storeBufferBytes) {
-				flushToCharonWS()
-			}
 		case "response.completed":
 			finalInfResp = evt.Response
 
@@ -255,39 +250,10 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 	}
 
 	if msg.ShouldStore() {
-		var usage json.RawMessage
-		if finalInfResp.Usage != nil {
-			usage, _ = json.Marshal(finalInfResp.Usage)
-		}
-		if sw != nil {
-			if err := sw.Commit(charon.CommitRequest{
-				ReservationID:      reservationID,
-				PreviousResponseID: msg.PreviousResponseID,
-				Instructions:       msg.Instructions,
-				Input:              inputItems,
-				FinalItems:         buf.drain(),
-				Usage:              usage,
-				Status:             finalInfResp.Status,
-				Model:              finalInfResp.Model,
-				Background:         msg.Background,
-			}); err != nil {
-				h.log.Error("ws charon stream commit", "id", canonicalID, "err", err)
-			}
-		} else {
-			storeReq := charon.StoreRequest{
-				ReservationID:      reservationID,
-				PreviousResponseID: msg.PreviousResponseID,
-				Instructions:       msg.Instructions,
-				Input:              inputItems,
-				Output:             buf.drain(),
-				Usage:              usage,
-				Status:             finalInfResp.Status,
-				Model:              finalInfResp.Model,
-				Background:         msg.Background,
-			}
-			if err := h.charon.Store(ctx, canonicalID, storeReq); err != nil {
-				h.log.Error("ws charon store", "id", canonicalID, "err", err)
-			}
+		finalInfResp.Output = buf.drain()
+		responseBlob := marshalStoredResponse(finalInfResp, msg.PreviousResponseID, msg.Instructions, msg.Background)
+		if err := h.charon.Store(ctx, canonicalID, stagingID, tenantKey, responseBlob); err != nil {
+			h.log.Error("ws charon store", "id", canonicalID, "err", err)
 		}
 	} else {
 		// store:false — cache assembled flat_context for subsequent turns.

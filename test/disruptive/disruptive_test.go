@@ -7,8 +7,8 @@ package disruptive_test
 //     stream before emitting response.completed.  The proxy must propagate
 //     the truncation to the client and must NOT persist any partial record.
 //
-//  2. Store failure after non-streaming inference: Charon's store step fails
-//     after the inference result has already been produced.  The proxy must
+//  2. Store failure after non-streaming inference: the Charon server rejects
+//     the POST /responses/{id} call with a 5xx.  The proxy must still
 //     return the inference result to the client (non-fatal) while making the
 //     response unretrievable via GET (not persisted).
 //
@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,18 +29,18 @@ import (
 	"testing"
 	"time"
 
+	crdbpebble "github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	apihandler "github.com/elevran/charon/internal/api"
+	"github.com/elevran/charon/internal/chainstore"
+	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
 	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/inference"
-	"github.com/elevran/charon/internal/model"
 	"github.com/elevran/charon/internal/proxy"
-	"github.com/elevran/charon/internal/storage"
-	"github.com/elevran/charon/internal/storage/memory"
-	"github.com/elevran/charon/internal/store"
-	"github.com/elevran/charon/internal/testutil"
+
+	apihandler "github.com/elevran/charon/internal/api"
 )
 
 // fullStack holds the servers needed for end-to-end tests.
@@ -50,13 +49,16 @@ type fullStack struct {
 	proxySrv  *httptest.Server
 }
 
-// startStack starts a Charon API server backed by the given stores, wires it
-// to the given inference server, and returns the running stack.
-func startStack(t *testing.T, idx storage.IndexStore, pay storage.PayloadStore, infSrv *httptest.Server) *fullStack {
+// startNormalStack starts a stack backed by an in-memory pebble store.
+func startNormalStack(t *testing.T, infSrv *httptest.Server) *fullStack {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	svc := store.New(idx, pay, store.Config{}, log)
+	opts := &crdbpebble.Options{FS: vfs.NewMem()}
+	svc, err := pebblebe.Open(context.Background(), "", opts, chainstore.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = svc.Close() })
+
 	charonH := apihandler.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
 	apihandler.RegisterHandlers(charonMux, charonH)
@@ -74,50 +76,49 @@ func startStack(t *testing.T, idx storage.IndexStore, pay storage.PayloadStore, 
 	return &fullStack{charonSrv: charonSrv, proxySrv: proxySrv}
 }
 
-// startNormalStack starts a stack with memory stores and the given inference server.
-func startNormalStack(t *testing.T, infSrv *httptest.Server) *fullStack {
-	t.Helper()
-	return startStack(t, memory.NewIndexStore(), memory.NewPayloadStore(), infSrv)
+// failingCharonMux returns an http.Handler that returns 507 for all POST /responses/{id}
+// (store) requests and delegates all other requests to the real Charon handler.
+// Store calls are POST /responses/{id} — distinguished from resolve (POST /responses)
+// by the presence of an additional path segment.
+func failingCharonMux(realMux http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/responses/") {
+			http.Error(w, "injected store failure", http.StatusInsufficientStorage)
+			return
+		}
+		realMux.ServeHTTP(w, r)
+	})
 }
 
-// startFailingStoreStack starts a stack whose index rejects every index.Put,
-// simulating a store failure after the payload write succeeds.
+// startFailingStoreStack starts a stack whose Charon server rejects POST .../store.
 func startFailingStoreStack(t *testing.T, infSrv *httptest.Server) *fullStack {
 	t.Helper()
-	realIdx := memory.NewIndexStore()
-	hookIdx := &testutil.HookIndexStore{
-		IndexStore: realIdx,
-		OnPut:      func(context.Context, model.ResponseMeta) error { return errStoreFailure },
-	}
-	return startStack(t, hookIdx, memory.NewPayloadStore(), infSrv)
-}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-// sseEventTypes reads an SSE response body and returns the "type" field of each
-// data event in the order they were received.
-func sseEventTypes(t *testing.T, body io.Reader) []string {
-	t.Helper()
-	var types []string
-	scanner := bufio.NewScanner(body)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		var evt struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &evt); err != nil {
-			continue
-		}
-		if evt.Type != "" {
-			types = append(types, evt.Type)
-		}
-	}
-	return types
+	opts := &crdbpebble.Options{FS: vfs.NewMem()}
+	svc, err := pebblebe.Open(context.Background(), "", opts, chainstore.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = svc.Close() })
+
+	charonH := apihandler.NewHandler(svc, log)
+	realMux := http.NewServeMux()
+	apihandler.RegisterHandlers(realMux, charonH)
+	charonSrv := httptest.NewServer(failingCharonMux(realMux))
+	t.Cleanup(charonSrv.Close)
+
+	charonClient := charon.New(charonSrv.URL, 5*time.Second)
+	infClient := inference.New(infSrv.URL, "", 5*time.Second)
+	proxyH := proxy.NewHandler(charonClient, infClient, log, 0)
+	proxyMux := http.NewServeMux()
+	proxy.RegisterHandlers(proxyMux, proxyH)
+	proxySrv := httptest.NewServer(proxyMux)
+	t.Cleanup(proxySrv.Close)
+
+	return &fullStack{charonSrv: charonSrv, proxySrv: proxySrv}
 }
 
 // sseResponseID extracts the response ID from the first response.created event
-// in an SSE event list, returning empty string if not found.
+// in an SSE stream and returns all event types seen.
 func sseResponseID(t *testing.T, body io.Reader) (string, []string) {
 	t.Helper()
 	var types []string
@@ -148,8 +149,6 @@ func sseResponseID(t *testing.T, body io.Reader) (string, []string) {
 	return id, types
 }
 
-var errStoreFailure = errors.New("injected store failure")
-
 // --- 1. Mid-stream inference failure ---
 
 // TestMidStreamInferenceFailureLeavesNoTrace verifies that when the inference
@@ -179,7 +178,6 @@ func TestMidStreamInferenceFailureLeavesNoTrace(t *testing.T) {
 	assert.NotContains(t, eventTypes, "response.completed",
 		"proxy must NOT emit response.completed when the inference stream was truncated")
 
-	// The response must not be in Charon's index.
 	getResp, err := http.Get(stack.charonSrv.URL + "/responses/" + canonicalID)
 	require.NoError(t, err)
 	defer getResp.Body.Close()
@@ -189,12 +187,10 @@ func TestMidStreamInferenceFailureLeavesNoTrace(t *testing.T) {
 
 // --- 2. Store failure after non-streaming inference ---
 
-// TestNonStreamingStoreFailureIsNonFatal verifies that when Charon's store step
+// TestNonStreamingStoreFailureIsFatal verifies that when Charon's store step
 // fails after a successful non-streaming inference call:
-//   - the proxy still returns 200 with the inference result
-//   - the client receives the response ID in the body
-//   - GET on that ID returns 404 (response was not persisted)
-func TestNonStreamingStoreFailureIsNonFatal(t *testing.T) {
+//   - the proxy returns 500 (store failure is fatal — response cannot be retrieved)
+func TestNonStreamingStoreFailureIsFatal(t *testing.T) {
 	mockInf := inference.NewMockServer()
 	t.Cleanup(mockInf.Close)
 
@@ -208,22 +204,10 @@ func TestNonStreamingStoreFailureIsNonFatal(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	// The proxy must return 200 — inference succeeded, storage failure is non-fatal.
-	require.Equal(t, http.StatusOK, resp.StatusCode,
-		"proxy must return 200 even when Charon store fails")
-
-	var resource struct {
-		ID string `json:"id"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&resource))
-	require.NotEmpty(t, resource.ID, "proxy must return the inference response ID")
-
-	// Response must not be retrievable — the store failed.
-	getResp, err := http.Get(stack.charonSrv.URL + "/responses/" + resource.ID)
-	require.NoError(t, err)
-	defer getResp.Body.Close()
-	assert.Equal(t, http.StatusNotFound, getResp.StatusCode,
-		"response must not be accessible via GET after a store failure")
+	// Store failure is fatal: proxy returns 500 so the client knows the response
+	// was not persisted and can retry, rather than believing it was stored.
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode,
+		"proxy must return 500 when Charon store fails")
 }
 
 // --- 3. Store failure after streaming inference ---
@@ -255,7 +239,6 @@ func TestStreamingStoreFailureIsNonFatal(t *testing.T) {
 	assert.Contains(t, eventTypes, "response.completed",
 		"client must receive response.completed even when Charon store fails")
 
-	// Response must not be retrievable — the store failed.
 	getResp, err := http.Get(stack.charonSrv.URL + "/responses/" + canonicalID)
 	require.NoError(t, err)
 	defer getResp.Body.Close()

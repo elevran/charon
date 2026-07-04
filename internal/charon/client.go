@@ -8,166 +8,25 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
-// StoreRequest is the body of POST /responses/{id} on Charon's internal API.
-// Uses []json.RawMessage for Input/Output so the proxy does not need the
-// OpenAI SDK types.
-type StoreRequest struct {
-	ReservationID      string            `json:"reservation_id,omitempty"`
-	PreviousResponseID *string           `json:"previous_response_id,omitempty"`
-	Instructions       *string           `json:"instructions,omitempty"`
-	Input              []json.RawMessage `json:"input"`
-	Output             []json.RawMessage `json:"output"`
-	Usage              json.RawMessage   `json:"usage,omitempty"`
-	Status             string            `json:"status"`
-	Model              string            `json:"model,omitempty"`
-	Background         bool              `json:"background,omitempty"`
+// ResolveTurn is one turn returned by the resolve endpoint (root-first order).
+type ResolveTurn struct {
+	RequestBlob  []byte `json:"request_blob"`
+	ResponseBlob []byte `json:"response_blob"`
 }
 
-// CommitRequest is passed to StreamWriter.Commit to finalise a streaming store.
-type CommitRequest struct {
-	ReservationID      string
-	PreviousResponseID *string
-	Instructions       *string
-	Input              []json.RawMessage
-	FinalItems         []json.RawMessage // merged with staged items by Charon
-	Usage              json.RawMessage
-	Status             string
-	Model              string
-	Background         bool
-}
-
-// StreamWriter sends output item batches to Charon incrementally via PATCH,
-// then commits with all metadata via a final PATCH.
-// Obtain via Client.NewStreamWriter; call Append for each batch; call Commit once.
-//
-// Each Append call automatically assigns the next sequence number, enabling
-// the proxy to dispatch multiple concurrent Append goroutines: assign seqs
-// before spawning, then call AppendAt with the pre-assigned seq.
-type StreamWriter struct {
-	client  *Client
-	id      string
-	ctx     context.Context //nolint:containedctx
-	nextSeq int
-	mu      sync.Mutex
-}
-
-// NewStreamWriter creates a StreamWriter for the given response ID.
-//
-// H2c note: each concurrent streaming client produces sequential PATCH
-// requests for its own response. With N concurrent clients the proxy opens N
-// HTTP/1.1 connections to Charon (amortised via keep-alive). If N exceeds
-// ~500 on a separate-host deployment, replacing this client's http.Client
-// with an http2.Transport{AllowHTTP:true} and wrapping the Charon server
-// with h2c.NewHandler collapses N connections to 1 multiplexed connection,
-// reducing socket pressure. At lower concurrencies the complexity is not
-// justified.
-func (c *Client) NewStreamWriter(ctx context.Context, id string) *StreamWriter {
-	return &StreamWriter{client: c, id: id, ctx: ctx}
-}
-
-// Append sends a batch of output items to Charon, auto-assigning the next
-// sequence number. Safe for sequential use; for concurrent use, prefer
-// AppendAt with pre-assigned sequence numbers.
-func (w *StreamWriter) Append(items []json.RawMessage) error {
-	if len(items) == 0 {
-		return nil
-	}
-	w.mu.Lock()
-	seq := w.nextSeq
-	w.nextSeq++
-	w.mu.Unlock()
-	return w.appendAt(seq, items)
-}
-
-// AppendAt sends a batch with a caller-assigned sequence number.
-// Use this when dispatching concurrent goroutines: assign seqs 0,1,2,...
-// before spawning, call AppendAt from each goroutine, then Commit.
-func (w *StreamWriter) AppendAt(seq int, items []json.RawMessage) error {
-	if len(items) == 0 {
-		return nil
-	}
-	w.mu.Lock()
-	if seq >= w.nextSeq {
-		w.nextSeq = seq + 1
-	}
-	w.mu.Unlock()
-	return w.appendAt(seq, items)
-}
-
-func (w *StreamWriter) appendAt(seq int, items []json.RawMessage) error {
-	return w.patch(map[string]interface{}{"type": "chunk", "seq": seq, "items": items})
-}
-
-// Commit finalises the streaming store.
-// Sends PATCH /responses/{id} with {"type":"commit","seq":N,...} where N
-// is the commit's sequence number (= number of preceding Append batches).
-func (w *StreamWriter) Commit(req CommitRequest) error {
-	w.mu.Lock()
-	seq := w.nextSeq
-	w.mu.Unlock()
-
-	body := map[string]interface{}{
-		"type":   "commit",
-		"seq":    seq,
-		"items":  req.FinalItems,
-		"input":  req.Input,
-		"status": req.Status,
-		"model":  req.Model,
-	}
-	if req.ReservationID != "" {
-		body["reservation_id"] = req.ReservationID
-	}
-	if req.PreviousResponseID != nil {
-		body["previous_response_id"] = *req.PreviousResponseID
-	}
-	if req.Instructions != nil {
-		body["instructions"] = *req.Instructions
-	}
-	if len(req.Usage) > 0 {
-		body["usage"] = req.Usage
-	}
-	if req.Background {
-		body["background"] = true
-	}
-	return w.patch(body)
-}
-
-func (w *StreamWriter) patch(body interface{}) error {
-	b, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(w.ctx, http.MethodPatch,
-		w.client.baseURL+"/responses/"+w.id, bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := w.client.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	return w.client.checkStatus(resp)
-}
-
-// RetrieveResponse is the body returned by GET /responses/{id}.
+// RetrieveResponse is the parsed response from GET /responses/{id}.
 type RetrieveResponse struct {
-	ID                 string            `json:"id"`
-	PreviousResponseID *string           `json:"previous_response_id,omitempty"`
-	Instructions       *string           `json:"instructions,omitempty"`
-	Status             string            `json:"status"`
-	Model              string            `json:"model,omitempty"`
-	Background         bool              `json:"background,omitempty"`
-	CreatedAt          int64             `json:"created_at"`
-	ExpiresAt          *int64            `json:"expires_at,omitempty"`
-	Input              []json.RawMessage `json:"input"`
-	Output             []json.RawMessage `json:"output"`
+	ResponseBlob []byte
+	CreatedAt    int64
+	ExpiresAt    int64
+	Depth        uint32
+	Status       uint8
+	Version      uint8
 }
 
 // Sentinel errors mirroring storage package errors so the proxy does not
@@ -210,19 +69,27 @@ func New(baseURL string, timeout time.Duration) *Client {
 	}
 }
 
-// resolveResponse is the body returned by GET /responses/{id}/context.
+// resolveResponse is the JSON body returned by POST /responses/{id}/resolve.
 type resolveResponse struct {
-	ReservationID string            `json:"reservation_id"`
-	FlatContext   []json.RawMessage `json:"flat_context"`
+	StagingID string        `json:"staging_id"`
+	Turns     []ResolveTurn `json:"turns"`
 }
 
-// Resolve calls GET /responses/{id}/context.
-// Returns (reservationID, flatContext) on success.
-func (c *Client) Resolve(ctx context.Context, previousID string) (string, []json.RawMessage, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.baseURL+"/responses/"+previousID+"/context", nil)
+// Resolve calls POST /responses?prev={previousID}.
+// Sends the raw request blob as the body, returns (stagingID, turns) on success.
+// When previousID is empty the "prev" query param is omitted (first-turn staging).
+// tenantKey is forwarded as X-Tenant-Key if non-empty.
+func (c *Client) Resolve(ctx context.Context, previousID, tenantKey string, requestBlob []byte) (string, []ResolveTurn, error) {
+	url := c.baseURL + "/responses"
+	if previousID != "" {
+		url += "?prev=" + previousID
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(requestBlob))
 	if err != nil {
 		return "", nil, err
+	}
+	if tenantKey != "" {
+		req.Header.Set("X-Tenant-Key", tenantKey)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -237,22 +104,24 @@ func (c *Client) Resolve(ctx context.Context, previousID string) (string, []json
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
 		return "", nil, fmt.Errorf("decode resolve response: %w", err)
 	}
-	return r.ReservationID, r.FlatContext, nil
+	return r.StagingID, r.Turns, nil
 }
 
-// Store calls POST /responses/{id}.
-func (c *Client) Store(ctx context.Context, id string, req StoreRequest) error {
-	body, err := json.Marshal(req)
+// Store calls POST /responses/{id}?req={stagingID}.
+// Sends responseBlob as the raw body; stagingID is passed as the "req" query param.
+func (c *Client) Store(ctx context.Context, id, stagingID, tenantKey string, responseBlob []byte) error {
+	url := c.baseURL + "/responses/" + id
+	if stagingID != "" {
+		url += "?req=" + stagingID
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(responseBlob))
 	if err != nil {
 		return err
 	}
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/responses/"+id, bytes.NewReader(body))
-	if err != nil {
-		return err
+	if tenantKey != "" {
+		req.Header.Set("X-Tenant-Key", tenantKey)
 	}
-	hreq.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(hreq)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
@@ -261,11 +130,16 @@ func (c *Client) Store(ctx context.Context, id string, req StoreRequest) error {
 }
 
 // Retrieve calls GET /responses/{id}.
-func (c *Client) Retrieve(ctx context.Context, id string) (*RetrieveResponse, error) {
+// Returns the raw response blob and public node metadata from response headers.
+// tenantKey is forwarded as X-Tenant-Key if non-empty.
+func (c *Client) Retrieve(ctx context.Context, id, tenantKey string) (*RetrieveResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		c.baseURL+"/responses/"+id, nil)
 	if err != nil {
 		return nil, err
+	}
+	if tenantKey != "" {
+		req.Header.Set("X-Tenant-Key", tenantKey)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -276,19 +150,32 @@ func (c *Client) Retrieve(ctx context.Context, id string) (*RetrieveResponse, er
 	if err := c.checkStatus(resp); err != nil {
 		return nil, err
 	}
-	var r RetrieveResponse
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return nil, fmt.Errorf("decode retrieve response: %w", err)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read retrieve body: %w", err)
 	}
-	return &r, nil
+	r := &RetrieveResponse{ResponseBlob: body}
+	r.CreatedAt, _ = strconv.ParseInt(resp.Header.Get("X-Created-At"), 10, 64)
+	r.ExpiresAt, _ = strconv.ParseInt(resp.Header.Get("X-Expires-At"), 10, 64)
+	depth, _ := strconv.ParseUint(resp.Header.Get("X-Depth"), 10, 32)
+	r.Depth = uint32(depth)
+	status, _ := strconv.ParseUint(resp.Header.Get("X-Status"), 10, 8)
+	r.Status = uint8(status)
+	version, _ := strconv.ParseUint(resp.Header.Get("X-Version"), 10, 8)
+	r.Version = uint8(version)
+	return r, nil
 }
 
 // Delete calls DELETE /responses/{id}.
-func (c *Client) Delete(ctx context.Context, id string) error {
+// tenantKey is forwarded as X-Tenant-Key if non-empty.
+func (c *Client) Delete(ctx context.Context, id, tenantKey string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
 		c.baseURL+"/responses/"+id, nil)
 	if err != nil {
 		return err
+	}
+	if tenantKey != "" {
+		req.Header.Set("X-Tenant-Key", tenantKey)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
