@@ -30,41 +30,27 @@ func writeSSE(w http.ResponseWriter, evt sseEvent) {
 	}
 }
 
-// streamBuffer accumulates bare output item JSON (SSE framing already stripped)
-// and decides when to flush to Charon.
+// streamBuffer accumulates bare output item JSON (SSE framing already stripped).
 type streamBuffer struct {
-	items      []json.RawMessage
-	totalBytes int
+	items []json.RawMessage
 }
 
 func (b *streamBuffer) add(item json.RawMessage) {
 	b.items = append(b.items, item)
-	b.totalBytes += len(item)
-}
-
-// shouldFlush returns true when the buffer is non-empty and either:
-//   - limitBytes == StoreBufferUnbuffered (no buffering: flush every item), or
-//   - limitBytes > 0 and accumulated bytes have reached the threshold.
-func (b *streamBuffer) shouldFlush(limitBytes int) bool {
-	if len(b.items) == 0 {
-		return false
-	}
-	return limitBytes == StoreBufferUnbuffered || b.totalBytes >= limitBytes
 }
 
 func (b *streamBuffer) drain() []json.RawMessage {
 	items := b.items
 	b.items = nil
-	b.totalBytes = 0
 	return items
 }
 
 // handleStream implements POST /responses with stream:true.
 //
 // Output items are extracted from response.output_item.done events (bare item
-// JSON, SSE framing stripped) and forwarded to Charon in batches controlled
-// by h.storeBufferBytes. The client receives all SSE events in real-time
-// regardless of buffering mode.
+// JSON, SSE framing stripped) and buffered until response.completed, then
+// committed to Charon as a single store call. The client receives all SSE
+// events in real-time.
 //
 // Event sequence emitted to client:
 //
@@ -82,16 +68,21 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 		return
 	}
 
-	var reservationID string
-	var flatCtx []json.RawMessage
+	tenantKey := r.Header.Get("X-Tenant-Key")
 
+	prevID := ""
 	if req.PreviousResponseID != nil {
-		reservationID, flatCtx, err = h.charon.Resolve(ctx, *req.PreviousResponseID)
-		if err != nil {
-			h.mapCharonError(w, err, "previous_response_not_found")
-			return
-		}
+		prevID = *req.PreviousResponseID
 	}
+	requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
+	var turns []charon.ResolveTurn
+	var stagingID string
+	stagingID, turns, err = h.charon.Resolve(ctx, prevID, tenantKey, requestBlob)
+	if err != nil {
+		h.mapCharonError(w, err, "previous_response_not_found")
+		return
+	}
+	flatCtx := turnsToFlatCtx(turns)
 
 	infMap := buildInferenceMap(rawReq, flatCtx, inputItems)
 	infMap["stream"] = json.RawMessage("true")
@@ -113,25 +104,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 	var created bool
 	var finalInfResp *inference.Response
 
-	var sw *charon.StreamWriter // created lazily on first store flush
 	buf := &streamBuffer{}
-
-	flushToCharon := func() {
-		if !req.ShouldStore() || canonicalID == "" {
-			buf.drain() // store:false — discard staged chunks
-			return
-		}
-		items := buf.drain()
-		if len(items) == 0 {
-			return
-		}
-		if sw == nil {
-			sw = h.charon.NewStreamWriter(ctx, canonicalID)
-		}
-		if err := sw.Append(items); err != nil {
-			h.log.Error("charon stream append", "id", canonicalID, "err", err)
-		}
-	}
 
 	for evt := range ch {
 		if evt.Response != nil && evt.Response.ID != "" && canonicalID == "" {
@@ -159,11 +132,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 			// Forward to client immediately (no buffering of client events).
 			writeSSE(w, sseEvent{Type: evt.Type, SequenceNumber: seq, OutputIndex: &outIdx, Item: evt.Item})
 			seq++
-			// Buffer bare item JSON for Charon (SSE envelope stripped).
 			buf.add(evt.Item)
-			if buf.shouldFlush(h.storeBufferBytes) {
-				flushToCharon()
-			}
 
 		case "response.completed":
 			finalInfResp = evt.Response
@@ -194,42 +163,11 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 	}
 
 	if req.ShouldStore() && canonicalID != "" {
-		var usage json.RawMessage
-		if finalInfResp.Usage != nil {
-			usage, _ = json.Marshal(finalInfResp.Usage)
-		}
-		if sw != nil {
-			// Streaming path: commit with any remaining buffered items.
-			if err := sw.Commit(charon.CommitRequest{
-				ReservationID:      reservationID,
-				PreviousResponseID: req.PreviousResponseID,
-				Instructions:       req.Instructions,
-				Input:              inputItems,
-				FinalItems:         buf.drain(),
-				Usage:              usage,
-				Status:             finalInfResp.Status,
-				Model:              finalInfResp.Model,
-				Background:         req.Background,
-			}); err != nil {
-				h.log.Error("charon stream commit", "id", canonicalID, "err", err)
-			}
-		} else {
-			// No mid-stream flushes happened (output fit within buffer).
-			// Use a single Store call — no streaming overhead.
-			storeReq := charon.StoreRequest{
-				ReservationID:      reservationID,
-				PreviousResponseID: req.PreviousResponseID,
-				Instructions:       req.Instructions,
-				Input:              inputItems,
-				Output:             buf.drain(),
-				Usage:              usage,
-				Status:             finalInfResp.Status,
-				Model:              finalInfResp.Model,
-				Background:         req.Background,
-			}
-			if err := h.charon.Store(ctx, canonicalID, storeReq); err != nil {
-				h.log.Error("charon store after stream", "id", canonicalID, "err", err)
-			}
+		finalInfResp.Output = buf.drain()
+		responseBlob := marshalStoredResponse(finalInfResp, req.PreviousResponseID, req.Instructions, req.Background)
+		if err := h.charon.Store(ctx, canonicalID, stagingID, tenantKey, responseBlob); err != nil {
+			h.log.Error("charon store after stream", "id", canonicalID, "err", err)
+			return // do not emit response.completed — client must not believe the response was persisted
 		}
 	}
 

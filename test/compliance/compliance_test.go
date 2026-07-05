@@ -8,25 +8,24 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	crdbpebble "github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	apihandler "github.com/elevran/charon/internal/api"
+	"github.com/elevran/charon/internal/chainstore"
+	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
 	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/inference"
-	"github.com/elevran/charon/internal/model"
 	"github.com/elevran/charon/internal/proxy"
-	"github.com/elevran/charon/internal/storage/memory"
-	"github.com/elevran/charon/internal/store"
-	"github.com/elevran/charon/internal/worker"
-
-	"net/http/httptest"
 )
 
 // ---------------------------------------------------------------------------
@@ -49,9 +48,10 @@ func startStackWithBuffer(t testing.TB, bufferBytes int) *testStack {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	idx := memory.NewIndexStore()
-	pay := memory.NewPayloadStore()
-	svc := store.New(idx, pay, store.Config{}, log)
+	opts := &crdbpebble.Options{FS: vfs.NewMem()}
+	svc, err := pebblebe.Open(context.Background(), "", opts, chainstore.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = svc.Close() })
 	charonH := apihandler.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
 	apihandler.RegisterHandlers(charonMux, charonH)
@@ -584,31 +584,4 @@ func TestWSContinuation_NoBuffer(t *testing.T) {
 	r2, e2 := ws.readUntil(5 * time.Second)
 	assert.Empty(t, e2)
 	assert.Equal(t, "completed", r2.Status)
-}
-
-// TestStreamingRecovery_StreamOpenIntent verifies that a stale stream_open
-// write-intent is marked failed by the recovery worker.
-func TestStreamingRecovery_StreamOpenIntent(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	idx := memory.NewIndexStore()
-	pay := memory.NewPayloadStore()
-
-	old := time.Now().Add(-10 * time.Minute).Unix()
-	intent := model.WriteIntent{
-		IntentID:   "wi_stream1",
-		ResponseID: "resp_stream1",
-		PayloadKey: "",
-		Phase:      model.WriteIntentStreamOpen,
-		CreatedAt:  old,
-		UpdatedAt:  old,
-	}
-	require.NoError(t, idx.InsertWriteIntent(context.Background(), intent))
-
-	rec := worker.NewReconciler(idx, pay, log, 5*time.Minute, time.Hour)
-	rec.RunOnce(context.Background())
-
-	stale, _ := idx.ListStaleWriteIntents(context.Background(), 5*time.Minute)
-	for _, s := range stale {
-		assert.NotEqual(t, "wi_stream1", s.IntentID, "stream_open intent must be marked failed by recovery")
-	}
 }
