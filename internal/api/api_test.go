@@ -116,7 +116,7 @@ func TestFirstTurnStaging(t *testing.T) {
 
 func TestResolveUnknownPrevID(t *testing.T) {
 	srv := newTestServer(t)
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/responses/resp_unknown/resolve", nil)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/responses?prev=resp_unknown", nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()

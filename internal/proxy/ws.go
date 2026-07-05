@@ -142,9 +142,19 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 	if msg.PreviousResponseID != nil {
 		// Check connection-local cache first (for store:false responses).
 		if cached, ok := cache.get(*msg.PreviousResponseID); ok {
-			// Cache hit: flat context reconstructed in-memory; no staging needed
-			// because the prior turn was store:false and not persisted in Charon.
+			// Cache hit: flat context reconstructed in-memory. The prior turn was
+			// store:false and is not in Charon, so we cannot link to it. When
+			// ShouldStore is true we still need a staging record for the request
+			// blob, so resolve as a first turn (prevID="") to get a valid stagingID.
 			flatCtx = cached
+			if msg.ShouldStore() {
+				requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
+				stagingID, _, err = h.charon.Resolve(ctx, "", tenantKey, requestBlob)
+				if err != nil {
+					h.wsSendError(conn, 502, "staging_error", "failed to stage request")
+					return
+				}
+			}
 		} else {
 			requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
 			var turns []charon.ResolveTurn
@@ -254,6 +264,8 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 		responseBlob := marshalStoredResponse(finalInfResp, msg.PreviousResponseID, msg.Instructions, msg.Background)
 		if err := h.charon.Store(ctx, canonicalID, stagingID, tenantKey, responseBlob); err != nil {
 			h.log.Error("ws charon store", "id", canonicalID, "err", err)
+			h.wsSendError(conn, 500, "storage_error", "response not persisted")
+			return // do not emit response.completed — client must not believe the response was persisted
 		}
 	} else {
 		// store:false — cache assembled flat_context for subsequent turns.

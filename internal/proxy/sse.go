@@ -167,6 +167,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 		responseBlob := marshalStoredResponse(finalInfResp, req.PreviousResponseID, req.Instructions, req.Background)
 		if err := h.charon.Store(ctx, canonicalID, stagingID, tenantKey, responseBlob); err != nil {
 			h.log.Error("charon store after stream", "id", canonicalID, "err", err)
+			return // do not emit response.completed — client must not believe the response was persisted
 		}
 	}
 

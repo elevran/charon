@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -13,13 +14,31 @@ import (
 
 // Handler wires chainstore.Store to HTTP endpoints.
 type Handler struct {
-	svc *chainstore.Store
-	log *slog.Logger
+	svc          *chainstore.Store
+	log          *slog.Logger
+	maxBodyBytes int64
 }
 
 // NewHandler creates a Handler.
 func NewHandler(svc *chainstore.Store, log *slog.Logger) *Handler {
 	return &Handler{svc: svc, log: log}
+}
+
+// WithMaxBodyBytes sets the per-request body size cap. When non-zero, bodies
+// larger than n bytes are rejected with 413. Wire from chainstore.Config.MaxBytes.
+func (h *Handler) WithMaxBodyBytes(n int64) *Handler {
+	h.maxBodyBytes = n
+	return h
+}
+
+// blobToRaw converts a raw-bytes blob to json.RawMessage for the wire format.
+// Empty (but non-nil) blobs are treated as absent and returned as nil, which
+// marshals as JSON null, to avoid producing invalid JSON from empty byte slices.
+func blobToRaw(b []byte) json.RawMessage {
+	if len(b) == 0 {
+		return nil
+	}
+	return json.RawMessage(b)
 }
 
 func mapStatus(err error) (int, string) {
@@ -43,11 +62,11 @@ func mapStatus(err error) (int, string) {
 
 // resolveResponseTurn is one turn in the resolve JSON response.
 type resolveResponseTurn struct {
-	RequestBlob  []byte `json:"request_blob"`
-	ResponseBlob []byte `json:"response_blob"`
+	RequestBlob  json.RawMessage `json:"request_blob"`
+	ResponseBlob json.RawMessage `json:"response_blob"`
 }
 
-// resolveResponse is the JSON body returned by POST /responses/{id}/resolve.
+// resolveResponse is the JSON body returned by POST /responses?prev={id}.
 type resolveResponse struct {
 	StagingID string                `json:"staging_id"`
 	Turns     []resolveResponseTurn `json:"turns"`
@@ -62,6 +81,9 @@ func (h *Handler) HandleResolve(w http.ResponseWriter, r *http.Request) {
 	prevID := r.URL.Query().Get("prev")
 	tenantKey := r.Header.Get("X-Tenant-Key")
 
+	if h.maxBodyBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	}
 	requestBlob, err := io.ReadAll(r.Body)
 	if err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "failed to read request body")
@@ -82,8 +104,8 @@ func (h *Handler) HandleResolve(w http.ResponseWriter, r *http.Request) {
 	respTurns := make([]resolveResponseTurn, len(turns))
 	for i, t := range turns {
 		respTurns[i] = resolveResponseTurn{
-			RequestBlob:  t.RequestBlob,
-			ResponseBlob: t.ResponseBlob,
+			RequestBlob:  blobToRaw(t.RequestBlob),
+			ResponseBlob: blobToRaw(t.ResponseBlob),
 		}
 	}
 
@@ -101,7 +123,14 @@ func (h *Handler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	tenantKey := r.Header.Get("X-Tenant-Key")
 	stagingID := r.URL.Query().Get("req")
+	if len(stagingID) > 64 {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid staging id")
+		return
+	}
 
+	if h.maxBodyBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	}
 	responseBlob, err := io.ReadAll(r.Body)
 	if err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "failed to read request body")

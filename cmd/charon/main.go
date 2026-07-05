@@ -25,6 +25,12 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	opts := config.NewServerOptions()
@@ -33,11 +39,11 @@ func main() {
 	_ = fs.Parse(os.Args[1:])
 	if err := opts.Complete(fs); err != nil {
 		log.Error("complete server config", "err", err)
-		os.Exit(1)
+		return err
 	}
 	if err := opts.Validate(); err != nil {
 		log.Error("validate server config", "err", err)
-		os.Exit(1)
+		return err
 	}
 
 	cfg := chainstore.Config{
@@ -50,7 +56,7 @@ func main() {
 	svc, err := pebblebe.Open(context.Background(), opts.Storage.DataDir, nil, cfg)
 	if err != nil {
 		log.Error("open chainstore", "err", err)
-		os.Exit(1)
+		return err
 	}
 	defer func() { _ = svc.Close() }()
 
@@ -58,7 +64,7 @@ func main() {
 	charonTP, err := telemetry.Init(context.Background(), opts.Telemetry.CharonService, opts.Telemetry.ExporterURL)
 	if err != nil {
 		log.Error("init charon tracer", "err", err)
-		os.Exit(1)
+		return err
 	}
 	if charonTP != nil {
 		defer func() {
@@ -73,7 +79,7 @@ func main() {
 		proxyTP, err = telemetry.Init(context.Background(), opts.Telemetry.ProxyService, opts.Telemetry.ExporterURL)
 		if err != nil {
 			log.Error("init proxy tracer", "err", err)
-			os.Exit(1)
+			return err
 		}
 		if proxyTP != nil {
 			defer func() {
@@ -87,11 +93,11 @@ func main() {
 	reg := prometheus.NewRegistry()
 	if err := metrics.Register(reg, ""); err != nil {
 		log.Error("register metrics", "err", err)
-		os.Exit(1)
+		return err
 	}
 
 	// ── Charon internal API server (always starts) ─────────────────────────
-	charonH := api.NewHandler(svc, log)
+	charonH := api.NewHandler(svc, log).WithMaxBodyBytes(int64(opts.Storage.MaxPayload))
 	charonSrv := api.NewServerWithRegistry(opts.CharonListen, charonH, log, reg, charonTP)
 
 	// ── Proxy server (starts only when --proxy / proxy.enabled: true) ──────
@@ -138,4 +144,5 @@ func main() {
 			log.Error("proxy shutdown error", "err", err)
 		}
 	}
+	return nil
 }

@@ -7,20 +7,20 @@ package disruptive_test
 //     stream before emitting response.completed.  The proxy must propagate
 //     the truncation to the client and must NOT persist any partial record.
 //
-//  2. Store failure after non-streaming inference: the Charon server rejects
-//     the POST /responses/{id} call with a 5xx.  The proxy must still
-//     return the inference result to the client (non-fatal) while making the
-//     response unretrievable via GET (not persisted).
+//  2. Store failure after non-streaming inference: the proxy returns 500 so
+//     the client knows the response was not persisted and can retry.  GET on
+//     the response ID returns 404.
 //
-//  3. Store failure after streaming inference: same contract as (2) but for
-//     the SSE streaming path — client receives a complete response.completed
-//     event but the response is not in Charon's index.
+//  3. Store failure after streaming inference: the proxy omits
+//     response.completed so the client knows storage failed.  GET on the
+//     response ID returns 404.
 
 import (
 	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -190,6 +190,7 @@ func TestMidStreamInferenceFailureLeavesNoTrace(t *testing.T) {
 // TestNonStreamingStoreFailureIsFatal verifies that when Charon's store step
 // fails after a successful non-streaming inference call:
 //   - the proxy returns 500 (store failure is fatal — response cannot be retrieved)
+//   - GET on the response ID returns 404 (response was not persisted)
 func TestNonStreamingStoreFailureIsFatal(t *testing.T) {
 	mockInf := inference.NewMockServer()
 	t.Cleanup(mockInf.Close)
@@ -202,21 +203,31 @@ func TestNonStreamingStoreFailureIsFatal(t *testing.T) {
 	})
 	resp, err := http.Post(stack.proxySrv.URL+"/responses", "application/json", bytes.NewReader(body))
 	require.NoError(t, err)
-	defer resp.Body.Close()
 
 	// Store failure is fatal: proxy returns 500 so the client knows the response
 	// was not persisted and can retry, rather than believing it was stored.
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode,
 		"proxy must return 500 when Charon store fails")
+	defer resp.Body.Close()
+
+	// The mock inference server assigns IDs deterministically: "resp_" + 32-hex
+	// zero-padded counter, starting at 1.  For a fresh mock with one request the
+	// canonical ID is always "resp_00000000000000000000000000000001".
+	firstMockID := fmt.Sprintf("resp_%032x", mockInf.Calls())
+	getResp, err := http.Get(stack.charonSrv.URL + "/responses/" + firstMockID)
+	require.NoError(t, err)
+	defer getResp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, getResp.StatusCode,
+		"response must not be persisted when store fails")
 }
 
 // --- 3. Store failure after streaming inference ---
 
-// TestStreamingStoreFailureIsNonFatal verifies that when Charon's store step
+// TestStreamingStoreFailureIsFatal verifies that when Charon's store step
 // fails after a successful streaming inference call:
-//   - the client receives the complete SSE stream including response.completed
+//   - the proxy omits response.completed (client must not believe the response was persisted)
 //   - GET on the response ID returns 404 (response was not persisted)
-func TestStreamingStoreFailureIsNonFatal(t *testing.T) {
+func TestStreamingStoreFailureIsFatal(t *testing.T) {
 	mockInf := inference.NewMockServer()
 	t.Cleanup(mockInf.Close)
 
@@ -236,8 +247,8 @@ func TestStreamingStoreFailureIsNonFatal(t *testing.T) {
 
 	require.NotEmpty(t, canonicalID, "proxy must emit response.created with a canonical ID")
 	assert.Contains(t, eventTypes, "response.created")
-	assert.Contains(t, eventTypes, "response.completed",
-		"client must receive response.completed even when Charon store fails")
+	assert.NotContains(t, eventTypes, "response.completed",
+		"proxy must NOT emit response.completed when Charon store fails")
 
 	getResp, err := http.Get(stack.charonSrv.URL + "/responses/" + canonicalID)
 	require.NoError(t, err)

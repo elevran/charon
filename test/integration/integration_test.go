@@ -74,10 +74,9 @@ func TestMetricsEndpoint(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	body, _ := io.ReadAll(resp.Body)
-	// Prometheus text format always starts with "# HELP" or is empty for empty registry.
-	// Accept either prometheus text output or an empty (but 200) response.
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	_ = body // body content varies by what metrics are registered
+	// The fixture registers application metrics; any of the responses_* names must appear.
+	assert.Contains(t, string(body), "responses_",
+		"metrics response must contain registered application metrics")
 }
 
 func TestFullStoreCycle(t *testing.T) {

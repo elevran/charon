@@ -109,5 +109,5 @@ func TestClientResolveAfterStore(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, stagingID)
 	assert.Len(t, turns, 1, "resolve of a root node returns 1 turn")
-	assert.Equal(t, blob, turns[0].ResponseBlob)
+	assert.Equal(t, json.RawMessage(blob), turns[0].ResponseBlob)
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -15,8 +16,8 @@ import (
 
 // ResolveTurn is one turn returned by the resolve endpoint (root-first order).
 type ResolveTurn struct {
-	RequestBlob  []byte `json:"request_blob"`
-	ResponseBlob []byte `json:"response_blob"`
+	RequestBlob  json.RawMessage `json:"request_blob"`
+	ResponseBlob json.RawMessage `json:"response_blob"`
 }
 
 // RetrieveResponse is the parsed response from GET /responses/{id}.
@@ -69,7 +70,7 @@ func New(baseURL string, timeout time.Duration) *Client {
 	}
 }
 
-// resolveResponse is the JSON body returned by POST /responses/{id}/resolve.
+// resolveResponse is the JSON body returned by POST /responses?prev={id}.
 type resolveResponse struct {
 	StagingID string        `json:"staging_id"`
 	Turns     []ResolveTurn `json:"turns"`
@@ -80,11 +81,11 @@ type resolveResponse struct {
 // When previousID is empty the "prev" query param is omitted (first-turn staging).
 // tenantKey is forwarded as X-Tenant-Key (empty string sends an empty header, treated as no tenant).
 func (c *Client) Resolve(ctx context.Context, previousID, tenantKey string, requestBlob []byte) (string, []ResolveTurn, error) {
-	url := c.baseURL + "/responses"
+	u := c.baseURL + "/responses"
 	if previousID != "" {
-		url += "?prev=" + previousID
+		u += "?" + url.Values{"prev": {previousID}}.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(requestBlob))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(requestBlob))
 	if err != nil {
 		return "", nil, err
 	}
@@ -108,11 +109,11 @@ func (c *Client) Resolve(ctx context.Context, previousID, tenantKey string, requ
 // Store calls POST /responses/{id}?req={stagingID}.
 // Sends responseBlob as the raw body; stagingID is passed as the "req" query param.
 func (c *Client) Store(ctx context.Context, id, stagingID, tenantKey string, responseBlob []byte) error {
-	url := c.baseURL + "/responses/" + id
+	u := c.baseURL + "/responses/" + id
 	if stagingID != "" {
-		url += "?req=" + stagingID
+		u += "?" + url.Values{"req": {stagingID}}.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(responseBlob))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(responseBlob))
 	if err != nil {
 		return err
 	}
