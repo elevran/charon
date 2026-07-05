@@ -2,9 +2,9 @@ package api_test
 
 // Proxy E2E tests verify the Charon internal API operations as the proxy performs them:
 //
-//  1. Store a root response       POST /responses/{id}/store (no staging ID)
-//  2. Resolve for continuation    POST /responses/{id}/resolve → staging_id + turns
-//  3. Store continuation          POST /responses/{id}/store  with X-Staging-ID
+//  1. Store a root response       POST /responses/{id} (no staging ID)
+//  2. Resolve for continuation    POST /responses?prev={id} → staging_id + turns
+//  3. Store continuation          POST /responses/{id}?req={staging_id}
 //  4. Retrieve / Delete           GET/DELETE /responses/{id}
 //
 // The flat context is assembled by the proxy from turns; these tests verify
@@ -47,7 +47,8 @@ func resolve(t *testing.T, srv *httptest.Server, prevID string, requestBlob []by
 
 func retrieve(t *testing.T, srv *httptest.Server, id string) ([]byte, http.Header) {
 	t.Helper()
-	resp, err := http.DefaultClient.Do(mustNewGET(srv.URL + "/responses/" + id))
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/responses/"+id, nil)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -61,11 +62,6 @@ func del(t *testing.T, srv *httptest.Server, id string) int {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	return resp.StatusCode
-}
-
-func mustNewGET(url string) *http.Request {
-	r, _ := http.NewRequest(http.MethodGet, url, nil)
-	return r
 }
 
 func blob(id, status string) []byte {
@@ -126,7 +122,8 @@ func TestE2EDeleteAndRetrieve(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, del(t, srv, "resp_e2e_del"))
 
-	resp, err := http.DefaultClient.Do(mustNewGET(srv.URL + "/responses/resp_e2e_del"))
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/responses/resp_e2e_del", nil)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -149,13 +146,15 @@ func TestE2EDeleteSubtreeEvictsDescendants(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, del(t, srv, "resp_bc_t1"))
 
 	// t1 is gone
-	resp1, err := http.DefaultClient.Do(mustNewGET(srv.URL + "/responses/resp_bc_t1"))
+	req1, _ := http.NewRequest(http.MethodGet, srv.URL+"/responses/resp_bc_t1", nil)
+	resp1, err := http.DefaultClient.Do(req1)
 	require.NoError(t, err)
 	defer resp1.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp1.StatusCode)
 
 	// t2 (descendant of t1) is also gone — deleted as part of the subtree
-	resp2, err := http.DefaultClient.Do(mustNewGET(srv.URL + "/responses/resp_bc_t2"))
+	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/responses/resp_bc_t2", nil)
+	resp2, err := http.DefaultClient.Do(req2)
 	require.NoError(t, err)
 	defer resp2.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)

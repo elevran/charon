@@ -30,31 +30,27 @@ func writeSSE(w http.ResponseWriter, evt sseEvent) {
 	}
 }
 
-// streamBuffer accumulates bare output item JSON (SSE framing already stripped)
-// and decides when to flush to Charon.
+// streamBuffer accumulates bare output item JSON (SSE framing already stripped).
 type streamBuffer struct {
-	items      []json.RawMessage
-	totalBytes int
+	items []json.RawMessage
 }
 
 func (b *streamBuffer) add(item json.RawMessage) {
 	b.items = append(b.items, item)
-	b.totalBytes += len(item)
 }
 
 func (b *streamBuffer) drain() []json.RawMessage {
 	items := b.items
 	b.items = nil
-	b.totalBytes = 0
 	return items
 }
 
 // handleStream implements POST /responses with stream:true.
 //
 // Output items are extracted from response.output_item.done events (bare item
-// JSON, SSE framing stripped) and forwarded to Charon in batches controlled
-// by h.storeBufferBytes. The client receives all SSE events in real-time
-// regardless of buffering mode.
+// JSON, SSE framing stripped) and buffered until response.completed, then
+// committed to Charon as a single store call. The client receives all SSE
+// events in real-time.
 //
 // Event sequence emitted to client:
 //

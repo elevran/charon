@@ -78,7 +78,7 @@ type resolveResponse struct {
 // Resolve calls POST /responses?prev={previousID}.
 // Sends the raw request blob as the body, returns (stagingID, turns) on success.
 // When previousID is empty the "prev" query param is omitted (first-turn staging).
-// tenantKey is forwarded as X-Tenant-Key if non-empty.
+// tenantKey is forwarded as X-Tenant-Key (empty string sends an empty header, treated as no tenant).
 func (c *Client) Resolve(ctx context.Context, previousID, tenantKey string, requestBlob []byte) (string, []ResolveTurn, error) {
 	url := c.baseURL + "/responses"
 	if previousID != "" {
@@ -88,9 +88,7 @@ func (c *Client) Resolve(ctx context.Context, previousID, tenantKey string, requ
 	if err != nil {
 		return "", nil, err
 	}
-	if tenantKey != "" {
-		req.Header.Set("X-Tenant-Key", tenantKey)
-	}
+	req.Header.Set("X-Tenant-Key", tenantKey)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", nil, err
@@ -118,9 +116,7 @@ func (c *Client) Store(ctx context.Context, id, stagingID, tenantKey string, res
 	if err != nil {
 		return err
 	}
-	if tenantKey != "" {
-		req.Header.Set("X-Tenant-Key", tenantKey)
-	}
+	req.Header.Set("X-Tenant-Key", tenantKey)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -131,16 +127,14 @@ func (c *Client) Store(ctx context.Context, id, stagingID, tenantKey string, res
 
 // Retrieve calls GET /responses/{id}.
 // Returns the raw response blob and public node metadata from response headers.
-// tenantKey is forwarded as X-Tenant-Key if non-empty.
+// tenantKey is forwarded as X-Tenant-Key (empty string sends an empty header, treated as no tenant).
 func (c *Client) Retrieve(ctx context.Context, id, tenantKey string) (*RetrieveResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		c.baseURL+"/responses/"+id, nil)
 	if err != nil {
 		return nil, err
 	}
-	if tenantKey != "" {
-		req.Header.Set("X-Tenant-Key", tenantKey)
-	}
+	req.Header.Set("X-Tenant-Key", tenantKey)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -167,16 +161,14 @@ func (c *Client) Retrieve(ctx context.Context, id, tenantKey string) (*RetrieveR
 }
 
 // Delete calls DELETE /responses/{id}.
-// tenantKey is forwarded as X-Tenant-Key if non-empty.
+// tenantKey is forwarded as X-Tenant-Key (empty string sends an empty header, treated as no tenant).
 func (c *Client) Delete(ctx context.Context, id, tenantKey string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
 		c.baseURL+"/responses/"+id, nil)
 	if err != nil {
 		return err
 	}
-	if tenantKey != "" {
-		req.Header.Set("X-Tenant-Key", tenantKey)
-	}
+	req.Header.Set("X-Tenant-Key", tenantKey)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err

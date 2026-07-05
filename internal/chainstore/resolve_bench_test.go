@@ -3,7 +3,6 @@ package chainstore_test
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 
 	crdbpebble "github.com/cockroachdb/pebble"
@@ -26,13 +25,7 @@ func benchResolve(b *testing.B, svc *chainstore.Store, depth int) {
 	var leafID string
 	for i := range depth {
 		id := fmt.Sprintf("bench_%d_%08d", depth, i)
-		var stagingID string
-		var err error
-		if leafID == "" {
-			stagingID, _, err = svc.ResolveAndStage(ctx, "", "", reqBlob)
-		} else {
-			stagingID, _, err = svc.ResolveAndStage(ctx, leafID, "", reqBlob)
-		}
+		stagingID, _, err := svc.ResolveAndStage(ctx, leafID, "", reqBlob)
 		if err != nil {
 			b.Fatalf("seed ResolveAndStage depth %d: %v", i, err)
 		}
@@ -88,11 +81,7 @@ func BenchmarkResolveContext_Pebble_Mem_500(b *testing.B) {
 
 func openBenchDiskStore(b *testing.B) *chainstore.Store {
 	b.Helper()
-	dir, err := os.MkdirTemp("", "chainstore-bench-*")
-	if err != nil {
-		b.Fatalf("tempdir: %v", err)
-	}
-	b.Cleanup(func() { os.RemoveAll(dir) })
+	dir := b.TempDir()
 	svc, err := chainstorepebble.Open(context.Background(), dir, &crdbpebble.Options{}, chainstore.Config{})
 	if err != nil {
 		b.Fatalf("open disk store: %v", err)
