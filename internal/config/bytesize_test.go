@@ -84,5 +84,5 @@ func TestByteSizeInConfig(t *testing.T) {
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/bytesize.yaml"}))
 	require.NoError(t, opts.Complete(fs))
-	assert.Equal(t, config.ByteSize(10*1024*1024), opts.Storage.MaxPayload)
+	assert.Equal(t, config.ByteSize(10*1024*1024), opts.MaxPayload)
 }

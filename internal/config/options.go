@@ -47,6 +47,8 @@ type fileStorageConfig struct {
 }
 
 type fileWorkerConfig struct {
+	// TTLInterval is how often the background reaper runs, not the TTL itself.
+	// Maps to chainstore.Config.TTLInterval.
 	TTLInterval time.Duration `json:"ttl_interval"`
 }
 
@@ -129,23 +131,20 @@ type ServerOptions struct {
 	CharonListen string
 
 	// Storage.
-	Storage StorageOptions
-
-	// Worker settings (config-file only).
-	WorkerTTLInterval time.Duration
-
-	// Telemetry settings.
-	Telemetry TelemetryOptions
-}
-
-// StorageOptions holds storage settings shared between ServerOptions and ReconcileOptions.
-type StorageOptions struct {
-	DataDir         string
+	DataDir string
+	// TTLDays is the maximum age of a stored response. Maps to chainstore.Config.TTL.
 	TTLDays         int
 	MaxResponses    int64
 	MaxPayload      ByteSize
 	MaxChainDepth   int
 	MaxContextBytes ByteSize
+
+	// WorkerTTLInterval is how often the background TTL reaper runs (not the TTL itself).
+	// Maps to chainstore.Config.TTLInterval.
+	WorkerTTLInterval time.Duration
+
+	// Telemetry settings.
+	Telemetry TelemetryOptions
 }
 
 // TelemetryOptions holds OpenTelemetry settings for the server.
@@ -153,15 +152,6 @@ type TelemetryOptions struct {
 	ExporterURL   string // OTLP HTTP endpoint; empty = disabled
 	CharonService string // default "charon"
 	ProxyService  string // default "charon-proxy"
-}
-
-// ReconcileOptions holds configuration for the reconcile subcommand.
-type ReconcileOptions struct {
-	// Config file path — set by --config flag.
-	ConfigFile string
-
-	// Storage is the only piece the reconcile command cares about.
-	Storage StorageOptions
 }
 
 // NewServerOptions returns a ServerOptions pre-filled with built-in defaults.
@@ -172,24 +162,12 @@ func NewServerOptions() *ServerOptions {
 		InferenceTimeoutSeconds:   120,
 		InferenceStoreBufferBytes: 65536,
 		CharonListen:              ":8081",
-		Storage: StorageOptions{
-			DataDir: "./data",
-			TTLDays: 30,
-		},
-		WorkerTTLInterval: time.Hour,
+		DataDir:                   "./data",
+		TTLDays:                   30,
+		WorkerTTLInterval:         time.Hour,
 		Telemetry: TelemetryOptions{
 			CharonService: "charon",
 			ProxyService:  "charon-proxy",
-		},
-	}
-}
-
-// NewReconcileOptions returns a ReconcileOptions pre-filled with built-in defaults.
-func NewReconcileOptions() *ReconcileOptions {
-	return &ReconcileOptions{
-		Storage: StorageOptions{
-			DataDir: "./data",
-			TTLDays: 30,
 		},
 	}
 }
@@ -202,14 +180,8 @@ func (o *ServerOptions) AddFlags(fs *flag.FlagSet) {
 	fs.StringVar(&o.ProxyListen, "proxy-listen", o.ProxyListen, "proxy server listen address")
 	fs.BoolVar(&o.ProxyEnabled, "proxy", o.ProxyEnabled, "enable the proxy layer")
 	fs.StringVar(&o.ProxyBackend, "backend", o.ProxyBackend, "inference backend base URL")
-	fs.StringVar(&o.Storage.DataDir, "storage-data-dir", o.Storage.DataDir, "data directory for Pebble storage")
+	fs.StringVar(&o.DataDir, "storage-data-dir", o.DataDir, "data directory for Pebble storage")
 	fs.StringVar(&o.Telemetry.ExporterURL, "telemetry-exporter-url", o.Telemetry.ExporterURL, "OTLP HTTP exporter URL (e.g. http://localhost:4318); empty disables tracing")
-}
-
-// AddFlags registers CLI flags on fs for the reconcile subcommand.
-func (o *ReconcileOptions) AddFlags(fs *flag.FlagSet) {
-	fs.StringVar(&o.ConfigFile, "config", "", "path to config file")
-	fs.StringVar(&o.Storage.DataDir, "storage-data-dir", o.Storage.DataDir, "data directory for Pebble storage")
 }
 
 // Complete loads the config file (if --config was set) and merges file values
@@ -253,26 +225,24 @@ func (o *ServerOptions) Complete(fs *flag.FlagSet) error {
 		o.CharonListen = fc.Charon.Listen
 	}
 	if !setFlags["storage-data-dir"] {
-		o.Storage.DataDir = fc.Charon.Storage.DataDir
+		o.DataDir = fc.Charon.Storage.DataDir
 	}
 
 	// All remaining storage fields are config-file-only.
-	o.Storage.TTLDays = fc.Charon.Storage.TTLDays
-	o.Storage.MaxResponses = fc.Charon.Storage.MaxResponses
-	o.Storage.MaxPayload = fc.Charon.Storage.MaxPayload
-	o.Storage.MaxChainDepth = fc.Charon.Storage.MaxChainDepth
-	o.Storage.MaxContextBytes = fc.Charon.Storage.MaxContextBytes
+	o.TTLDays = fc.Charon.Storage.TTLDays
+	o.MaxResponses = fc.Charon.Storage.MaxResponses
+	o.MaxPayload = fc.Charon.Storage.MaxPayload
+	o.MaxChainDepth = fc.Charon.Storage.MaxChainDepth
+	o.MaxContextBytes = fc.Charon.Storage.MaxContextBytes
 
 	// Worker settings are config-file-only.
 	o.WorkerTTLInterval = fc.Charon.Workers.TTLInterval
 
 	// Derive ProxyCharonURL: file value takes precedence, then auto-derive.
-	if !setFlags["proxy-charon-url"] {
-		if fc.Proxy.CharonURL != "" {
-			o.ProxyCharonURL = fc.Proxy.CharonURL
-		} else {
-			o.ProxyCharonURL = deriveCharonURL(o.CharonListen)
-		}
+	if fc.Proxy.CharonURL != "" {
+		o.ProxyCharonURL = fc.Proxy.CharonURL
+	} else {
+		o.ProxyCharonURL = deriveCharonURL(o.CharonListen)
 	}
 
 	// Telemetry settings are config-file-only except exporter URL which has a flag.
@@ -285,54 +255,10 @@ func (o *ServerOptions) Complete(fs *flag.FlagSet) error {
 	return nil
 }
 
-// Complete loads the config file (if --config was set) and merges file values
-// into the ReconcileOptions. CLI flags take precedence.
-func (o *ReconcileOptions) Complete(fs *flag.FlagSet) error {
-	if o.ConfigFile == "" {
-		return nil
-	}
-
-	fc, err := loadFileConfig(o.ConfigFile)
-	if err != nil {
-		return err
-	}
-
-	setFlags := make(map[string]bool)
-	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
-
-	if !setFlags["storage-data-dir"] {
-		o.Storage.DataDir = fc.Charon.Storage.DataDir
-	}
-	o.Storage.TTLDays = fc.Charon.Storage.TTLDays
-	o.Storage.MaxResponses = fc.Charon.Storage.MaxResponses
-	o.Storage.MaxPayload = fc.Charon.Storage.MaxPayload
-	o.Storage.MaxChainDepth = fc.Charon.Storage.MaxChainDepth
-	o.Storage.MaxContextBytes = fc.Charon.Storage.MaxContextBytes
-
-	return nil
-}
-
 // Validate checks ServerOptions for invalid combinations. It performs no I/O.
 func (o *ServerOptions) Validate() error {
 	if o.ProxyEnabled && o.ProxyBackend == "" {
 		return fmt.Errorf("proxy enabled but proxy backend (inference base URL) is empty")
 	}
 	return nil
-}
-
-// Validate checks ReconcileOptions for invalid combinations. It performs no I/O.
-func (o *ReconcileOptions) Validate() error {
-	return nil
-}
-
-// ToStorageConfig converts StorageOptions to StorageConfig.
-func (s *StorageOptions) ToStorageConfig() StorageConfig {
-	return StorageConfig{
-		DataDir:         s.DataDir,
-		TTLDays:         s.TTLDays,
-		MaxResponses:    s.MaxResponses,
-		MaxPayload:      s.MaxPayload,
-		MaxChainDepth:   s.MaxChainDepth,
-		MaxContextBytes: s.MaxContextBytes,
-	}
 }

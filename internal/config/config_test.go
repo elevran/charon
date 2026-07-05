@@ -27,8 +27,8 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, 65536, opts.InferenceStoreBufferBytes)
 	// Charon defaults
 	assert.Equal(t, ":8081", opts.CharonListen)
-	assert.Equal(t, "./data", opts.Storage.DataDir)
-	assert.Equal(t, 30, opts.Storage.TTLDays)
+	assert.Equal(t, "./data", opts.DataDir)
+	assert.Equal(t, 30, opts.TTLDays)
 	assert.Equal(t, time.Hour, opts.WorkerTTLInterval)
 }
 
@@ -51,7 +51,7 @@ func TestLoadFromFile(t *testing.T) {
 	require.NoError(t, opts.Complete(fs))
 
 	assert.Equal(t, ":0", opts.ProxyListen)
-	assert.Equal(t, 30, opts.Storage.TTLDays)
+	assert.Equal(t, 30, opts.TTLDays)
 }
 
 func TestLoadStrictRejectsUnknownFields(t *testing.T) {
