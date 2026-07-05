@@ -16,6 +16,7 @@ package proxy_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,12 +31,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	crdbpebble "github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
+
 	apihandler "github.com/elevran/charon/internal/api"
+	"github.com/elevran/charon/internal/chainstore"
+	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
 	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/inference"
 	"github.com/elevran/charon/internal/proxy"
-	"github.com/elevran/charon/internal/storage/memory"
-	"github.com/elevran/charon/internal/store"
 )
 
 // capturedInfReq records a single request body received by the inference server.
@@ -101,10 +105,11 @@ func (c *capturingInfServer) captured() []capturedInfReq {
 func startParityStack(t *testing.T) (*httptest.Server, *capturingInfServer) {
 	t.Helper()
 
-	idx := memory.NewIndexStore()
-	pay := memory.NewPayloadStore()
+	opts := &crdbpebble.Options{FS: vfs.NewMem()}
+	svc, err := pebblebe.Open(context.Background(), "", opts, chainstore.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = svc.Close() })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := store.New(idx, pay, store.Config{}, log)
 	charonH := apihandler.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
 	apihandler.RegisterHandlers(charonMux, charonH)

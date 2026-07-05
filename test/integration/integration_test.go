@@ -1,5 +1,8 @@
 package integration_test
 
+// Integration tests exercise the Charon internal API end-to-end against a real
+// pebble backend, verifying the full store→resolve→retrieve→delete cycle.
+
 import (
 	"bytes"
 	"context"
@@ -9,59 +12,35 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
-	"time"
 
-	"github.com/openai/openai-go/responses"
+	crdbpebble "github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/elevran/charon/internal/api"
-	"github.com/elevran/charon/internal/config"
+	"github.com/elevran/charon/internal/chainstore"
+	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
 	"github.com/elevran/charon/internal/metrics"
-	"github.com/elevran/charon/internal/model"
-	"github.com/elevran/charon/internal/storage"
-	"github.com/elevran/charon/internal/storage/memory"
-	sqlitestore "github.com/elevran/charon/internal/storage/sqlite"
-	"github.com/elevran/charon/internal/store"
-	"github.com/elevran/charon/internal/worker"
 )
 
-// fixture bundles the test server with its backing stores for direct manipulation.
+// fixture bundles the Charon API test server.
 type fixture struct {
-	srv      *httptest.Server
-	index    storage.IndexStore
-	payloads storage.PayloadStore
-	svc      *store.ContextStore
-	log      *slog.Logger
+	srv *httptest.Server
 }
 
 func (f *fixture) URL() string { return f.srv.URL }
 
-// doJSON sends a JSON request and returns the response (body not yet read).
-func (f *fixture) doJSON(t *testing.T, method, path string, body any) *http.Response {
-	t.Helper()
-	var r io.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		r = bytes.NewReader(b)
-	}
-	req, _ := http.NewRequest(method, f.URL()+path, r)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	return resp
-}
-
-func newFixture(t *testing.T, idx storage.IndexStore, pay storage.PayloadStore, cfg store.Config) *fixture {
+func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := store.New(idx, pay, cfg, log)
+	opts := &crdbpebble.Options{FS: vfs.NewMem()}
+	svc, err := pebblebe.Open(context.Background(), "", opts, chainstore.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = svc.Close() })
 	h := api.NewHandler(svc, log)
 
 	reg := prometheus.NewRegistry()
@@ -73,484 +52,176 @@ func newFixture(t *testing.T, idx storage.IndexStore, pay storage.PayloadStore, 
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-
-	return &fixture{srv: srv, index: idx, payloads: pay, svc: svc, log: log}
+	return &fixture{srv: srv}
 }
 
-func newMemoryFixture(t *testing.T, cfg store.Config) *fixture {
-	t.Helper()
-	return newFixture(t, memory.NewIndexStore(), memory.NewPayloadStore(), cfg)
+func responseBlob(id, status string) []byte {
+	b, _ := json.Marshal(map[string]interface{}{
+		"id":     id,
+		"status": status,
+		"output": []interface{}{map[string]string{"type": "message", "role": "assistant"}},
+	})
+	return b
 }
 
-func newSQLiteFixture(t *testing.T, cfg store.Config) *fixture {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("sqlite fixture requires disk; skipped in -short mode")
-	}
-	dir := t.TempDir()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	scfg := config.StorageConfig{Backend: "sqlite", DataDir: dir}
-	idx, pay, cleanup, err := sqlitestore.Open(scfg, log)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cleanup() })
-	return newFixture(t, idx, pay, cfg)
-}
-
-// backends returns the set of fixture constructors to test against.
-type backendFactory func(t *testing.T, cfg store.Config) *fixture
-
-var backends = []struct {
-	name    string
-	factory backendFactory
-}{
-	{"memory", newMemoryFixture},
-	{"sqlite", newSQLiteFixture},
-}
-
-// helpers to build a store request quickly.
-func storeReq(prevID *string, inp, out string) model.StoreRequest {
-	var inpParam responses.ResponseInputItemUnionParam
-	_ = json.Unmarshal(json.RawMessage(inp), &inpParam)
-	return model.StoreRequest{
-		PreviousResponseID: prevID,
-		Input:              responses.ResponseInputParam{inpParam},
-		Output:             []json.RawMessage{json.RawMessage(out)},
-		Status:             "completed",
-		Model:              "test",
-	}
-}
-
-func ptr(s string) *string { return &s }
-
-// --- legacy tests (kept for backward compat) ---
-
-func startServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	return newMemoryFixture(t, store.Config{}).srv
-}
+// --- Tests ---
 
 func TestMetricsEndpoint(t *testing.T) {
-	srv := startServer(t)
-
-	resp, err := http.Get(srv.URL + "/metrics")
+	fx := newFixture(t)
+	resp, err := http.Get(fx.URL() + "/metrics")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	assert.True(t, strings.Contains(string(body), "responses_write_intent_failures_total"))
+	body, _ := io.ReadAll(resp.Body)
+	// The fixture registers application metrics; any of the responses_* names must appear.
+	assert.Contains(t, string(body), "responses_",
+		"metrics response must contain registered application metrics")
 }
 
 func TestFullStoreCycle(t *testing.T) {
-	srv := startServer(t)
+	fx := newFixture(t)
+	blob := responseBlob("resp_smoke1", "completed")
 
-	inp := json.RawMessage(`{"type":"message","role":"user","text":"hello"}`)
-	out := json.RawMessage(`{"type":"message","role":"assistant","text":"hi"}`)
-	var inpParam responses.ResponseInputItemUnionParam
-	_ = json.Unmarshal(inp, &inpParam)
-	req := model.StoreRequest{
-		Input:  responses.ResponseInputParam{inpParam},
-		Output: []json.RawMessage{out},
-		Status: "completed",
-		Model:  "test",
-	}
-	body, _ := json.Marshal(req)
-
-	storeResp, err := http.Post(srv.URL+"/responses/resp_smoke1", "application/json", bytes.NewReader(body))
+	storeResp, err := http.Post(fx.URL()+"/responses/resp_smoke1",
+		"application/octet-stream", bytes.NewReader(blob))
 	require.NoError(t, err)
 	defer storeResp.Body.Close()
-	assert.Equal(t, http.StatusNoContent, storeResp.StatusCode)
+	assert.Equal(t, http.StatusOK, storeResp.StatusCode)
 
-	getResp, err := http.Get(srv.URL + "/responses/resp_smoke1")
+	getResp, err := http.Get(fx.URL() + "/responses/resp_smoke1")
 	require.NoError(t, err)
 	defer getResp.Body.Close()
 	require.Equal(t, http.StatusOK, getResp.StatusCode)
-	var retrieved model.RetrieveResponse
-	require.NoError(t, json.NewDecoder(getResp.Body).Decode(&retrieved))
-	assert.Equal(t, "resp_smoke1", retrieved.ID)
+	body, _ := io.ReadAll(getResp.Body)
+	assert.JSONEq(t, string(blob), string(body))
+	assert.Equal(t, "0", getResp.Header.Get("X-Depth"))
+}
 
-	resolveResp, err := http.Get(srv.URL + "/responses/resp_smoke1/context")
+func TestChainStoreAndResolve(t *testing.T) {
+	fx := newFixture(t)
+
+	// Store root
+	b0 := responseBlob("resp_chain0", "completed")
+	r0, err := http.Post(fx.URL()+"/responses/resp_chain0",
+		"application/octet-stream", bytes.NewReader(b0))
+	require.NoError(t, err)
+	defer r0.Body.Close()
+	require.Equal(t, http.StatusOK, r0.StatusCode)
+
+	// Resolve continuation
+	resolveResp, err := http.Post(fx.URL()+"/responses?prev=resp_chain0",
+		"application/octet-stream", bytes.NewReader(nil))
 	require.NoError(t, err)
 	defer resolveResp.Body.Close()
 	require.Equal(t, http.StatusOK, resolveResp.StatusCode)
-	var resolved model.ResolveResponse
+
+	var resolved struct {
+		StagingID string            `json:"staging_id"`
+		Turns     []json.RawMessage `json:"turns"`
+	}
 	require.NoError(t, json.NewDecoder(resolveResp.Body).Decode(&resolved))
-	assert.NotEmpty(t, resolved.ReservationID)
-	assert.Len(t, resolved.FlatContext, 2)
-}
+	assert.NotEmpty(t, resolved.StagingID)
+	assert.Len(t, resolved.Turns, 1)
 
-// --- new scenario tests ---
-
-// TestNewChainStoreAndRetrieve: POST a new response, GET it back, verify fields.
-func TestNewChainStoreAndRetrieve(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			fx := b.factory(t, store.Config{})
-
-			req := storeReq(nil,
-				`{"type":"message","role":"user","text":"hello"}`,
-				`{"type":"message","role":"assistant","text":"hi"}`,
-			)
-			r := fx.doJSON(t, "POST", "/responses/resp_new1", req)
-			defer r.Body.Close()
-			require.Equal(t, http.StatusNoContent, r.StatusCode)
-
-			r2 := fx.doJSON(t, "GET", "/responses/resp_new1", nil)
-			defer r2.Body.Close()
-			require.Equal(t, http.StatusOK, r2.StatusCode)
-
-			var got model.RetrieveResponse
-			require.NoError(t, json.NewDecoder(r2.Body).Decode(&got))
-			assert.Equal(t, "resp_new1", got.ID)
-			assert.Equal(t, "test", got.Model)
-			assert.Equal(t, responses.ResponseStatus("completed"), got.Status)
-			assert.Nil(t, got.PreviousResponseID)
-			assert.Len(t, got.Output, 1)
-		})
-	}
-}
-
-// TestSingleContinuation: two-turn chain; resolve turn1 yields both turns.
-func TestSingleContinuation(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			fx := b.factory(t, store.Config{})
-
-			r0 := fx.doJSON(t, "POST", "/responses/resp_cont0",
-				storeReq(nil, `{"type":"message","role":"user","text":"hi"}`, `{"type":"message","role":"assistant","text":"hello"}`))
-			defer r0.Body.Close()
-			require.Equal(t, http.StatusNoContent, r0.StatusCode)
-
-			r1 := fx.doJSON(t, "POST", "/responses/resp_cont1",
-				storeReq(ptr("resp_cont0"),
-					`{"type":"message","role":"user","text":"how are you?"}`,
-					`{"type":"message","role":"assistant","text":"fine"}`))
-			defer r1.Body.Close()
-			require.Equal(t, http.StatusNoContent, r1.StatusCode)
-
-			// Resolve turn1: should include all 4 items (2 per turn).
-			r2 := fx.doJSON(t, "GET", "/responses/resp_cont1/context", nil)
-			defer r2.Body.Close()
-			require.Equal(t, http.StatusOK, r2.StatusCode)
-
-			var resolved model.ResolveResponse
-			require.NoError(t, json.NewDecoder(r2.Body).Decode(&resolved))
-			assert.NotEmpty(t, resolved.ReservationID)
-			assert.Len(t, resolved.FlatContext, 4)
-		})
-	}
-}
-
-// TestMultiTurnChain builds a 5-turn chain and verifies flat context order.
-func TestMultiTurnChain(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			fx := b.factory(t, store.Config{CheckpointInterval: 100}) // no checkpoints
-
-			const n = 5
-			ids := make([]string, n)
-			for i := range n {
-				ids[i] = fmt.Sprintf("resp_mt%02d", i)
-				var prevID *string
-				if i > 0 {
-					prevID = ptr(ids[i-1])
-				}
-				inp := fmt.Sprintf(`{"type":"message","role":"user","text":"turn%d"}`, i)
-				out := fmt.Sprintf(`{"type":"message","role":"assistant","text":"reply%d"}`, i)
-				r := fx.doJSON(t, "POST", "/responses/"+ids[i], storeReq(prevID, inp, out))
-				defer r.Body.Close()
-				require.Equal(t, http.StatusNoContent, r.StatusCode, "turn %d", i)
-			}
-
-			r := fx.doJSON(t, "GET", "/responses/"+ids[n-1]+"/context", nil)
-			defer r.Body.Close()
-			require.Equal(t, http.StatusOK, r.StatusCode)
-
-			var resolved model.ResolveResponse
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&resolved))
-			// Each turn has 1 input + 1 output item = n*2 total.
-			assert.Len(t, resolved.FlatContext, n*2)
-
-			// Verify chronological order: first item should be user role (turn 0 input).
-			var first struct {
-				Role string `json:"role"`
-			}
-			require.NoError(t, json.Unmarshal(resolved.FlatContext[0], &first))
-			assert.Equal(t, "user", first.Role)
-		})
-	}
-}
-
-// TestCheckpointBoundary: a checkpoint fires at position K; resolve K-1 and K+1 both work.
-func TestCheckpointBoundary(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			// CheckpointInterval=2: checkpoint fires at position 2 (the 3rd item, 0-indexed).
-			fx := b.factory(t, store.Config{CheckpointInterval: 2})
-
-			store3 := func(id string, prevID *string, turn int) {
-				inp := fmt.Sprintf(`{"type":"message","role":"user","text":"u%d"}`, turn)
-				out := fmt.Sprintf(`{"type":"message","role":"assistant","text":"a%d"}`, turn)
-				r := fx.doJSON(t, "POST", "/responses/"+id, storeReq(prevID, inp, out))
-				defer r.Body.Close()
-				require.Equal(t, http.StatusNoContent, r.StatusCode)
-			}
-
-			store3("resp_ck0", nil, 0)             // position 0
-			store3("resp_ck1", ptr("resp_ck0"), 1) // position 1
-			store3("resp_ck2", ptr("resp_ck1"), 2) // position 2 — checkpoint written
-			store3("resp_ck3", ptr("resp_ck2"), 3) // position 3 — uses checkpoint
-
-			// Resolve ck1 (no checkpoint): 2 turns × 2 items.
-			r := fx.doJSON(t, "GET", "/responses/resp_ck1/context", nil)
-			defer r.Body.Close()
-			require.Equal(t, http.StatusOK, r.StatusCode)
-			var p1 model.ResolveResponse
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&p1))
-			assert.Len(t, p1.FlatContext, 4, "ck1 should have 4 items")
-
-			// Resolve ck3 (uses checkpoint at ck2): 4 turns × 2 items.
-			r2 := fx.doJSON(t, "GET", "/responses/resp_ck3/context", nil)
-			defer r2.Body.Close()
-			require.Equal(t, http.StatusOK, r2.StatusCode)
-			var p3 model.ResolveResponse
-			require.NoError(t, json.NewDecoder(r2.Body).Decode(&p3))
-			assert.Len(t, p3.FlatContext, 8, "ck3 should have 8 items")
-
-			// Verify chronological order: first item should be user role (turn 0 input).
-			var first struct {
-				Role string `json:"role"`
-			}
-			require.NoError(t, json.Unmarshal(p3.FlatContext[0], &first))
-			assert.Equal(t, "user", first.Role)
-		})
-	}
-}
-
-// TestWriteIntentRecovery: a stale stream_open intent is recovered as failed.
-func TestWriteIntentRecovery(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			fx := b.factory(t, store.Config{})
-
-			// Start a stream (creates a stream_open write intent).
-			chunk := model.ChunkRequest{
-				Type:  "chunk",
-				Seq:   0,
-				Items: []json.RawMessage{json.RawMessage(`{"type":"message","role":"assistant","text":"chunk0"}`)},
-			}
-			r := fx.doJSON(t, "PATCH", "/responses/resp_wir1", chunk)
-			defer r.Body.Close()
-			require.Equal(t, http.StatusNoContent, r.StatusCode)
-
-			// Run the reconciler with stale=0 so the just-created intent is already stale.
-			rec := worker.NewReconciler(fx.index, fx.payloads, fx.log, 0, time.Hour)
-			rec.RunOnce(context.Background())
-
-			// The stream was never committed; the response should not exist.
-			r2 := fx.doJSON(t, "GET", "/responses/resp_wir1", nil)
-			defer r2.Body.Close()
-			assert.Equal(t, http.StatusNotFound, r2.StatusCode)
-		})
-	}
-}
-
-// TestTTLExpiry: store a response, set its TTL to the past, run cleaner, confirm it's gone.
-func TestTTLExpiry(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			fx := b.factory(t, store.Config{})
-
-			r := fx.doJSON(t, "POST", "/responses/resp_ttl1",
-				storeReq(nil, `{"type":"message","role":"user","text":"bye"}`, `{"type":"message","role":"assistant","text":"farewell"}`))
-			defer r.Body.Close()
-			require.Equal(t, http.StatusNoContent, r.StatusCode)
-
-			// Override ExpiresAt to 1 second in the past by re-putting the meta.
-			meta, err := fx.index.Get(context.Background(), "resp_ttl1")
-			require.NoError(t, err)
-			past := time.Now().Add(-time.Second).Unix()
-			meta.ExpiresAt = &past
-			require.NoError(t, fx.index.Put(context.Background(), meta))
-
-			// Run a single TTL sweep directly.
-			sweepTTL(t, fx.index, fx.payloads, fx.log)
-
-			r2 := fx.doJSON(t, "GET", "/responses/resp_ttl1", nil)
-			defer r2.Body.Close()
-			assert.Equal(t, http.StatusNotFound, r2.StatusCode)
-		})
-	}
-}
-
-// sweepTTL runs a single TTL sweep directly against the stores.
-func sweepTTL(t *testing.T, index storage.IndexStore, payloads storage.PayloadStore, log *slog.Logger) {
-	t.Helper()
-	expired, err := index.ListExpired(context.Background(), time.Now().Unix())
+	// Store continuation
+	b1 := responseBlob("resp_chain1", "completed")
+	req, _ := http.NewRequest(http.MethodPost,
+		fx.URL()+"/responses/resp_chain1?req="+resolved.StagingID,
+		bytes.NewReader(b1))
+	r1, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	for _, meta := range expired {
-		if meta.PayloadKey != "" {
-			_ = payloads.Delete(context.Background(), meta.PayloadKey)
+	defer r1.Body.Close()
+	assert.Equal(t, http.StatusOK, r1.StatusCode)
+
+	// Verify depth
+	get1, err := http.Get(fx.URL() + "/responses/resp_chain1")
+	require.NoError(t, err)
+	defer get1.Body.Close()
+	assert.Equal(t, "1", get1.Header.Get("X-Depth"))
+}
+
+func TestMultiTurnChain(t *testing.T) {
+	fx := newFixture(t)
+
+	const n = 5
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("resp_mt%02d", i)
+	}
+
+	// Store root
+	b := responseBlob(ids[0], "completed")
+	r, _ := http.Post(fx.URL()+"/responses/"+ids[0],
+		"application/octet-stream", bytes.NewReader(b))
+	r.Body.Close()
+	require.Equal(t, http.StatusOK, r.StatusCode)
+
+	// Store continuation turns
+	for i := 1; i < n; i++ {
+		resolveResp, _ := http.Post(fx.URL()+"/responses?prev="+ids[i-1],
+			"application/octet-stream", bytes.NewReader(nil))
+		var resolved struct {
+			StagingID string `json:"staging_id"`
 		}
-		require.NoError(t, index.Delete(context.Background(), meta.ID))
+		json.NewDecoder(resolveResp.Body).Decode(&resolved)
+		resolveResp.Body.Close()
+
+		blob := responseBlob(ids[i], "completed")
+		req, _ := http.NewRequest(http.MethodPost,
+			fx.URL()+"/responses/"+ids[i]+"?req="+resolved.StagingID,
+			bytes.NewReader(blob))
+		storeResp, _ := http.DefaultClient.Do(req)
+		storeResp.Body.Close()
+		require.Equal(t, http.StatusOK, storeResp.StatusCode, "turn %d", i)
 	}
+
+	// Verify depth of last turn
+	get, err := http.Get(fx.URL() + "/responses/" + ids[n-1])
+	require.NoError(t, err)
+	defer get.Body.Close()
+	assert.Equal(t, fmt.Sprintf("%d", n-1), get.Header.Get("X-Depth"))
 }
 
-// TestChunkedStreamInOrder: PATCH chunks in seq order, commit, verify assembled output.
-func TestChunkedStreamInOrder(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			fx := b.factory(t, store.Config{})
+func TestDeleteThenGet(t *testing.T) {
+	fx := newFixture(t)
+	blob := responseBlob("resp_del_intg", "completed")
 
-			// Send 3 chunks in order.
-			for seq := range 3 {
-				chunk := model.ChunkRequest{
-					Type:  "chunk",
-					Seq:   seq,
-					Items: []json.RawMessage{json.RawMessage(fmt.Sprintf(`{"type":"message","seq":%d}`, seq))},
-				}
-				r := fx.doJSON(t, "PATCH", "/responses/resp_stream1", chunk)
-				defer r.Body.Close()
-				require.Equal(t, http.StatusNoContent, r.StatusCode)
-			}
+	r, _ := http.Post(fx.URL()+"/responses/resp_del_intg",
+		"application/octet-stream", bytes.NewReader(blob))
+	r.Body.Close()
 
-			// Commit.
-			commit := model.ChunkRequest{
-				Type:   "commit",
-				Seq:    3,
-				Input:  []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","text":"stream-in"}`)},
-				Status: "completed",
-				Model:  "test",
-			}
-			r := fx.doJSON(t, "PATCH", "/responses/resp_stream1", commit)
-			defer r.Body.Close()
-			require.Equal(t, http.StatusNoContent, r.StatusCode)
+	delReq, _ := http.NewRequest(http.MethodDelete, fx.URL()+"/responses/resp_del_intg", nil)
+	delResp, _ := http.DefaultClient.Do(delReq)
+	delResp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, delResp.StatusCode)
 
-			// Retrieve and verify 3 output items.
-			r2 := fx.doJSON(t, "GET", "/responses/resp_stream1", nil)
-			defer r2.Body.Close()
-			require.Equal(t, http.StatusOK, r2.StatusCode)
-			var got model.RetrieveResponse
-			require.NoError(t, json.NewDecoder(r2.Body).Decode(&got))
-			assert.Len(t, got.Output, 3, "should have 3 output items")
-
-			// Resolve: 1 input + 3 output = 4 items.
-			r3 := fx.doJSON(t, "GET", "/responses/resp_stream1/context", nil)
-			defer r3.Body.Close()
-			require.Equal(t, http.StatusOK, r3.StatusCode)
-			var resolved model.ResolveResponse
-			require.NoError(t, json.NewDecoder(r3.Body).Decode(&resolved))
-			assert.Len(t, resolved.FlatContext, 4)
-		})
-	}
+	getResp, _ := http.Get(fx.URL() + "/responses/resp_del_intg")
+	getResp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, getResp.StatusCode)
 }
 
-// TestChunkedStreamOutOfOrder: PATCH chunks with reversed seq, commit, verify correct assembly.
-func TestChunkedStreamOutOfOrder(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
-			fx := b.factory(t, store.Config{})
+func TestTenantIsolation(t *testing.T) {
+	fx := newFixture(t)
+	blob := responseBlob("resp_iso_intg", "completed")
 
-			// Send 3 chunks in reverse seq order.
-			for _, seq := range []int{2, 0, 1} {
-				chunk := model.ChunkRequest{
-					Type:  "chunk",
-					Seq:   seq,
-					Items: []json.RawMessage{json.RawMessage(fmt.Sprintf(`{"type":"message","seq":%d}`, seq))},
-				}
-				r := fx.doJSON(t, "PATCH", "/responses/resp_ooo1", chunk)
-				defer r.Body.Close()
-				require.Equal(t, http.StatusNoContent, r.StatusCode)
-			}
+	req, _ := http.NewRequest(http.MethodPost, fx.URL()+"/responses/resp_iso_intg",
+		bytes.NewReader(blob))
+	req.Header.Set("X-Tenant-Key", "alice")
+	r, _ := http.DefaultClient.Do(req)
+	r.Body.Close()
 
-			// Commit.
-			commit := model.ChunkRequest{
-				Type:   "commit",
-				Seq:    3,
-				Input:  []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","text":"ooo"}`)},
-				Status: "completed",
-				Model:  "test",
-			}
-			r := fx.doJSON(t, "PATCH", "/responses/resp_ooo1", commit)
-			defer r.Body.Close()
-			require.Equal(t, http.StatusNoContent, r.StatusCode)
+	// bob cannot see alice's entry
+	getReq, _ := http.NewRequest(http.MethodGet, fx.URL()+"/responses/resp_iso_intg", nil)
+	getReq.Header.Set("X-Tenant-Key", "bob")
+	resp, _ := http.DefaultClient.Do(getReq)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 
-			// Retrieve and verify items are assembled in seq order (seq 0, 1, 2).
-			r2 := fx.doJSON(t, "GET", "/responses/resp_ooo1", nil)
-			defer r2.Body.Close()
-			require.Equal(t, http.StatusOK, r2.StatusCode)
-			var got model.RetrieveResponse
-			require.NoError(t, json.NewDecoder(r2.Body).Decode(&got))
-			require.Len(t, got.Output, 3)
-
-			for i, raw := range got.Output {
-				var item struct {
-					Seq int `json:"seq"`
-				}
-				require.NoError(t, json.Unmarshal(raw, &item))
-				assert.Equal(t, i, item.Seq, "output item %d should have seq=%d", i, i)
-			}
-		})
-	}
-}
-
-// TestBackgroundFlagPersistedAndReturned verifies that background:true is stored and
-// returned by GET /responses/{id} for both store and commit-stream paths.
-func TestBackgroundFlagPersistedAndReturned(t *testing.T) {
-	for _, b := range backends {
-		t.Run(b.name+"/store_path", func(t *testing.T) {
-			fx := b.factory(t, store.Config{})
-
-			req := model.StoreRequest{
-				Input: responses.ResponseInputParam{func() responses.ResponseInputItemUnionParam {
-					var p responses.ResponseInputItemUnionParam
-					_ = json.Unmarshal(json.RawMessage(`{"type":"message","role":"user","text":"hi"}`), &p)
-					return p
-				}()},
-				Output:     []json.RawMessage{json.RawMessage(`{"type":"message","role":"assistant","text":"ok"}`)},
-				Status:     "completed",
-				Model:      "test",
-				Background: true,
-			}
-
-			r := fx.doJSON(t, "POST", "/responses/resp_bg_store1", req)
-			defer r.Body.Close()
-			require.Equal(t, http.StatusNoContent, r.StatusCode)
-
-			r2 := fx.doJSON(t, "GET", "/responses/resp_bg_store1", nil)
-			defer r2.Body.Close()
-			require.Equal(t, http.StatusOK, r2.StatusCode)
-
-			var got model.RetrieveResponse
-			require.NoError(t, json.NewDecoder(r2.Body).Decode(&got))
-			assert.True(t, got.Background, "background flag must be returned as true after store path")
-		})
-
-		t.Run(b.name+"/commit_stream_path", func(t *testing.T) {
-			fx := b.factory(t, store.Config{})
-
-			commit := model.ChunkRequest{
-				Type:       "commit",
-				Seq:        0,
-				Input:      []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","text":"hi"}`)},
-				Items:      []json.RawMessage{json.RawMessage(`{"type":"message","role":"assistant","text":"ok"}`)},
-				Status:     "completed",
-				Model:      "test",
-				Background: true,
-			}
-
-			r := fx.doJSON(t, "PATCH", "/responses/resp_bg_commit1", commit)
-			defer r.Body.Close()
-			require.Equal(t, http.StatusNoContent, r.StatusCode)
-
-			r2 := fx.doJSON(t, "GET", "/responses/resp_bg_commit1", nil)
-			defer r2.Body.Close()
-			require.Equal(t, http.StatusOK, r2.StatusCode)
-
-			var got model.RetrieveResponse
-			require.NoError(t, json.NewDecoder(r2.Body).Decode(&got))
-			assert.True(t, got.Background, "background flag must be returned as true after commit stream path")
-		})
-	}
+	// alice can see her own entry
+	getReq2, _ := http.NewRequest(http.MethodGet, fx.URL()+"/responses/resp_iso_intg", nil)
+	getReq2.Header.Set("X-Tenant-Key", "alice")
+	resp2, _ := http.DefaultClient.Do(getReq2)
+	resp2.Body.Close()
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 }

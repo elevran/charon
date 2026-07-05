@@ -87,6 +87,9 @@ func (s *Store) Entries() int64 { return max(s.entries.Load(), 0) }
 // Bytes returns the approximate total blob bytes (updated optimistically on write/delete).
 func (s *Store) Bytes() int64 { return max(s.bytes.Load(), 0) }
 
+// TTL returns the configured TTL duration (0 if TTL-based eviction is disabled).
+func (s *Store) TTL() time.Duration { return s.cfg.TTL }
+
 // New wires cfg into a Store and starts background goroutines.
 // ctx is used only for the initial Stats() call to reload persistent counters;
 // the store's own background goroutines run on an internal context.
