@@ -29,11 +29,8 @@ func RegisterHandlers(mux *http.ServeMux, h *Handler) {
 	}
 	mux.HandleFunc("GET /healthz", h.HandleHealthz)
 	mux.HandleFunc("GET /readyz", h.HandleReadyz)
-	mux.HandleFunc("GET /responses/{id}/context", h.HandleResolve)
-	mux.HandleFunc("GET /responses/{id}/input_items", h.HandleListInputItems)
-	mux.HandleFunc("GET /responses/{id}/output_items", h.HandleListOutputItems)
+	mux.HandleFunc("POST /responses", h.HandleResolve)
 	mux.HandleFunc("POST /responses/{id}", h.HandleStore)
-	mux.HandleFunc("PATCH /responses/{id}", h.HandleAppendChunk)
 	mux.HandleFunc("GET /responses/{id}", h.HandleRetrieve)
 	mux.HandleFunc("DELETE /responses/{id}", h.HandleDelete)
 }

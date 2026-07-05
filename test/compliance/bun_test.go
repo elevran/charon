@@ -3,6 +3,7 @@
 package compliance_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,12 +16,15 @@ import (
 	"testing"
 	"time"
 
+	crdbpebble "github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/vfs"
+
 	apihandler "github.com/elevran/charon/internal/api"
+	"github.com/elevran/charon/internal/chainstore"
+	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
 	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/inference"
 	"github.com/elevran/charon/internal/proxy"
-	"github.com/elevran/charon/internal/storage/memory"
-	"github.com/elevran/charon/internal/store"
 )
 
 // The 11 non-GPU tests that can be validated with a deterministic mock.
@@ -115,9 +119,12 @@ func startRealStack(t *testing.T) string {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	idx := memory.NewIndexStore()
-	pay := memory.NewPayloadStore()
-	svc := store.New(idx, pay, store.Config{}, log)
+	opts := &crdbpebble.Options{FS: vfs.NewMem()}
+	svc, err := pebblebe.Open(context.Background(), "", opts, chainstore.Config{})
+	if err != nil {
+		t.Fatalf("open pebble: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
 	charonH := apihandler.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
 	apihandler.RegisterHandlers(charonMux, charonH)

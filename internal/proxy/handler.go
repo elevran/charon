@@ -83,16 +83,21 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var reservationID string
-	var flatCtx []json.RawMessage
+	tenantKey := r.Header.Get("X-Tenant-Key")
 
+	prevID := ""
 	if req.PreviousResponseID != nil {
-		reservationID, flatCtx, err = h.charon.Resolve(ctx, *req.PreviousResponseID)
-		if err != nil {
-			h.mapCharonError(w, err, "previous_response_not_found")
-			return
-		}
+		prevID = *req.PreviousResponseID
 	}
+	requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
+	var turns []charon.ResolveTurn
+	var stagingID string
+	stagingID, turns, err = h.charon.Resolve(ctx, prevID, tenantKey, requestBlob)
+	if err != nil {
+		h.mapCharonError(w, err, "previous_response_not_found")
+		return
+	}
+	flatCtx := turnsToFlatCtx(turns)
 
 	infMap := buildInferenceMap(rawReq, flatCtx, inputItems)
 	createdAt := time.Now()
@@ -105,20 +110,11 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	completedAt := time.Now()
 
 	if req.ShouldStore() {
-		storeReq := charon.StoreRequest{
-			ReservationID:      reservationID,
-			PreviousResponseID: req.PreviousResponseID,
-			Instructions:       req.Instructions,
-			Input:              inputItems,
-			Output:             infResp.Output,
-			Status:             infResp.Status,
-			Model:              infResp.Model,
-			Background:         req.Background,
-		}
-		if err := h.charon.Store(ctx, infResp.ID, storeReq); err != nil {
+		responseBlob := marshalStoredResponse(infResp, req.PreviousResponseID, req.Instructions, req.Background)
+		if err := h.charon.Store(ctx, infResp.ID, stagingID, tenantKey, responseBlob); err != nil {
 			h.log.Error("charon store", "id", infResp.ID, "err", err)
-			// TODO(chainstore wiring): a Pebble write failure is synchronous and durable;
-			// consider returning 500 instead of treating storage failure as non-fatal.
+			httputil.WriteError(w, http.StatusInternalServerError, "storage error")
+			return
 		}
 	}
 
@@ -129,23 +125,35 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 // HandleRetrieve handles GET /responses/{id}.
 func (h *Handler) HandleRetrieve(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	retrieved, err := h.charon.Retrieve(r.Context(), id)
+	tenantKey := r.Header.Get("X-Tenant-Key")
+
+	retrieved, err := h.charon.Retrieve(r.Context(), id, tenantKey)
 	if err != nil {
 		h.mapCharonError(w, err, "not_found")
 		return
 	}
 
-	// Build a ResponseResource from the stored record.
+	var stored storedResponse
+	if err := json.Unmarshal(retrieved.ResponseBlob, &stored); err != nil {
+		h.log.Error("unmarshal stored response", "id", id, "err", err)
+		httputil.WriteError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	output := stored.Output
+	if output == nil {
+		output = []json.RawMessage{}
+	}
 	resource := &ResponseResource{
-		ID:                 retrieved.ID,
+		ID:                 stored.ID,
 		Object:             "response",
 		CreatedAt:          retrieved.CreatedAt,
-		Status:             retrieved.Status,
-		Model:              retrieved.Model,
-		Background:         retrieved.Background,
-		Instructions:       retrieved.Instructions,
-		PreviousResponseID: retrieved.PreviousResponseID,
-		Output:             retrieved.Output,
+		Status:             stored.Status,
+		Model:              stored.Model,
+		Background:         stored.Background,
+		Instructions:       stored.Instructions,
+		PreviousResponseID: stored.PreviousResponseID,
+		Output:             output,
 		Store:              true,
 		Tools:              []json.RawMessage{},
 		ToolChoice:         "auto",
@@ -155,16 +163,14 @@ func (h *Handler) HandleRetrieve(w http.ResponseWriter, r *http.Request) {
 		Metadata:           map[string]string{},
 		ServiceTier:        "default",
 	}
-	if resource.Output == nil {
-		resource.Output = []json.RawMessage{}
-	}
 	httputil.WriteJSON(w, http.StatusOK, resource)
 }
 
 // HandleDelete handles DELETE /responses/{id}.
 func (h *Handler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.charon.Delete(r.Context(), id); err != nil {
+	tenantKey := r.Header.Get("X-Tenant-Key")
+	if err := h.charon.Delete(r.Context(), id, tenantKey); err != nil {
 		h.mapCharonError(w, err, "not_found")
 		return
 	}

@@ -8,6 +8,27 @@ import (
 	"github.com/elevran/charon/internal/inference"
 )
 
+// marshalStoredResponse serialises an inference response and request metadata
+// into the response blob format used by Store and decoded by HandleRetrieve.
+func marshalStoredResponse(infResp *inference.Response, prevID *string, instructions *string, background bool) []byte {
+	var usage json.RawMessage
+	if infResp.Usage != nil {
+		usage, _ = json.Marshal(infResp.Usage)
+	}
+	sr := storedResponse{
+		ID:                 infResp.ID,
+		Model:              infResp.Model,
+		Status:             infResp.Status,
+		Background:         background,
+		Instructions:       instructions,
+		PreviousResponseID: prevID,
+		Output:             infResp.Output,
+		Usage:              usage,
+	}
+	b, _ := json.Marshal(sr)
+	return b
+}
+
 // buildInferenceMap constructs the inference request map from the raw client
 // request. It strips gateway-consumed fields, forces store:false, forces
 // stream:false (caller overrides to true for streaming paths), and replaces

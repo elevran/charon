@@ -1,6 +1,52 @@
 package proxy
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/elevran/charon/internal/charon"
+)
+
+// storedRequest is the format written as the request blob by Resolve.
+// Contains the input items so flat context can be reconstructed from turns.
+type storedRequest struct {
+	Input []json.RawMessage `json:"input"`
+}
+
+// storedResponse is the format written as the response blob by Store.
+// Contains the fields needed to reconstruct a ResponseResource on Retrieve.
+type storedResponse struct {
+	ID                 string            `json:"id"`
+	Model              string            `json:"model"`
+	Status             string            `json:"status"`
+	Background         bool              `json:"background,omitempty"`
+	Instructions       *string           `json:"instructions,omitempty"`
+	PreviousResponseID *string           `json:"previous_response_id,omitempty"`
+	Output             []json.RawMessage `json:"output"`
+	Usage              json.RawMessage   `json:"usage,omitempty"`
+}
+
+// turnsToFlatCtx assembles the flat context from resolved turns (root-first).
+// Input items come from the request blob (staged by Resolve); output items come
+// from the response blob. All turns, including first turns, have a request blob
+// because the proxy always calls Resolve before storing.
+func turnsToFlatCtx(turns []charon.ResolveTurn) []json.RawMessage {
+	var flat []json.RawMessage
+	for _, t := range turns {
+		if len(t.RequestBlob) > 0 {
+			var req storedRequest
+			if err := json.Unmarshal(t.RequestBlob, &req); err == nil {
+				flat = append(flat, req.Input...)
+			}
+		}
+		if len(t.ResponseBlob) > 0 {
+			var resp storedResponse
+			if err := json.Unmarshal(t.ResponseBlob, &resp); err == nil {
+				flat = append(flat, resp.Output...)
+			}
+		}
+	}
+	return flat
+}
 
 // ResponseResource is the full OpenAI Responses API response returned to clients.
 type ResponseResource struct {
