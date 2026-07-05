@@ -47,10 +47,11 @@ func run() error {
 	}
 
 	cfg := chainstore.Config{
-		MaxEntries: opts.Storage.MaxResponses,
-		MaxBytes:   int64(opts.Storage.MaxPayload),
-		TTL:        time.Duration(opts.Storage.TTLDays) * 24 * time.Hour,
-		Log:        log,
+		MaxEntries:  opts.Storage.MaxResponses,
+		MaxBytes:    int64(opts.Storage.MaxPayload),
+		TTL:         time.Duration(opts.Storage.TTLDays) * 24 * time.Hour,
+		TTLInterval: opts.WorkerTTLInterval,
+		Log:         log,
 	}
 
 	svc, err := pebblebe.Open(context.Background(), opts.Storage.DataDir, nil, cfg)
