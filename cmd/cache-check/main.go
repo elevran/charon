@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -56,41 +57,41 @@ func run() error {
 	printReport(os.Stdout, report)
 
 	if !report.OK {
-		os.Exit(1)
+		return errors.New("consistency check failed")
 	}
 	return nil
 }
 
 // printReport writes a human-readable summary to w. Always called once before exit.
 func printReport(w *os.File, r *chainstorepebble.ConsistencyReport) {
-	fmt.Fprintf(w, "nodes scanned:      %d\n", r.NodesScanned)
-	fmt.Fprintf(w, "LRU entries scanned: %d\n", r.LRUEntriesScanned)
-	fmt.Fprintf(w, "depth errors:       %d\n", len(r.DepthErrors))
-	fmt.Fprintf(w, "dangling LRU:       %d\n", len(r.DanglingLRU))
-	fmt.Fprintf(w, "decode errors:      %d\n", len(r.DecodeErrors))
+	_, _ = fmt.Fprintf(w, "nodes scanned:      %d\n", r.NodesScanned)
+	_, _ = fmt.Fprintf(w, "LRU entries scanned: %d\n", r.LRUEntriesScanned)
+	_, _ = fmt.Fprintf(w, "depth errors:       %d\n", len(r.DepthErrors))
+	_, _ = fmt.Fprintf(w, "dangling LRU:       %d\n", len(r.DanglingLRU))
+	_, _ = fmt.Fprintf(w, "decode errors:      %d\n", len(r.DecodeErrors))
 
 	if len(r.DepthErrors) > 0 {
-		fmt.Fprintln(w, "\nDepth errors:")
+		_, _ = fmt.Fprintln(w, "\nDepth errors:")
 		for _, e := range r.DepthErrors {
-			fmt.Fprintf(w, "  %s\n", e)
+			_, _ = fmt.Fprintf(w, "  %s\n", e)
 		}
 	}
 	if len(r.DanglingLRU) > 0 {
-		fmt.Fprintln(w, "\nDangling LRU entries:")
+		_, _ = fmt.Fprintln(w, "\nDangling LRU entries:")
 		for _, e := range r.DanglingLRU {
-			fmt.Fprintf(w, "  %s\n", e)
+			_, _ = fmt.Fprintf(w, "  %s\n", e)
 		}
 	}
 	if len(r.DecodeErrors) > 0 {
-		fmt.Fprintln(w, "\nDecode errors:")
+		_, _ = fmt.Fprintln(w, "\nDecode errors:")
 		for _, e := range r.DecodeErrors {
-			fmt.Fprintf(w, "  %s\n", e)
+			_, _ = fmt.Fprintf(w, "  %s\n", e)
 		}
 	}
 
 	if r.OK {
-		fmt.Fprintln(w, "\nOK")
+		_, _ = fmt.Fprintln(w, "\nOK")
 	} else {
-		fmt.Fprintln(w, "\nFAILED")
+		_, _ = fmt.Fprintln(w, "\nFAILED")
 	}
 }

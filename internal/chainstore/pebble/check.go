@@ -157,7 +157,7 @@ func (b *Backend) ConsistencyCheck(ctx context.Context) (*ConsistencyReport, err
 		key := lruIter.Key()
 		// pfxLRU layout: [pfx=1][bucket=8][nodeID=20] = 29 bytes
 		if len(key) != 1+8+20 {
-			continue // malformed; ignore
+			continue // unknown on-disk layout — skip
 		}
 		var id [20]byte
 		copy(id[:], key[9:])
