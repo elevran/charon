@@ -128,8 +128,6 @@ func (s *Store) evictOldest(ctx context.Context) {
 			s.deleteNode(ctx, node)
 			if s.metrics != nil {
 				s.metrics.evictionsTotal.Inc()
-				s.metrics.entries.Set(float64(s.entries.Load()))
-				s.metrics.bytes.Set(float64(s.bytes.Load()))
 			}
 		}
 	}
@@ -183,8 +181,6 @@ func (s *Store) ttlReap(ctx context.Context) {
 			s.deleteSubtree(ctx, id)
 			if s.metrics != nil {
 				s.metrics.ttlExpirationsTotal.Inc()
-				s.metrics.entries.Set(float64(s.entries.Load()))
-				s.metrics.bytes.Set(float64(s.bytes.Load()))
 			}
 		}
 
@@ -233,12 +229,14 @@ func (s *Store) deleteNode(ctx context.Context, node Node) {
 	// Decrement before commit so concurrent capacity checks see the updated count
 	// immediately. If the commit fails, compensate to restore the correct count.
 	s.entries.Add(-1)
-	s.bytes.Add(-blobBytes)
+	totalBytes := s.bytes.Add(-blobBytes)
 	if err := s.backend.Commit(ctx, tx); err != nil {
 		s.entries.Add(1)
 		s.bytes.Add(blobBytes)
 		s.cfg.Log.Error("chainstore: deleteNode commit error", "err", err)
+		return
 	}
+	s.metricsAfterMutation(s.entries.Load(), totalBytes)
 }
 
 // deleteSubtree deletes root and all descendants via BFS using GetChildren.
@@ -281,7 +279,8 @@ func (s *Store) deleteSubtree(ctx context.Context, root NodeID) {
 			}
 			// Update counters only after a successful commit.
 			s.entries.Add(tx.StatsDelta.EntryDelta)
-			s.bytes.Add(tx.StatsDelta.BytesDelta)
+			totalBytes := s.bytes.Add(tx.StatsDelta.BytesDelta)
+			s.metricsAfterMutation(s.entries.Load(), totalBytes)
 		}
 
 		frontier = next
