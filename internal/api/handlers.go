@@ -12,11 +12,25 @@ import (
 	"github.com/elevran/charon/internal/httputil"
 )
 
+// defaultMaxChunkBytes is the per-PUT chunk size used when the handler is
+// not configured via WithMaxChunkBytes. 1 MB is the safe-default body size
+// for proxy→Charon streaming ingest: small enough that 50+ concurrent
+// inferences on a single host stay well under typical 256 MB per-process
+// caps, large enough that the per-batch HTTP framing overhead is small.
+const defaultMaxChunkBytes = 1 << 20
+
+// maxChunkBytesCap is the hard upper bound for the configured chunk limit.
+// Configured limits above this are clamped. 4 MB is the proxy→Charon body
+// maximum — anything larger risks unbounded memory growth and a single
+// body that exceeds typical reverse-proxy body limits.
+const maxChunkBytesCap = 4 << 20
+
 // Handler wires chainstore.Store to HTTP endpoints.
 type Handler struct {
-	svc          *chainstore.Store
-	log          *slog.Logger
-	maxBodyBytes int64
+	svc           *chainstore.Store
+	log           *slog.Logger
+	maxBodyBytes  int64
+	maxChunkBytes int64
 }
 
 // NewHandler creates a Handler.
@@ -29,6 +43,26 @@ func NewHandler(svc *chainstore.Store, log *slog.Logger) *Handler {
 func (h *Handler) WithMaxBodyBytes(n int64) *Handler {
 	h.maxBodyBytes = n
 	return h
+}
+
+// WithMaxChunkBytes overrides the per-streaming-chunk PUT body cap (default
+// 1 MB, hard cap 4 MB). Use this to tighten or relax the proxy→Charon
+// memory budget during streaming ingest. Independent of maxBodyBytes which
+// caps the legacy POST (and can be GBs).
+func (h *Handler) WithMaxChunkBytes(n int64) *Handler {
+	if n > maxChunkBytesCap {
+		n = maxChunkBytesCap
+	}
+	h.maxChunkBytes = n
+	return h
+}
+
+// chunkLimit returns the configured chunk limit or the default.
+func (h *Handler) chunkLimit() int64 {
+	if h.maxChunkBytes > 0 {
+		return h.maxChunkBytes
+	}
+	return defaultMaxChunkBytes
 }
 
 // blobToRaw converts a raw-bytes blob to json.RawMessage for the wire format.
@@ -119,10 +153,20 @@ func (h *Handler) HandleResolve(w http.ResponseWriter, r *http.Request) {
 // HandleStore handles POST /responses/{id}.
 // Reads raw response blob from the body and the staging ID from the "req" query
 // parameter, then durably commits the turn.
+//
+// Streaming variant: callers that PUT batches via HandleAppendChunk signal a
+// chunked commit either explicitly via ?chunks=N&total=M on this POST, or
+// implicitly by leaving those off and relying on the staging record to
+// already carry pre-existing chunks. The body is ignored for chunked
+// commits — chunks under the staging record's ResponseBlobID are the
+// source of truth.
 func (h *Handler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	tenantKey := r.Header.Get("X-Tenant-Key")
 	stagingID := r.URL.Query().Get("req")
+	q := r.URL.Query()
+	chunksQ := q.Get("chunks")
+	totalQ := q.Get("total")
 	if len(stagingID) > 64 {
 		httputil.WriteError(w, http.StatusBadRequest, "invalid staging id")
 		return
@@ -138,15 +182,159 @@ func (h *Handler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = r.Body.Close()
 
-	if err := h.svc.StoreWithStaging(r.Context(), stagingID, id, "", tenantKey, responseBlob); err != nil {
-		status, msg := mapStatus(err)
+	var commitErr error
+	switch {
+	case chunksQ != "":
+		// Streaming commit: client supplied chunk count and total size.
+		chunks, parseErr := strconv.ParseUint(chunksQ, 10, 32)
+		if parseErr != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid chunks")
+			return
+		}
+		total, parseErr := strconv.ParseUint(totalQ, 10, 32)
+		if parseErr != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid total")
+			return
+		}
+		commitErr = h.svc.StreamStore(r.Context(), stagingID, id, "", tenantKey, uint32(chunks), uint32(total))
+	case stagingID != "":
+		// No explicit chunks/total: detect via the staging record. If the
+		// proxy PUT batches via HandleAppendChunk then the staging record
+		// already carries them; commit as a chunked node. Otherwise fall
+		// through to the legacy single-blob path with the body.
+		hasChunks, chunks, total, peekErr := h.svc.PeekStreamingState(r.Context(), stagingID)
+		if peekErr != nil {
+			status, msg := mapStatus(peekErr)
+			httputil.WriteError(w, status, msg)
+			return
+		}
+		if hasChunks {
+			commitErr = h.svc.StreamStore(r.Context(), stagingID, id, "", tenantKey, chunks, total)
+		} else {
+			commitErr = h.svc.StoreWithStaging(r.Context(), stagingID, id, "", tenantKey, responseBlob)
+		}
+	default:
+		commitErr = h.svc.StoreWithStaging(r.Context(), "", id, "", tenantKey, responseBlob)
+	}
+
+	if commitErr != nil {
+		status, msg := mapStatus(commitErr)
 		if status == http.StatusInternalServerError {
-			h.log.Error("store", "id", id, "err", err)
+			h.log.Error("store", "id", id, "err", commitErr)
 		}
 		httputil.WriteError(w, status, msg)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// HandleAppendChunk handles PUT /responses/<stagingID>?offset=N[&complete=true][&response_id=<id>][&total=<T>].
+// The path IS the stagingID — there is no separate req= query param. Reads a
+// JSON array of output items from the body and appends it as one chunk (page)
+// under the staging record's chunk namespace.
+//
+// By default the response is NOT visible to Retrieve — the proxy must call
+// this handler one or more times for the body, then either:
+//
+//   - call HandleStore (POST) to commit, or
+//   - pass ?complete=true on the last PUT, which atomically writes the chunk
+//     AND the manifest + final Node + staging-record delete in one Pebble
+//     batch, saving one HTTP round trip.
+//
+// `offset` is the 0-based ordinal of this batch across the full response.
+// Replays with the same (stagingID, offset) are idempotent (last-write-wins
+// on the chunk key); arrival order is irrelevant — the read path concatenates
+// in key order.
+//
+// `response_id` and `total` are required when `complete=true`:
+//   - `response_id` is the final responseID the proxy expects the inference
+//     server to use; the resulting Node is stored under this id.
+//   - `total` is the cumulative byte count of ALL chunks including this one.
+//
+// Tenant isolation is enforced by the staging record — the chunk namespace
+// equals the staging node's ResponseBlobID, so a tenant cannot PUT into
+// another tenant's staging record because the stagingID is a 128-bit random
+// UUID.
+func (h *Handler) HandleAppendChunk(w http.ResponseWriter, r *http.Request) {
+	stagingID := r.PathValue("id")
+	offsetStr := r.URL.Query().Get("offset")
+	complete := r.URL.Query().Get("complete") == "true"
+	responseID := r.URL.Query().Get("response_id")
+	totalStr := r.URL.Query().Get("total")
+
+	if len(stagingID) > 64 {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid staging id")
+		return
+	}
+	if stagingID == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "missing staging id")
+		return
+	}
+	if offsetStr == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "missing offset")
+		return
+	}
+	offset, err := strconv.ParseUint(offsetStr, 10, 32)
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid offset")
+		return
+	}
+
+	var totalSize uint32
+	if complete {
+		if responseID == "" {
+			httputil.WriteError(w, http.StatusBadRequest, "complete=true requires response_id")
+			return
+		}
+		if len(responseID) > 255 {
+			httputil.WriteError(w, http.StatusBadRequest, "response_id exceeds 255 bytes")
+			return
+		}
+		if totalStr == "" {
+			httputil.WriteError(w, http.StatusBadRequest, "complete=true requires total")
+			return
+		}
+		t, err := strconv.ParseUint(totalStr, 10, 32)
+		if err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid total")
+			return
+		}
+		totalSize = uint32(t)
+	}
+
+	// Cap per-chunk reads independently of the global maxBodyBytes (which can
+	// be GBs). Default 1 MB; configurable up to 4 MB via WithMaxChunkBytes.
+	r.Body = http.MaxBytesReader(w, r.Body, h.chunkLimit())
+	chunkBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "failed to read chunk body")
+		return
+	}
+	_ = r.Body.Close()
+	if len(chunkBody) == 0 {
+		httputil.WriteError(w, http.StatusBadRequest, "empty chunk body")
+		return
+	}
+
+	var svcErr error
+	if complete {
+		svcErr = h.svc.StreamStoreCommit(r.Context(), stagingID, responseID, "", r.Header.Get("X-Tenant-Key"), uint32(offset), chunkBody, totalSize)
+	} else {
+		svcErr = h.svc.AppendChunk(r.Context(), stagingID, uint32(offset), chunkBody)
+	}
+	if svcErr != nil {
+		status, msg := mapStatus(svcErr)
+		if status == http.StatusInternalServerError {
+			h.log.Error("append chunk", "staging", stagingID, "offset", offset, "complete", complete, "err", svcErr)
+		}
+		httputil.WriteError(w, status, msg)
+		return
+	}
+	if complete {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusAccepted)
+	}
 }
 
 // HandleRetrieve handles GET /responses/{id}.

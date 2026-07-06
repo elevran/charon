@@ -38,15 +38,16 @@ type Node struct {
 	ID               NodeID
 	ParentID         NodeID   // zero value = root node
 	RequestBlobID    BlobID   // UUID → request (input) blob; zero until request is stored
-	ResponseBlobID   BlobID   // UUID → response (output) blob; zero until turn is completed
+	ResponseBlobID   BlobID   // UUID → response blob ID; interpretation depends on BlobType
 	LastAccessUnix   int64    // Unix seconds; updated on access
 	CreatedAt        int64    // Unix seconds; set at store time, never updated
 	BucketID         BucketID // bucket at last promotion; ground truth for eviction order
 	RequestBlobSize  uint32
 	ResponseBlobSize uint32
-	Depth            uint32 // 0 = root; enables slice preallocation in LoadChain
-	Status           uint8  // NodeStatusCompleted or NodeStatusFailed
-	ResponseID       string // external caller-supplied ID; stored verbatim, max 255 bytes
+	Depth            uint32   // 0 = root; enables slice preallocation in LoadChain
+	Status           uint8    // NodeStatusCompleted or NodeStatusFailed
+	BlobType         BlobType // single-blob or chunked (Phase 6 streaming ingest)
+	ResponseID       string   // external caller-supplied ID; stored verbatim, max 255 bytes
 }
 
 // Node status constants.
@@ -54,6 +55,40 @@ const (
 	NodeStatusCompleted uint8 = iota
 	NodeStatusFailed
 )
+
+// BlobType distinguishes single-blob nodes (one pfxBlob key) from chunked
+// nodes (a pfxManifest key plus one pfxChunk key per batch).
+// Default zero value is BlobTypeSingle; chunked nodes are explicitly set to
+// BlobTypeChunked when a StreamStore commit lands.
+type BlobType uint8
+
+const (
+	// BlobTypeSingle stores the response payload as one pfxBlob key.
+	// This is the default for non-streaming stores.
+	BlobTypeSingle BlobType = iota
+	// BlobTypeChunked stores the response payload as a pfxManifest key plus
+	// one pfxChunk key per appended batch. Set by Store.StreamStore.
+	BlobTypeChunked
+)
+
+// ChunkEntry is one batch of a chunked blob in a Transaction.
+// offset is the 0-based item index; same (blobID, offset) repeated is idempotent
+// (last write wins on duplicates).
+type ChunkEntry struct {
+	BlobID BlobID
+	Offset uint32
+	Data   []byte
+}
+
+// ManifestEntry seals a chunked blob in a Transaction (the atomic commit point).
+// ChunkCount and TotalSize are recorded so reads can size buffers without
+// scanning, and so the eviction/reaper code can find orphan chunks via
+// staging key (which carries the same BlobID).
+type ManifestEntry struct {
+	BlobID     BlobID
+	ChunkCount uint32
+	TotalSize  uint32
+}
 
 // BlobEntry carries a blob's ID and raw bytes in a Transaction.
 type BlobEntry struct {
@@ -101,9 +136,12 @@ type StagingEntry struct {
 //   - Store a turn:    PutNodes + PutBlobs (request blob) + PutChildren + StatsDelta
 //   - Complete a turn: PutNodes + PutBlobs (response blob) + StatsDelta
 //   - Touch/promote:   PutNodes (LastAccessUnix) + BucketMoves
-//   - Delete:          DeleteNodes + DeleteBlobs + DeleteChildren + StatsDelta
+//   - Delete:          DeleteNodes + DeleteBlobs + DeleteChunks + DeleteChildren + StatsDelta
 //   - Stage a request: PutStagingNodes + PutBlobs (request blob)
 //   - Commit staged:   PutNodes + PutBlobs (response blob) + PutChildren + DeleteStagingNodes + StatsDelta
+//   - Streaming append: Chunks (one per PUT batch)
+//   - Streaming commit: PutNodes (BlobType=Chunked) + Manifests + DeleteStagingNodes + StatsDelta
+//   - Reap orphans:     DeleteStagingNodes + DeleteBlobs + DeleteChunks
 type Transaction struct {
 	OpID uuid.UUID
 
@@ -112,6 +150,24 @@ type Transaction struct {
 
 	PutBlobs    []BlobEntry
 	DeleteBlobs []BlobID
+
+	// PutChunks / DeleteChunks append or remove individual chunk pages of a
+	// chunked blob. Chunks are stored under pfxChunk+blobID+offset; the
+	// manifest (pfxManifest) is the atomic commit point that makes a chunked
+	// blob visible to reads.
+	PutChunks    []ChunkEntry
+	DeleteChunks []ChunkEntry // entries address by (BlobID,Offset); Data is unused on delete
+
+	// PutManifests record the (BlobID, ChunkCount, TotalSize) of a chunked
+	// blob's atomic commit point under pfxManifest. Commit ordering must
+	// place the manifest write in the same Transaction as the corresponding
+	// Node update so reads see BlobType=Chunked and the manifest atomically.
+	PutManifests []ManifestEntry
+
+	// DeleteManifests removes the manifest key (the atomic commit point) for
+	// a chunked blob. Used by deleteNode/deleteSubtree paths; the staging
+	// reaper and orphan chunk cleanup also rely on it.
+	DeleteManifests []BlobID
 
 	PutChildren    []ChildEntry
 	DeleteChildren []ChildEntry
@@ -164,6 +220,16 @@ type Backend interface {
 	// is before cutoff. Used by the staging TTL reaper to clean orphaned records
 	// left by a proxy crash between ResolveAndStage and StoreWithStaging.
 	ListStagingOlderThan(ctx context.Context, cutoff time.Time) ([]StagingEntry, error)
+
+	// GetManifest returns the manifest for a chunked blob.
+	// Returns ErrNotFound if no manifest exists for blobID (chunked blob never
+	// committed, or has been deleted).
+	GetManifest(ctx context.Context, blobID BlobID) (ManifestEntry, error)
+
+	// ListChunks scans and returns all chunks for blobID in offset order.
+	// len(result) <= ChunkCount of the manifest; orphans (chunks present but
+	// no manifest) are returned when called by the staging reaper.
+	ListChunks(ctx context.Context, blobID BlobID) ([]ChunkEntry, error)
 
 	// Stats returns current entry count and total blob bytes.
 	Stats(ctx context.Context) (entries int64, bytes int64, err error)

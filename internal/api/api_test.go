@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -81,6 +82,40 @@ func storeWithStaging(t *testing.T, srv *httptest.Server, id, stagingID string, 
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// putChunk sends PUT /responses/<stagingID>?offset=N[&complete=true][&response_id=...][&total=...]
+// (streaming ingest). The path is the stagingID. When opts.complete is true,
+// the chunk write + manifest + final Node commit atomically in one request.
+type putChunkOpts struct {
+	complete   bool
+	responseID string
+	total      uint32
+}
+
+func putChunk(t *testing.T, srv *httptest.Server, stagingID string, offset uint32, chunk []byte, opts *putChunkOpts) {
+	t.Helper()
+	u := fmt.Sprintf("%s/responses/%s?offset=%d", srv.URL, stagingID, offset)
+	if opts != nil {
+		if opts.complete {
+			u += "&complete=true"
+		}
+		if opts.responseID != "" {
+			u += "&response_id=" + opts.responseID
+		}
+		if opts.total > 0 {
+			u += fmt.Sprintf("&total=%d", opts.total)
+		}
+	}
+	req, _ := http.NewRequest(http.MethodPut, u, bytes.NewReader(chunk))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	if opts != nil && opts.complete {
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "complete=true must return 200")
+	} else {
+		assert.Equal(t, http.StatusAccepted, resp.StatusCode, "append-only must return 202")
+	}
 }
 
 func doGET(t *testing.T, srv *httptest.Server, path string, tenantKey string) *http.Response {
@@ -198,6 +233,113 @@ func TestStoreWithUnknownStagingID(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost,
 		srv.URL+"/responses/resp_x?req=00000000-0000-0000-0000-000000000001",
 		bytes.NewReader(blob))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode)
+}
+
+// TestPUTChunkAndPOSTCommit exercises the streaming ingest path end-to-end:
+// PUT /responses/<stagingID>?offset=N × 3, then POST /responses/<id>?req=<sid>
+// to commit, then GET /responses/<id> to read back the reassembled response.
+func TestPUTChunkAndPOSTCommit(t *testing.T) {
+	srv := newTestServer(t)
+	stagingID, _ := resolveAndStage(t, srv, "", nil, "")
+
+	chunk0 := []byte(`[{"type":"message","content":"part0"}]`)
+	chunk1 := []byte(`[{"type":"message","content":"part1"}]`)
+	chunk2 := []byte(`[{"type":"message","content":"part2"}]`)
+
+	putChunk(t, srv, stagingID, 0, chunk0, nil)
+	putChunk(t, srv, stagingID, 1, chunk1, nil)
+	putChunk(t, srv, stagingID, 2, chunk2, nil)
+
+	// Commit by calling POST /responses/resp_stream?req=<sid> with an empty
+	// body. The handler detects the streaming case via PeekStreamingState.
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/responses/resp_stream?req="+stagingID,
+		bytes.NewReader(nil))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Retrieve: reassembled blob is the JSON concatenation of three arrays.
+	// (Production code reassembles by concatenation; the read path does not
+	// parse the wire format because the streaming boundaries are an internal
+	// detail.)
+	got, hdr := retrieve(t, srv, "resp_stream")
+	assert.NotEmpty(t, hdr.Get("X-Created-At"))
+	combined := append(append(chunk0, chunk1...), chunk2...)
+	assert.Equal(t, string(combined), string(got))
+}
+
+// TestPUTChunkWithCompleteFlag exercises the single-request commit path:
+// the last PUT carries complete=true &response_id=<id>&total=<T> and Charon
+// atomically writes the chunk, the manifest, and the final Node in one
+// Pebble batch — no separate POST needed. This is the hot path for the
+// proxy on the inference stream's last byte.
+func TestPUTChunkWithCompleteFlag(t *testing.T) {
+	srv := newTestServer(t)
+	stagingID, _ := resolveAndStage(t, srv, "", nil, "")
+
+	chunk0 := []byte(`[{"type":"message","content":"part0"}]`)
+	chunk1 := []byte(`[{"type":"message","content":"part1"}]`)
+	chunk2 := []byte(`[{"type":"message","content":"part2"}]`)
+
+	// First two chunks: append-only (return 202).
+	putChunk(t, srv, stagingID, 0, chunk0, nil)
+	putChunk(t, srv, stagingID, 1, chunk1, nil)
+
+	// Final chunk: complete=true, response_id, total. Atomically commits.
+	combined := append(append(chunk0, chunk1...), chunk2...)
+	putChunk(t, srv, stagingID, 2, chunk2, &putChunkOpts{
+		complete:   true,
+		responseID: "resp_stream",
+		total:      uint32(len(combined)),
+	})
+
+	// No separate POST — retrieve should already return the reassembled blob.
+	got, hdr := retrieve(t, srv, "resp_stream")
+	assert.NotEmpty(t, hdr.Get("X-Created-At"))
+	assert.Equal(t, string(combined), string(got))
+}
+
+// TestPUTChunkCompleteRequiresResponseID rejects complete=true without the
+// response_id query param.
+func TestPUTChunkCompleteRequiresResponseID(t *testing.T) {
+	srv := newTestServer(t)
+	stagingID, _ := resolveAndStage(t, srv, "", nil, "")
+
+	u := fmt.Sprintf("%s/responses/%s?offset=0&complete=true&total=1", srv.URL, stagingID)
+	req, _ := http.NewRequest(http.MethodPut, u, bytes.NewReader([]byte("[]")))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestPUTChunkRequiresStagingID rejects PUT calls without a path
+// stagingID so misconfigured clients fail fast.
+func TestPUTChunkRequiresStagingID(t *testing.T) {
+	srv := newTestServer(t)
+	req, _ := http.NewRequest(http.MethodPut,
+		srv.URL+"/responses/", bytes.NewReader([]byte("[]"))) // empty path
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	// Either 404 (route miss) or 400 (handler validation) is acceptable.
+	assert.Contains(t, []int{http.StatusBadRequest, http.StatusNotFound}, resp.StatusCode)
+}
+
+// TestPUTChunkAtUnknownStagingID rejects PUT calls against a stagingID
+// that doesn't exist.
+func TestPUTChunkAtUnknownStagingID(t *testing.T) {
+	srv := newTestServer(t)
+	bogus := "00000000-0000-0000-0000-000000000099"
+	req, _ := http.NewRequest(http.MethodPut,
+		srv.URL+"/responses/"+bogus+"?offset=0",
+		bytes.NewReader([]byte("[]")))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()

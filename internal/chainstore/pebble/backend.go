@@ -95,6 +95,10 @@ func (b *Backend) GetNode(_ context.Context, id chainstore.NodeID) (chainstore.N
 // Either blob is nil if its BlobID is zero (not yet stored).
 // Returns (requestBlob, responseBlob, err).
 //
+// Dispatches on Node.BlobType:
+//   - BlobTypeSingle: response blob fetched from pfxBlob (one read)
+//   - BlobTypeChunked: chunks fetched from pfxChunk and reassembled in order
+//
 // NOTE: blob reads are not snapshot-isolated with respect to LoadChain. A
 // concurrent Store that completes a turn (writing ResponseBlobID) between
 // LoadChain and GetBlobs may cause Resolve to return an unexpectedly non-nil
@@ -106,11 +110,64 @@ func (b *Backend) GetBlobs(_ context.Context, node chainstore.Node) ([]byte, []b
 	if err != nil {
 		return nil, nil, err
 	}
-	responseBlob, err := b.fetchBlob(node.ResponseBlobID)
+	if node.ResponseBlobID == (chainstore.BlobID{}) {
+		return requestBlob, nil, nil
+	}
+	responseBlob, err := b.fetchResponseBlob(node)
 	if err != nil {
 		return nil, nil, err
 	}
 	return requestBlob, responseBlob, nil
+}
+
+// fetchResponseBlob reads a response blob, dispatching on Node.BlobType.
+// The zero-BlobID guard is inlined in GetBlobs so that callers can short-circuit
+// before any backend work.
+func (b *Backend) fetchResponseBlob(node chainstore.Node) ([]byte, error) {
+	if node.BlobType == chainstore.BlobTypeChunked {
+		return b.assembleChunked(node.ResponseBlobID)
+	}
+	return b.fetchBlob(node.ResponseBlobID)
+}
+
+// assembleChunked reads the manifest for blobID, then scans pfxChunk+blobID for
+// every chunk and concatenates them in offset order. To avoid materializing
+// every chunk body in an intermediate ChunkEntry slice, we stream chunks
+// directly from the iterator into the output buffer — halving memory and
+// memcpy on chunked reads. Reads are NOT snapshot-isolated against a concurrent
+// StreamStore commit; partial reads are benign.
+func (b *Backend) assembleChunked(blobID chainstore.BlobID) ([]byte, error) {
+	manifest, err := b.GetManifest(context.Background(), blobID)
+	if err != nil {
+		return nil, err
+	}
+	lower := chunkKeyPrefix(blobID)
+	upper := make([]byte, len(lower))
+	copy(upper, lower)
+	upper[0] = pfxChunk + 1
+	iter, err := b.db.NewIter(&crdbpebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, fmt.Errorf("chainstore/pebble: assembleChunked iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	out := make([]byte, 0, manifest.TotalSize)
+	count := uint32(0)
+	for iter.First(); iter.Valid(); iter.Next() {
+		val, vErr := iter.ValueAndErr()
+		if vErr != nil {
+			return nil, vErr
+		}
+		out = append(out, val...)
+		count++
+	}
+	if err := iter.Error(); err != nil {
+		return nil, err
+	}
+	if count != manifest.ChunkCount {
+		return nil, fmt.Errorf("chainstore/pebble: chunked blob %x has %d chunks, manifest declares %d", blobID, count, manifest.ChunkCount)
+	}
+	return out, nil
 }
 
 // fetchBlob retrieves one blob by ID; returns nil (not an error) for a zero BlobID.
@@ -126,6 +183,52 @@ func (b *Backend) fetchBlob(id chainstore.BlobID) ([]byte, error) {
 	out := make([]byte, len(val))
 	copy(out, val)
 	return out, nil
+}
+
+// GetManifest returns the manifest for a chunked blob. ErrNotFound if absent.
+func (b *Backend) GetManifest(_ context.Context, blobID chainstore.BlobID) (chainstore.ManifestEntry, error) {
+	val, closer, err := b.db.Get(manifestKey(blobID))
+	if err != nil {
+		return chainstore.ManifestEntry{}, mapErr(err)
+	}
+	defer func() { _ = closer.Close() }()
+	m, err := decodeManifest(val)
+	if err != nil {
+		return chainstore.ManifestEntry{}, fmt.Errorf("chainstore/pebble: decode manifest %x: %w", blobID, err)
+	}
+	m.BlobID = blobID
+	return m, nil
+}
+
+// ListChunks scans pfxChunk+blobID in offset order and returns all chunks.
+func (b *Backend) ListChunks(_ context.Context, blobID chainstore.BlobID) ([]chainstore.ChunkEntry, error) {
+	lower := chunkKeyPrefix(blobID)
+	upper := make([]byte, len(lower))
+	copy(upper, lower)
+	upper[0] = pfxChunk + 1 // exclusive upper bound at the next prefix
+
+	iter, err := b.db.NewIter(&crdbpebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, fmt.Errorf("chainstore/pebble: ListChunks iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	var out []chainstore.ChunkEntry
+	for iter.First(); iter.Valid(); iter.Next() {
+		val, err := iter.ValueAndErr()
+		if err != nil {
+			return nil, err
+		}
+		offset := binary.BigEndian.Uint32(iter.Key()[17:21])
+		buf := make([]byte, len(val))
+		copy(buf, val)
+		out = append(out, chainstore.ChunkEntry{
+			BlobID: blobID,
+			Offset: offset,
+			Data:   buf,
+		})
+	}
+	return out, iter.Error()
 }
 
 // Commit translates a domain Transaction into a pebble.Batch and commits atomically.
@@ -188,6 +291,30 @@ func (b *Backend) Commit(ctx context.Context, tx chainstore.Transaction) error {
 
 	for _, bid := range tx.DeleteBlobs {
 		if err := batch.Delete(blobKey(bid), nil); err != nil {
+			return err
+		}
+	}
+
+	for _, c := range tx.PutChunks {
+		if err := batch.Set(chunkKey(c.BlobID, c.Offset), c.Data, nil); err != nil {
+			return err
+		}
+	}
+
+	for _, c := range tx.DeleteChunks {
+		if err := batch.Delete(chunkKey(c.BlobID, c.Offset), nil); err != nil {
+			return err
+		}
+	}
+
+	for _, m := range tx.PutManifests {
+		if err := batch.Set(manifestKey(m.BlobID), encodeManifest(m), nil); err != nil {
+			return err
+		}
+	}
+
+	for _, bid := range tx.DeleteManifests {
+		if err := batch.Delete(manifestKey(bid), nil); err != nil {
 			return err
 		}
 	}

@@ -58,7 +58,20 @@ func (s *Store) ttlLoop(ctx context.Context) {
 
 // reapStaging deletes staging records (and their associated request blobs)
 // whose Node.CreatedAt is older than Config.StagingTTL. These are orphaned
-// records left by a proxy crash between ResolveAndStage and StoreWithStaging.
+// records left by a proxy crash between ResolveAndStage and StoreWithStaging
+// or between StreamStore.AppendChunk and StreamStore.Commit.
+//
+// Orphan chunks (pfxChunk keys written by AppendChunk whose manifest never
+// landed) are detected by listing chunks under the orphaned staging node's
+// ResponseBlobID and adding them to the same transaction. Their Node carries
+// the staging key which equals the ResponseBlobID used as the chunk namespace.
+//
+// Note: when the manifest HAS been written but the staging record was not
+// yet deleted, the manifest remains and the chunked blob is still committed;
+// reapStaging only removes staging records older than StagingTTL, so a
+// "stuck" manifest leaves the readable blob intact and is corrected on the
+// next successful StoreWithStaging/Commit (idempotent) or on a future phase
+// that adds startup reconciliation.
 func (s *Store) reapStaging(ctx context.Context) {
 	if s.cfg.StagingTTL <= 0 {
 		return
@@ -76,6 +89,18 @@ func (s *Store) reapStaging(ctx context.Context) {
 		tx.DeleteStagingNodes = append(tx.DeleteStagingNodes, se.StagingID)
 		if se.Node.RequestBlobID != (BlobID{}) {
 			tx.DeleteBlobs = append(tx.DeleteBlobs, se.Node.RequestBlobID)
+		}
+		// If the staging node carried orphan streaming chunks, sweep them too.
+		// (Stage node names the ResponseBlobID we used as the chunk namespace.)
+		if se.Node.ResponseBlobID != (BlobID{}) {
+			chunks, cErr := s.backend.ListChunks(ctx, se.Node.ResponseBlobID)
+			if cErr != nil {
+				s.cfg.Log.Error("chainstore: reapStaging ListChunks", "blobID", se.Node.ResponseBlobID, "err", cErr)
+			} else {
+				for _, c := range chunks {
+					tx.DeleteChunks = append(tx.DeleteChunks, ChunkEntry{BlobID: c.BlobID, Offset: c.Offset})
+				}
+			}
 		}
 	}
 	if err := s.backend.Commit(ctx, tx); err != nil {
@@ -197,12 +222,16 @@ func (s *Store) ttlReap(ctx context.Context) {
 
 // appendNodeToDeleteTx appends the per-node delete mutations into tx.
 // Used by both deleteNode and deleteSubtree to avoid duplication.
+// For chunked nodes (Node.BlobType == BlobTypeChunked), the single-blob delete
+// is skipped; chunks are deleted by querying the manifest and appending per-offset
+// DeleteChunks.  The caller is responsible for this expansion (do not fold into
+// this helper — it avoids taking a manifest fetch inside a building tx).
 func appendNodeToDeleteTx(tx *Transaction, node Node) {
 	tx.DeleteNodes = append(tx.DeleteNodes, node.ID)
 	if node.RequestBlobID != (BlobID{}) {
 		tx.DeleteBlobs = append(tx.DeleteBlobs, node.RequestBlobID)
 	}
-	if node.ResponseBlobID != (BlobID{}) {
+	if node.ResponseBlobID != (BlobID{}) && node.BlobType != BlobTypeChunked {
 		tx.DeleteBlobs = append(tx.DeleteBlobs, node.ResponseBlobID)
 	}
 	// NewBucket=0 signals delete-only (no new LRU entry written).
@@ -219,11 +248,29 @@ func appendNodeToDeleteTx(tx *Transaction, node Node) {
 	tx.StatsDelta.BytesDelta -= blobBytes
 }
 
+// expandChunkedDelete fetches the manifest and appends per-chunk deletes plus
+// the manifest delete into tx. No-op when node has no chunked payload.
+func (s *Store) expandChunkedDelete(ctx context.Context, tx *Transaction, node Node) {
+	if node.BlobType != BlobTypeChunked || node.ResponseBlobID == (BlobID{}) {
+		return
+	}
+	tx.DeleteManifests = append(tx.DeleteManifests, node.ResponseBlobID)
+	chunks, err := s.backend.ListChunks(ctx, node.ResponseBlobID)
+	if err != nil {
+		s.cfg.Log.Error("chainstore: expandChunkedDelete ListChunks", "err", err)
+		return
+	}
+	for _, c := range chunks {
+		tx.DeleteChunks = append(tx.DeleteChunks, ChunkEntry{BlobID: c.BlobID, Offset: c.Offset})
+	}
+}
+
 // deleteNode deletes a single node and its blobs (no cascade — leaves children
 // with a dangling parent pointer, which is intentional for capacity eviction).
 func (s *Store) deleteNode(ctx context.Context, node Node) {
 	tx := Transaction{}
 	appendNodeToDeleteTx(&tx, node)
+	s.expandChunkedDelete(ctx, &tx, node)
 	blobBytes := int64(node.RequestBlobSize) + int64(node.ResponseBlobSize)
 
 	// Decrement before commit so concurrent capacity checks see the updated count
@@ -272,6 +319,9 @@ func (s *Store) deleteSubtree(ctx context.Context, root NodeID) {
 					continue // already deleted
 				}
 				appendNodeToDeleteTx(&tx, node)
+				// For chunked nodes, expand the manifest-based chunk deletes here
+				// so each BFS-level transaction remains atomic.
+				s.expandChunkedDelete(ctx, &tx, node)
 			}
 
 			if err := s.backend.Commit(ctx, tx); err != nil {

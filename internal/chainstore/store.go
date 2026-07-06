@@ -350,11 +350,10 @@ func (s *Store) StoreWithStaging(ctx context.Context, stagingID, responseID, pre
 	var node Node
 
 	if stagingID != "" {
-		uid, err := uuid.Parse(stagingID)
+		sid, err := parseStagingIDBlobID(stagingID)
 		if err != nil {
-			return fmt.Errorf("chainstore.StoreWithStaging: invalid stagingID: %w", err)
+			return fmt.Errorf("chainstore.StoreWithStaging: %w", err)
 		}
-		sid := BlobID(uid)
 		staged, err := s.backend.GetStagingNode(ctx, sid)
 		if err != nil {
 			// ErrUnknownStaging propagates as-is so callers can distinguish
@@ -559,6 +558,12 @@ func (s *Store) walkAndTouch(ctx context.Context, leaf NodeID) (nodes []Node, tu
 //
 // When previousResponseID is empty the turn slice is empty (new conversation).
 // When requestBlob is nil a staging record is still created (zero-length blob).
+//
+// For streaming ingest (PUT batches → POST finalize) the returned stagingID is
+// also the namespace under which AppendChunk writes chunk pages and Commit
+// writes the manifest.  The staging node's ResponseBlobID is set to a fresh
+// UUID here so the chunk namespace is allocated up front (avoids the proxy
+// waiting for a second round-trip to learn it).
 func (s *Store) ResolveAndStage(ctx context.Context, previousResponseID, tenantKey string, requestBlob []byte) (stagingID string, turns []Turn, err error) {
 	var (
 		parentID NodeID
@@ -583,14 +588,19 @@ func (s *Store) ResolveAndStage(ctx context.Context, previousResponseID, tenantK
 	sidUUID := uuid.New()
 	sid := BlobID(sidUUID)
 	reqBlobID := BlobID(uuid.New())
+	respBlobID := BlobID(uuid.New()) // allocated so streaming chunks can use it as a namespace
 
 	staging := Node{
 		Version:         1,
 		ParentID:        parentID,
 		RequestBlobID:   reqBlobID,
 		RequestBlobSize: uint32(len(requestBlob)),
-		CreatedAt:       now.Unix(),
-		LastAccessUnix:  now.Unix(),
+		// Phase 6: ResponseBlobID is pre-allocated so PUT-chunk batches can use
+		// it directly as a chunk namespace.  It is only persisted in the
+		// final Node when StreamStore.Commit (or StoreWithStaging) runs.
+		ResponseBlobID: respBlobID,
+		CreatedAt:      now.Unix(),
+		LastAccessUnix: now.Unix(),
 		// BucketID is stored so encodeNode/decodeNode round-trips cleanly, but the
 		// staging prefix (pfxStaging=0x07) is outside chain-walk and eviction scan
 		// ranges, so this bucket value is never read or promoted.

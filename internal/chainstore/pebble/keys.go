@@ -7,14 +7,42 @@ import (
 )
 
 const (
-	pfxMeta       = byte(0x01) // metaKey(nodeID)           → Node binary encoding (fixed-size)
-	pfxBlob       = byte(0x02) // blobKey(blobID)           → assembled blob bytes (single-blob path)
-	pfxLRU        = byte(0x03) // lruKey(bucket, nodeID)    → empty value; sorted by (bucket, nodeID)
-	pfxChildren   = byte(0x04) // childKey(parent, child)   → empty value; enables GetChildren scan
-	pfxStats      = byte(0x05) // statsKey                  → counters
-	pfxResponseID = byte(0x06) // responseIDKey(nodeID)     → caller-supplied responseID string
-	pfxStaging    = byte(0x07) // stagingKey(stagingID)     → partial Node (invisible to chain walks)
+	pfxMeta       = byte(0x01) // metaKey(nodeID)                 → Node binary encoding (fixed-size)
+	pfxBlob       = byte(0x02) // blobKey(blobID)                 → assembled blob bytes (single-blob path)
+	pfxLRU        = byte(0x03) // lruKey(bucket, nodeID)          → empty value; sorted by (bucket, nodeID)
+	pfxChildren   = byte(0x04) // childKey(parent, child)         → empty value; enables GetChildren scan
+	pfxStats      = byte(0x05) // statsKey                        → counters
+	pfxResponseID = byte(0x06) // responseIDKey(nodeID)           → caller-supplied responseID string
+	pfxStaging    = byte(0x07) // stagingKey(stagingID)           → partial Node (invisible to chain walks)
+	pfxChunk      = byte(0x08) // chunkKey(blobID, offset)        → one batch of a chunked response
+	pfxManifest   = byte(0x09) // manifestKey(blobID)             → fixed-size ManifestEntry (atomic commit point)
 )
+
+// chunkKey layout: pfxChunk (1) + blobID (16) + offset (4, big-endian).
+// Big-endian offset yields offset-ordered iteration via Pebble SeekGE/Next.
+func chunkKey(id chainstore.BlobID, offset uint32) []byte {
+	k := make([]byte, 21)
+	k[0] = pfxChunk
+	copy(k[1:17], id[:])
+	binary.BigEndian.PutUint32(k[17:21], offset)
+	return k
+}
+
+// chunkKeyPrefix returns the pfxChunk+blobID prefix used by ListChunks scans.
+func chunkKeyPrefix(id chainstore.BlobID) []byte {
+	k := make([]byte, 1+16)
+	k[0] = pfxChunk
+	copy(k[1:17], id[:])
+	return k
+}
+
+// manifestKey layout: pfxManifest (1) + blobID (16).
+func manifestKey(id chainstore.BlobID) []byte {
+	k := make([]byte, 1+16)
+	k[0] = pfxManifest
+	copy(k[1:17], id[:])
+	return k
+}
 
 func metaKey(id chainstore.NodeID) []byte {
 	k := make([]byte, 1+20)
