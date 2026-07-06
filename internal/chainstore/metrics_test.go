@@ -2,12 +2,11 @@ package chainstore_test
 
 import (
 	"context"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -78,73 +77,55 @@ func TestMetrics_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	// Gauges: entries/bytes should be > 0 after the store.
-	assertGauge(t, reg, "chainstore_entries_total", func(v float64) bool { return v > 0 })
-	assertGauge(t, reg, "chainstore_bytes_total", func(v float64) bool { return v > 0 })
+	assert.Greater(t, metricValue(t, reg, "chainstore_entries_total"), 0.0)
+	assert.Greater(t, metricValue(t, reg, "chainstore_bytes_total"), 0.0)
 
 	// Histogram: at least one observation for chainstore_reconstruct_duration_seconds.
-	countAndSum := gatherCount(t, reg, "chainstore_reconstruct_duration_seconds")
-	require.Greater(t, countAndSum, uint64(0), "reconstruct histogram must have ≥1 sample after Resolve")
+	// metricValue returns the sample count for histograms.
+	require.Greater(t, metricValue(t, reg, "chainstore_reconstruct_duration_seconds"), 0.0,
+		"reconstruct histogram must have ≥1 sample after Resolve")
 
 	// Force eviction by storing past capacity and running EvictOldest.
 	require.NoError(t, s.Store(ctx, "r1", "r0", "", []byte("world")))
 	s.EvictOldest(ctx)
-	assertGauge(t, reg, "chainstore_evictions_total", func(v float64) bool { return v > 0 })
+	assert.Greater(t, metricValue(t, reg, "chainstore_evictions_total"), 0.0)
 }
 
-func assertGauge(t *testing.T, reg *prometheus.Registry, name string, ok func(float64) bool) {
-	t.Helper()
-	for _, mf := range gatherAll(t, reg) {
-		if mf.GetName() != name || len(mf.Metric) == 0 {
-			continue
-		}
-		// Gauges and counters both surface as Metric points; the first field
-		// is the live value regardless of type.
-		v := mf.Metric[0].GetGauge().GetValue()
-		if v == 0 && mf.Metric[0].GetCounter() != nil {
-			v = mf.Metric[0].GetCounter().GetValue()
-		}
-		assert.True(t, ok(v), "metric %q = %v; want predicate to hold", name, v)
-		return
-	}
-	t.Fatalf("metric %q not found", name)
-}
-
-func gatherCount(t *testing.T, reg *prometheus.Registry, name string) uint64 {
-	t.Helper()
-	for _, mf := range gatherAll(t, reg) {
-		if mf.GetName() != name || len(mf.Metric) == 0 {
-			continue
-		}
-		switch {
-		case mf.Metric[0].GetCounter() != nil:
-			return uint64(mf.Metric[0].GetCounter().GetValue())
-		case mf.Metric[0].GetHistogram() != nil:
-			return mf.Metric[0].GetHistogram().GetSampleCount()
-		}
-	}
-	return 0
-}
-
-func gatherAll(t *testing.T, reg *prometheus.Registry) []*dto.MetricFamily {
+// metricValue returns the current value of the named metric in reg. Works for
+// gauges, counters, and histograms (returns the histogram sample count).
+// Fails the test if the metric is not found.
+func metricValue(t *testing.T, reg *prometheus.Registry, name string) float64 {
 	t.Helper()
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
-	return mfs
+	for _, mf := range mfs {
+		if mf.GetName() != name || len(mf.Metric) == 0 {
+			continue
+		}
+		m := mf.Metric[0]
+		if c := m.GetCounter(); c != nil {
+			return c.GetValue()
+		}
+		if g := m.GetGauge(); g != nil {
+			return g.GetValue()
+		}
+		if h := m.GetHistogram(); h != nil {
+			return float64(h.GetSampleCount())
+		}
+	}
+	t.Fatalf("metric %q not found in registry", name)
+	return 0
 }
 
+// keys returns the sorted keys of m. Used only for friendly test-failure messages.
 func keys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
-	// Stable order for friendlier test output.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && strings.Compare(out[j-1], out[j]) > 0; j-- {
-			out[j-1], out[j] = out[j], out[j-1]
-		}
-	}
+	slices.Sort(out)
 	return out
 }
 
-// Keep testutil imported so future tests can use it without re-importing.
-var _ = testutil.ToFloat64
+// dto import kept available for future per-metric deep assertions.
+var _ = (*dto.Metric)(nil)

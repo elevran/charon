@@ -117,7 +117,7 @@ func TestConsistencyCheck_DanglingLRU(t *testing.T) {
 	assert.Equal(t, 1, report.NodesScanned)
 	assert.Equal(t, 2, report.LRUEntriesScanned, "real node LRU + dangling LRU")
 	require.Len(t, report.DanglingLRU, 1)
-	assert.Contains(t, report.DanglingLRU[0].NodeID, "aa")
+	assert.Contains(t, string(report.DanglingLRU[0]), "aa")
 }
 
 // TestConsistencyCheck_EmptyStore verifies an empty store reports zero nodes.

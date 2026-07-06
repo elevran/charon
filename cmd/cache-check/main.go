@@ -69,21 +69,19 @@ func printReport(w *os.File, r *chainstorepebble.ConsistencyReport) {
 	fmt.Fprintf(w, "dangling LRU:       %d\n", len(r.DanglingLRU))
 	fmt.Fprintf(w, "decode errors:      %d\n", len(r.DecodeErrors))
 
-	if len(r.DepthErrors) > 0 {
-		fmt.Fprintln(w, "\nDepth errors:")
-		for _, e := range r.DepthErrors {
-			fmt.Fprintf(w, "  %s\n", e)
+	for _, section := range []struct {
+		header string
+		items  []fmt.Stringer
+	}{
+		{"Depth errors", toStringers(r.DepthErrors)},
+		{"Dangling LRU entries", toStringers(r.DanglingLRU)},
+		{"Decode errors", toStringers(r.DecodeErrors)},
+	} {
+		if len(section.items) == 0 {
+			continue
 		}
-	}
-	if len(r.DanglingLRU) > 0 {
-		fmt.Fprintln(w, "\nDangling LRU entries:")
-		for _, e := range r.DanglingLRU {
-			fmt.Fprintf(w, "  %s\n", e)
-		}
-	}
-	if len(r.DecodeErrors) > 0 {
-		fmt.Fprintln(w, "\nDecode errors:")
-		for _, e := range r.DecodeErrors {
+		fmt.Fprintf(w, "\n%s:\n", section.header)
+		for _, e := range section.items {
 			fmt.Fprintf(w, "  %s\n", e)
 		}
 	}
@@ -93,4 +91,14 @@ func printReport(w *os.File, r *chainstorepebble.ConsistencyReport) {
 	} else {
 		fmt.Fprintln(w, "\nFAILED")
 	}
+}
+
+// toStringers adapts a []T (T : fmt.Stringer) to []fmt.Stringer so the items
+// can live in a heterogeneous section list.
+func toStringers[T fmt.Stringer](items []T) []fmt.Stringer {
+	out := make([]fmt.Stringer, len(items))
+	for i := range items {
+		out[i] = items[i]
+	}
+	return out
 }

@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/cockroachdb/pebble"
+	crdbpebble "github.com/cockroachdb/pebble"
 
 	"github.com/elevran/charon/internal/chainstore"
 )
@@ -36,13 +36,9 @@ func (e DepthError) String() string {
 }
 
 // NodeIDError wraps a NodeID with its hex encoding for human-readable reports.
-type NodeIDError struct {
-	NodeID string // hex of the offending NodeID
-}
+type NodeIDError string
 
-func (e NodeIDError) String() string {
-	return "node " + e.NodeID
-}
+func (e NodeIDError) String() string { return "node " + string(e) }
 
 // KeyValueError reports a record that failed to decode; carries key/value context.
 type KeyValueError struct {
@@ -64,20 +60,20 @@ func (e KeyValueError) String() string {
 // next scan will not reproduce. The intended use is read-only maintenance via
 // cmd/cache-check on a quiescent directory.
 //
-// The scan streams Pebble iterators (no full key-set materialisation) and
-// holds two maps in memory: nodeID → depth and nodeID-set for LRU validation.
-// For a store with N nodes the memory cost is ~50 bytes per node.
+// The scan streams Pebble iterators (no full key-set materialisation). For a
+// store with N nodes the memory cost is ~110 bytes per node (Node struct + map
+// entry); one pfxMeta scan + one pfxLRU scan.
 func (b *Backend) ConsistencyCheck(ctx context.Context) (*ConsistencyReport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	report := &ConsistencyReport{}
 
-	// Pass 1: scan pfxMeta, build depth map and node-set.
+	// Single pfxMeta scan: collect every node, build depth map keyed by ID.
+	nodes := make([]chainstore.Node, 0, 1024)
 	depths := make(map[[20]byte]uint32, 1024)
-	present := make(map[[20]byte]struct{}, 1024)
 
-	metaIter, err := b.db.NewIter(&pebble.IterOptions{
+	metaIter, err := b.db.NewIter(&crdbpebble.IterOptions{
 		LowerBound: []byte{pfxMeta},
 		UpperBound: []byte{pfxMeta + 1},
 	})
@@ -109,59 +105,43 @@ func (b *Backend) ConsistencyCheck(ctx context.Context) (*ConsistencyReport, err
 			continue
 		}
 		depths[id] = node.Depth
-		present[id] = struct{}{}
+		nodes = append(nodes, node)
 		report.NodesScanned++
 	}
 	if err := metaIter.Error(); err != nil {
 		return nil, fmt.Errorf("chainstore/pebble: meta iter: %w", err)
 	}
 
-	// Pass 2: re-scan pfxMeta to validate parent.Depth for each non-root node.
-	metaIter, err = b.db.NewIter(&pebble.IterOptions{
-		LowerBound: []byte{pfxMeta},
-		UpperBound: []byte{pfxMeta + 1},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("chainstore/pebble: meta iter (pass 2): %w", err)
-	}
-	defer func() { _ = metaIter.Close() }()
-
-	for metaIter.First(); metaIter.Valid(); metaIter.Next() {
-		node, err := decodeNode(metaIter.Value())
-		if err != nil {
-			continue // already reported in pass 1
-		}
-		if node.ParentID == (chainstore.NodeID{}) {
+	// Validate parent.Depth from the in-memory slice (no second Pebble scan).
+	for _, n := range nodes {
+		if n.ParentID == (chainstore.NodeID{}) {
 			continue
 		}
-		parentDepth, ok := depths[node.ParentID]
+		parentDepth, ok := depths[n.ParentID]
 		if !ok {
 			// Parent absent from pfxMeta — could be capacity-evicted (ErrChainExpired)
 			// or genuine corruption. We cannot distinguish here without the eviction log,
 			// so we surface it as a depth error against depth=0.
 			report.DepthErrors = append(report.DepthErrors, DepthError{
-				ChildID:  hex.EncodeToString(node.ID[:]),
-				ParentID: hex.EncodeToString(node.ParentID[:]),
-				Child:    node.Depth,
+				ChildID:  hex.EncodeToString(n.ID[:]),
+				ParentID: hex.EncodeToString(n.ParentID[:]),
+				Child:    n.Depth,
 				Parent:   0,
 			})
 			continue
 		}
-		if node.Depth != parentDepth+1 {
+		if n.Depth != parentDepth+1 {
 			report.DepthErrors = append(report.DepthErrors, DepthError{
-				ChildID:  hex.EncodeToString(node.ID[:]),
-				ParentID: hex.EncodeToString(node.ParentID[:]),
-				Child:    node.Depth,
+				ChildID:  hex.EncodeToString(n.ID[:]),
+				ParentID: hex.EncodeToString(n.ParentID[:]),
+				Child:    n.Depth,
 				Parent:   parentDepth,
 			})
 		}
 	}
-	if err := metaIter.Error(); err != nil {
-		return nil, fmt.Errorf("chainstore/pebble: meta iter (pass 2): %w", err)
-	}
 
-	// Pass 3: scan pfxLRU and verify each entry points to an existing pfxMeta node.
-	lruIter, err := b.db.NewIter(&pebble.IterOptions{
+	// pfxLRU scan: each entry must point to a node we collected in pfxMeta.
+	lruIter, err := b.db.NewIter(&crdbpebble.IterOptions{
 		LowerBound: []byte{pfxLRU},
 		UpperBound: []byte{pfxLRU + 1},
 	})
@@ -183,10 +163,9 @@ func (b *Backend) ConsistencyCheck(ctx context.Context) (*ConsistencyReport, err
 		copy(id[:], key[9:])
 		bucket := binary.BigEndian.Uint64(key[1:9])
 		report.LRUEntriesScanned++
-		if _, ok := present[id]; !ok {
-			report.DanglingLRU = append(report.DanglingLRU, NodeIDError{
-				NodeID: fmt.Sprintf("bucket=%d node=%s", bucket, hex.EncodeToString(id[:])),
-			})
+		if _, ok := depths[id]; !ok {
+			report.DanglingLRU = append(report.DanglingLRU, NodeIDError(
+				fmt.Sprintf("bucket=%d node=%s", bucket, hex.EncodeToString(id[:]))))
 		}
 	}
 	if err := lruIter.Error(); err != nil {

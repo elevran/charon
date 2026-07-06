@@ -262,7 +262,8 @@ func (s *Store) Complete(ctx context.Context, responseID, tenantKey string, resp
 	}); err != nil {
 		return fmt.Errorf("chainstore.Complete: commit: %w", err)
 	}
-	s.bytes.Add(int64(len(responseBlob)))
+	totalBytes := s.bytes.Add(int64(len(responseBlob)))
+	s.metricsAfterMutation(s.entries.Load(), totalBytes)
 	return nil
 }
 
@@ -410,7 +411,7 @@ func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) (turn
 		if err != nil {
 			status = "error"
 		}
-		s.metrics.resolveLatency.WithLabelValues(status).Observe(time.Since(start).Seconds())
+		s.metrics.reconstructLatency.WithLabelValues(status).Observe(time.Since(start).Seconds())
 		if err == nil {
 			s.metrics.chainDepth.Observe(float64(len(turns)))
 		}
