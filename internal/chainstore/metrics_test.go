@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -126,6 +125,3 @@ func keys(m map[string]bool) []string {
 	slices.Sort(out)
 	return out
 }
-
-// dto import kept available for future per-metric deep assertions.
-var _ = (*dto.Metric)(nil)
