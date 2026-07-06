@@ -3,4 +3,4 @@ proxy:
 charon:
   listen: ":9090"
   storage:
-    checkpoint_interval: 10
+    data_dir: ./data

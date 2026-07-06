@@ -54,7 +54,6 @@ All settings are grouped under two top-level keys:
 charon:
   listen: ":8081"
   storage:
-    backend: sqlite
     data_dir: /var/lib/charon
 ```
 
@@ -64,14 +63,10 @@ charon:
 charon:
   listen: ":8081"
   storage:
-    backend: sqlite
     data_dir: /var/lib/charon
-    checkpoint_interval: 10   # checkpoint every N turns (default 10)
-    ttl_days: 30              # response TTL (default 30)
-    write_intent_stale_threshold: 5m
+    ttl_days: 30              # response TTL in days (default 30)
   workers:
-    ttl_interval: 1h
-    recovery_interval: 5m
+    ttl_interval: 1h          # how often the TTL reaper runs (default 1h)
 
 proxy:
   enabled: true               # proxy is OFF by default; set true to enable
@@ -93,15 +88,13 @@ proxy:
 | Field | Default | Description |
 |-------|---------|-------------|
 | `listen` | `:8081` | Address for the Charon internal HTTP API |
-| `storage.backend` | `memory` | Storage backend: `memory` or `sqlite` |
-| `storage.data_dir` | `./data` | Root directory for SQLite database and payload files |
-| `storage.checkpoint_interval` | `10` | Write a full-context checkpoint every N turns |
+| `storage.data_dir` | `./data` | Root directory for the Pebble database |
 | `storage.ttl_days` | `30` | Responses expire after this many days |
-| `storage.write_intent_stale_threshold` | `5m` | Write intents older than this are recovered on startup |
 | `storage.max_chain_depth` | `1000` | Abort resolution if the chain walk exceeds this many hops. Returns `chain_too_deep` (HTTP 422). |
 | `storage.max_context_bytes` | `0` (unbounded) | Abort resolution if the assembled flat context exceeds this size. Supports unit suffixes (`MB`, `GB`). Returns `context_too_large` (HTTP 422). |
+| `storage.max_responses` | `0` (unbounded) | Evict oldest chains when the total response count exceeds this limit. |
+| `storage.max_payload` | `0` (unbounded) | Maximum size of a single response payload blob. |
 | `workers.ttl_interval` | `1h` | How often the TTL expiry worker runs |
-| `workers.recovery_interval` | `5m` | How often the write-intent recovery worker runs |
 
 ### `telemetry`
 
@@ -125,28 +118,26 @@ proxy:
 
 ---
 
-## Storage backends
+## Storage backend
 
-### `memory` (default)
+Charon uses [Pebble](https://github.com/cockroachdb/pebble) as its embedded key-value store. All data — chain metadata, payload blobs, and LRU accounting — lives in a single Pebble database directory (`storage.data_dir`).
 
-In-memory stores. No persistence across restarts. Use for conformance/compliance testing and lightweight local development.
+- **In-process**: no external database or object-store process required.
+- **Durable**: data survives restarts; Pebble uses WAL-based crash recovery.
+- **Single-node**: suitable for single-instance deployments. Multi-instance scaling is not yet supported.
 
-### `sqlite`
-
-Embedded SQLite (pure Go, no CGo). Persists to `data_dir/responses.db` (index) and `data_dir/payloads/` (payload blobs). WAL journal mode is always enabled. Suitable for single-instance production deployments.
-
-For multi-instance deployments, use PostgreSQL + MinIO/S3 (see [architecture docs](docs/architecture.md)).
+Without a `data_dir` configured, Charon starts with an in-memory Pebble instance (data lost on restart). Use this mode for conformance/compliance testing and CI.
 
 ---
 
 ## Deployment modes
 
-| Mode | `charon.storage.backend` | `proxy.enabled` | Use for |
-|------|--------------------------|-----------------|---------|
-| Memory only | `memory` | `false` | Conformance testing, CI |
-| Single binary | `sqlite` | `false` (Charon only) | Development |
-| Single binary + proxy | `sqlite` | `true` | Compliance testing, single-node production |
-| Separate services | `sqlite` / `postgres` | Proxy in its own process | Production |
+| Mode | `storage.data_dir` | `proxy.enabled` | Use for |
+|------|-------------------|-----------------|---------|
+| In-memory (no dir) | (empty / omit) | `false` | Conformance testing, CI |
+| Single binary | `/var/lib/charon` | `false` (Charon only) | Development |
+| Single binary + proxy | `/var/lib/charon` | `true` | Compliance testing, single-node production |
+| Separate services | `/var/lib/charon` | Proxy in its own process | Production |
 
 ---
 

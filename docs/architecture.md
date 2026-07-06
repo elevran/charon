@@ -89,24 +89,16 @@ The proxy holds no in-process conversation state (except the ephemeral per-conne
 
 The inference backend is similarly stateless. It always receives the complete flat context assembled by Charon.
 
-### 2. Replaceable storage backends
+### 2. Single embedded storage backend
 
-The storage layer is abstracted behind two interfaces:
+The storage layer uses [Pebble](https://github.com/cockroachdb/pebble), an embedded key-value store. All data — chain node metadata, payload blobs, LRU accounting, and staging records — lives in a single Pebble database directory. There are no external processes (no SQL server, no object store).
 
-```
-IndexStore   — manages metadata and chain linkage (response ID, previous ID, position)
-PayloadStore — manages content (input items, output items, the actual conversation content)
-```
+| Deployment level | Storage |
+|-----------------|---------|
+| Testing / CI    | In-memory Pebble (empty `data_dir`) |
+| Development / Production | Pebble on local filesystem |
 
-Application logic calls only these interfaces. Concrete backends are injected at startup via configuration:
-
-| Deployment level | IndexStore | PayloadStore |
-|-----------------|------------|--------------|
-| Memory only (testing) | In-memory | In-memory |
-| Single binary   | SQLite     | Local filesystem |
-| Multi-instance  | PostgreSQL | MinIO / S3   |
-
-The binary is identical across all levels. Only configuration changes.
+The binary is identical across all levels. Only `storage.data_dir` changes.
 
 ### 3. User Inputs, not KV cache
 
@@ -253,7 +245,7 @@ Fully buffered ◄────────────────────�
  no partial recovery)                        full partial recovery)
 ```
 
-### Mode 1: Fully Buffered (Phase 1)
+### Mode 1: Fully Buffered
 
 The proxy accumulates all inference output before calling store. A single `POST` carries the complete payload.
 
@@ -262,7 +254,7 @@ vLLM ──(stream tokens)──► Proxy  [buffers all]
 Proxy ──POST /responses/{id} { complete payload } ──► Charon
 ```
 
-Write-intent lifecycle: created and resolved in a single atomic store call. Peak proxy memory is proportional to total output length. If the proxy crashes before calling store, the response is lost with no partial recovery. This is the Phase 1 implementation — simplest Charon write path, no streaming protocol needed.
+Write is atomic: the chainstore appends the node in a single Pebble batch. Peak proxy memory is proportional to total output length. If the proxy crashes before calling store, the response is lost with no partial recovery. This is the currently deployed mode — simplest write path, no streaming protocol needed.
 
 ### Mode 2: Chunked (N tokens per chunk)
 
