@@ -27,7 +27,7 @@ func newStoreMetrics(reg prometheus.Registerer) (*storeMetrics, error) {
 	}
 	m := &storeMetrics{
 		resolveLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "chainstore_resolve_duration_seconds",
+			Name:    "chainstore_reconstruct_duration_seconds",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"status"}),
 		chainDepth: prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -47,10 +47,10 @@ func newStoreMetrics(reg prometheus.Registerer) (*storeMetrics, error) {
 			Name: "chainstore_staging_reap_errors_total",
 		}),
 		entries: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "chainstore_entries",
+			Name: "chainstore_entries_total",
 		}),
 		bytes: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "chainstore_bytes",
+			Name: "chainstore_bytes_total",
 		}),
 	}
 	for _, c := range []prometheus.Collector{
