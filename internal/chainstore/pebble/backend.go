@@ -338,10 +338,56 @@ func (b *Backend) Commit(ctx context.Context, tx chainstore.Transaction) error {
 		if err := batch.Set(stagingKey(se.StagingID), encodeNode(se.Node), nil); err != nil {
 			return err
 		}
+		// Early binding: when the staging Node carries a non-empty
+		// ResponseID, write it under pfxStagingRID so GetStagingNode
+		// surfaces it to the API layer on the next read.
+		if se.Node.ResponseID != "" {
+			if err := batch.Set(stagingResponseIDKey(se.StagingID), []byte(se.Node.ResponseID), nil); err != nil {
+				return err
+			}
+		}
 	}
 
 	for _, sid := range tx.DeleteStagingNodes {
 		if err := batch.Delete(stagingKey(sid), nil); err != nil {
+			return err
+		}
+		if err := batch.Delete(stagingResponseIDKey(sid), nil); err != nil {
+			return err
+		}
+		if err := batch.Delete(stagingNextKey(sid), nil); err != nil {
+			return err
+		}
+	}
+
+	for _, sn := range tx.PutStagingNext {
+		var buf [4]byte
+		binary.BigEndian.PutUint32(buf[:], sn.NextOffset)
+		if err := batch.Set(stagingNextKey(sn.StagingID), buf[:], nil); err != nil {
+			return err
+		}
+	}
+
+	for _, ix := range tx.PutResponseIDIndex {
+		if err := batch.Set(responseIDIndexKey(ix.ResponseID), ix.StagingID[:], nil); err != nil {
+			return err
+		}
+	}
+
+	for _, rid := range tx.DeleteResponseIDIndex {
+		if err := batch.Delete(responseIDIndexKey(rid), nil); err != nil {
+			return err
+		}
+	}
+
+	for _, sd := range tx.PutStagingDone {
+		if err := batch.Set(stagingDoneKey(sd.StagingID), []byte(sd.ResponseID), nil); err != nil {
+			return err
+		}
+	}
+
+	for _, sid := range tx.DeleteStagingDone {
+		if err := batch.Delete(stagingDoneKey(sid), nil); err != nil {
 			return err
 		}
 	}
@@ -426,7 +472,9 @@ func (b *Backend) GetChildren(_ context.Context, parentID chainstore.NodeID) ([]
 }
 
 // GetStagingNode fetches the partial Node stored under a staging key.
-// Returns ErrUnknownStaging if the staging record is absent.
+// Returns ErrUnknownStaging if the staging record is absent. The
+// Node.ResponseID field is sourced from a separate pfxStagingRID key so
+// the bound responseID is visible to early-binding callers.
 func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID) (chainstore.Node, error) {
 	val, closer, err := b.db.Get(stagingKey(stagingID))
 	if err != nil {
@@ -440,7 +488,75 @@ func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID)
 	if err != nil {
 		return chainstore.Node{}, fmt.Errorf("chainstore/pebble: decode staging node %x: %w", stagingID, err)
 	}
+	// Surface the bound responseID (if any) from pfxStagingRID.
+	if ridVal, ridCloser, ridErr := b.db.Get(stagingResponseIDKey(stagingID)); ridErr == nil {
+		node.ResponseID = string(ridVal)
+		_ = ridCloser.Close()
+	} else if ridErr != crdbpebble.ErrNotFound {
+		return chainstore.Node{}, ridErr
+	}
 	return node, nil
+}
+
+// StagingNextOffset returns the next-expected chunk offset for a staging
+// record. 0 if no chunks have been written yet. Returns ErrUnknownStaging
+// if the staging record itself is absent.
+func (b *Backend) StagingNextOffset(_ context.Context, stagingID chainstore.BlobID) (uint32, error) {
+	// Verify the staging record exists.
+	if _, closer, err := b.db.Get(stagingKey(stagingID)); err != nil {
+		if err == crdbpebble.ErrNotFound {
+			return 0, chainstore.ErrUnknownStaging
+		}
+		return 0, err
+	} else {
+		_ = closer.Close()
+	}
+	val, closer, err := b.db.Get(stagingNextKey(stagingID))
+	if err != nil {
+		if err == crdbpebble.ErrNotFound {
+			return 0, nil // no chunks yet
+		}
+		return 0, err
+	}
+	defer func() { _ = closer.Close() }()
+	if len(val) < 4 {
+		return 0, fmt.Errorf("chainstore/pebble: corrupt staging-next record (len=%d)", len(val))
+	}
+	return binary.BigEndian.Uint32(val[:4]), nil
+}
+
+// LookupStagingByResponseID returns the stagingID bound to responseID, or
+// ErrNotFound if no staging record is bound to that responseID.
+func (b *Backend) LookupStagingByResponseID(_ context.Context, responseID string) (chainstore.BlobID, error) {
+	val, closer, err := b.db.Get(responseIDIndexKey(responseID))
+	if err != nil {
+		if err == crdbpebble.ErrNotFound {
+			return chainstore.BlobID{}, chainstore.ErrNotFound
+		}
+		return chainstore.BlobID{}, err
+	}
+	defer func() { _ = closer.Close() }()
+	if len(val) != 16 {
+		return chainstore.BlobID{}, fmt.Errorf("chainstore/pebble: corrupt responseID index (len=%d)", len(val))
+	}
+	var sid chainstore.BlobID
+	copy(sid[:], val)
+	return sid, nil
+}
+
+// GetStagingDone returns the done-marker for a staging record.
+// Returns ErrUnknownStaging if the marker is absent (in-progress).
+// The returned responseID is "" for aborted, non-empty for complete.
+func (b *Backend) GetStagingDone(_ context.Context, stagingID chainstore.BlobID) (string, error) {
+	val, closer, err := b.db.Get(stagingDoneKey(stagingID))
+	if err != nil {
+		if err == crdbpebble.ErrNotFound {
+			return "", chainstore.ErrUnknownStaging
+		}
+		return "", err
+	}
+	defer func() { _ = closer.Close() }()
+	return string(val), nil
 }
 
 // ListStagingOlderThan scans all pfxStaging keys and returns entries whose

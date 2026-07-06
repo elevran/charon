@@ -109,12 +109,13 @@ func TestChainStoreAndResolve(t *testing.T) {
 	defer r0.Body.Close()
 	require.Equal(t, http.StatusOK, r0.StatusCode)
 
-	// Resolve continuation
+	// Resolve continuation — opens a staging record for the next turn, so the
+	// response is 201 Created with Location: /responses/staging/<id>.
 	resolveResp, err := http.Post(fx.URL()+"/responses?prev=resp_chain0",
 		"application/octet-stream", bytes.NewReader(nil))
 	require.NoError(t, err)
 	defer resolveResp.Body.Close()
-	require.Equal(t, http.StatusOK, resolveResp.StatusCode)
+	require.Equal(t, http.StatusCreated, resolveResp.StatusCode)
 
 	var resolved struct {
 		StagingID string            `json:"staging_id"`

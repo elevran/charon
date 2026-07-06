@@ -127,6 +127,28 @@ type StagingEntry struct {
 	Node      Node
 }
 
+// StagingNextEntry pairs a staging key with the next-expected chunk
+// offset (0-based). Used for server-validated ordering: AppendChunk
+// rejects k > next with ErrChunkOutOfRange.
+type StagingNextEntry struct {
+	StagingID  BlobID
+	NextOffset uint32
+}
+
+// StagingDoneEntry marks a staging record as terminally complete or
+// aborted. Value is the bound responseID for complete, empty for aborted.
+type StagingDoneEntry struct {
+	StagingID  BlobID
+	ResponseID string // "" for aborted
+}
+
+// ResponseIDIndexEntry pairs a responseID with its stagingID — the
+// reverse lookup index that powers GET /responses/by-response-id/{rid}.
+type ResponseIDIndexEntry struct {
+	ResponseID string
+	StagingID  BlobID
+}
+
 // Transaction describes what to change, not how.
 // Each backend translates it to its native atomic primitive.
 // OpID makes commits idempotent — backends that support retries use it to detect
@@ -178,6 +200,24 @@ type Transaction struct {
 	PutStagingNodes    []StagingEntry
 	DeleteStagingNodes []BlobID // staging IDs only; blobs go in DeleteBlobs
 
+	// PutStagingNext sets the next-expected chunk offset for a staging
+	// record. Updated atomically with each chunk write.
+	PutStagingNext []StagingNextEntry
+
+	// PutStagingDone marks a staging record as terminally complete
+	// (responseID non-empty) or aborted (responseID empty). Set on
+	// /complete and /abort. GET /staging/{id} returns 410 Gone when
+	// this key exists.
+	PutStagingDone []StagingDoneEntry
+
+	// DeleteStagingDone removes the done-marker (reaper).
+	DeleteStagingDone []BlobID
+
+	// PutResponseIDIndex / DeleteResponseIDIndex maintain the
+	// responseID → stagingID reverse lookup.
+	PutResponseIDIndex    []ResponseIDIndexEntry
+	DeleteResponseIDIndex []string
+
 	StatsDelta StatsDelta
 }
 
@@ -215,6 +255,20 @@ type Backend interface {
 	// GetStagingNode fetches the partial Node stored under a staging key.
 	// Returns ErrUnknownStaging if the staging record is absent.
 	GetStagingNode(ctx context.Context, stagingID BlobID) (Node, error)
+
+	// StagingNextOffset returns the next-expected chunk offset for a staging
+	// record (0 when no chunks have been written). Returns ErrUnknownStaging
+	// if the staging record is absent.
+	StagingNextOffset(ctx context.Context, stagingID BlobID) (uint32, error)
+
+	// GetStagingDone returns the done-marker for a staging record.
+	// Returns ErrUnknownStaging if the marker is absent (in-progress).
+	// The returned responseID is "" for aborted, non-empty for complete.
+	GetStagingDone(ctx context.Context, stagingID BlobID) (responseID string, err error)
+
+	// LookupStagingByResponseID returns the stagingID currently bound to
+	// responseID. Returns ErrNotFound if no staging record is bound to it.
+	LookupStagingByResponseID(ctx context.Context, responseID string) (BlobID, error)
 
 	// ListStagingOlderThan returns all staging entries whose Node.CreatedAt
 	// is before cutoff. Used by the staging TTL reaper to clean orphaned records

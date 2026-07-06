@@ -63,7 +63,7 @@ func resolveAndStage(t *testing.T, srv *httptest.Server, prevID string, requestB
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var body map[string]json.RawMessage
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	var stagingID string
@@ -84,38 +84,27 @@ func storeWithStaging(t *testing.T, srv *httptest.Server, id, stagingID string, 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
-// putChunk sends PUT /responses/<stagingID>?offset=N[&complete=true][&response_id=...][&total=...]
-// (streaming ingest). The path is the stagingID. When opts.complete is true,
-// the chunk write + manifest + final Node commit atomically in one request.
+// putChunk sends PUT /responses/staging/<stagingID>/chunks/<k>[?response_id=...]
+// (streaming ingest). The chunk number is in the URL path so the request
+// is genuinely idempotent at the wire level. response_id is bound on
+// first use and locked thereafter.
 type putChunkOpts struct {
-	complete   bool
 	responseID string
-	total      uint32
 }
 
-func putChunk(t *testing.T, srv *httptest.Server, stagingID string, offset uint32, chunk []byte, opts *putChunkOpts) {
+func putChunk(t *testing.T, srv *httptest.Server, stagingID string, k uint32, chunk []byte, opts *putChunkOpts) {
 	t.Helper()
-	u := fmt.Sprintf("%s/responses/%s?offset=%d", srv.URL, stagingID, offset)
-	if opts != nil {
-		if opts.complete {
-			u += "&complete=true"
-		}
-		if opts.responseID != "" {
-			u += "&response_id=" + opts.responseID
-		}
-		if opts.total > 0 {
-			u += fmt.Sprintf("&total=%d", opts.total)
-		}
+	u := fmt.Sprintf("%s/responses/staging/%s/chunks/%d", srv.URL, stagingID, k)
+	if opts != nil && opts.responseID != "" {
+		u += "?response_id=" + opts.responseID
 	}
 	req, _ := http.NewRequest(http.MethodPut, u, bytes.NewReader(chunk))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	if opts != nil && opts.complete {
-		assert.Equal(t, http.StatusOK, resp.StatusCode, "complete=true must return 200")
-	} else {
-		assert.Equal(t, http.StatusAccepted, resp.StatusCode, "append-only must return 202")
-	}
+	assert.True(t,
+		resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusOK,
+		"chunk PUT must return 202 (new) or 200 (replay); got %d", resp.StatusCode)
 }
 
 func doGET(t *testing.T, srv *httptest.Server, path string, tenantKey string) *http.Response {
@@ -138,7 +127,7 @@ func TestFirstTurnStaging(t *testing.T) {
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var body map[string]json.RawMessage
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	var stagingID string
@@ -250,73 +239,119 @@ func TestPUTChunkAndPOSTCommit(t *testing.T) {
 	chunk1 := []byte(`[{"type":"message","content":"part1"}]`)
 	chunk2 := []byte(`[{"type":"message","content":"part2"}]`)
 
+	// Write three chunks via the new chunk-path API.
 	putChunk(t, srv, stagingID, 0, chunk0, nil)
 	putChunk(t, srv, stagingID, 1, chunk1, nil)
 	putChunk(t, srv, stagingID, 2, chunk2, nil)
 
-	// Commit by calling POST /responses/resp_stream?req=<sid> with an empty
-	// body. The handler detects the streaming case via PeekStreamingState.
-	req, _ := http.NewRequest(http.MethodPost,
-		srv.URL+"/responses/resp_stream?req="+stagingID,
-		bytes.NewReader(nil))
+	// Commit via PUT /responses/staging/<sid>/complete?response_id=...&total=...
+	combined := append(append(chunk0, chunk1...), chunk2...)
+	commitURL := fmt.Sprintf("%s/responses/staging/%s/complete?response_id=resp_stream&total=%d",
+		srv.URL, stagingID, len(combined))
+	req, _ := http.NewRequest(http.MethodPut, commitURL, nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Equal(t, "/responses/resp_stream", resp.Header.Get("Location"))
 
 	// Retrieve: reassembled blob is the JSON concatenation of three arrays.
-	// (Production code reassembles by concatenation; the read path does not
-	// parse the wire format because the streaming boundaries are an internal
-	// detail.)
 	got, hdr := retrieve(t, srv, "resp_stream")
 	assert.NotEmpty(t, hdr.Get("X-Created-At"))
-	combined := append(append(chunk0, chunk1...), chunk2...)
 	assert.Equal(t, string(combined), string(got))
 }
 
-// TestPUTChunkWithCompleteFlag exercises the single-request commit path:
-// the last PUT carries complete=true &response_id=<id>&total=<T> and Charon
-// atomically writes the chunk, the manifest, and the final Node in one
-// Pebble batch — no separate POST needed. This is the hot path for the
-// proxy on the inference stream's last byte.
-func TestPUTChunkWithCompleteFlag(t *testing.T) {
+// TestPUTChunkAppendOnly uses the chunk-path API: each chunk PUT goes
+// to /chunks/<k>. The commit is a separate PUT to /complete.
+func TestPUTChunkAppendOnly(t *testing.T) {
 	srv := newTestServer(t)
 	stagingID, _ := resolveAndStage(t, srv, "", nil, "")
 
 	chunk0 := []byte(`[{"type":"message","content":"part0"}]`)
 	chunk1 := []byte(`[{"type":"message","content":"part1"}]`)
 	chunk2 := []byte(`[{"type":"message","content":"part2"}]`)
-
-	// First two chunks: append-only (return 202).
 	putChunk(t, srv, stagingID, 0, chunk0, nil)
 	putChunk(t, srv, stagingID, 1, chunk1, nil)
+	putChunk(t, srv, stagingID, 2, chunk2, nil)
 
-	// Final chunk: complete=true, response_id, total. Atomically commits.
+	// Commit.
 	combined := append(append(chunk0, chunk1...), chunk2...)
-	putChunk(t, srv, stagingID, 2, chunk2, &putChunkOpts{
-		complete:   true,
-		responseID: "resp_stream",
-		total:      uint32(len(combined)),
-	})
+	commitURL := fmt.Sprintf("%s/responses/staging/%s/complete?response_id=resp_stream&total=%d",
+		srv.URL, stagingID, len(combined))
+	req, _ := http.NewRequest(http.MethodPut, commitURL, nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
-	// No separate POST — retrieve should already return the reassembled blob.
-	got, hdr := retrieve(t, srv, "resp_stream")
-	assert.NotEmpty(t, hdr.Get("X-Created-At"))
+	got, _ := retrieve(t, srv, "resp_stream")
 	assert.Equal(t, string(combined), string(got))
 }
 
-// TestPUTChunkCompleteRequiresResponseID rejects complete=true without the
-// response_id query param.
-func TestPUTChunkCompleteRequiresResponseID(t *testing.T) {
+// TestCompleteRequiresResponseID: /complete without a bound response_id
+// and without ?response_id=... returns 400. Without one or the other, the
+// data would be unreachable via /responses/{id} after /staging/{id} flips
+// to 410, so the chainstore rejects the call up front.
+func TestCompleteRequiresResponseID(t *testing.T) {
 	srv := newTestServer(t)
 	stagingID, _ := resolveAndStage(t, srv, "", nil, "")
 
-	u := fmt.Sprintf("%s/responses/%s?offset=0&complete=true&total=1", srv.URL, stagingID)
-	req, _ := http.NewRequest(http.MethodPut, u, bytes.NewReader([]byte("[]")))
+	u := fmt.Sprintf("%s/responses/staging/%s/complete?total=2", srv.URL, stagingID)
+	req, _ := http.NewRequest(http.MethodPut, u, nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestCompleteRequiresTotal rejects /complete without the required total
+// query param.
+func TestCompleteRequiresTotal(t *testing.T) {
+	srv := newTestServer(t)
+	stagingID, _ := resolveAndStage(t, srv, "", nil, "")
+
+	u := fmt.Sprintf("%s/responses/staging/%s/complete?response_id=r1", srv.URL, stagingID)
+	req, _ := http.NewRequest(http.MethodPut, u, nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestPUTChunkEarlyBinding: response_id can be sent on any chunk PUT.
+// The first PUT carrying it binds the staging record. Subsequent PUTs
+// with a different response_id get 409 Conflict.
+func TestPUTChunkEarlyBinding(t *testing.T) {
+	srv := newTestServer(t)
+	stagingID, _ := resolveAndStage(t, srv, "", nil, "")
+
+	// First PUT: append-only, no response_id.
+	putChunk(t, srv, stagingID, 0, []byte("part0"), nil)
+
+	// Second PUT: bind response_id, no complete.
+	putChunk(t, srv, stagingID, 1, []byte("part1"), &putChunkOpts{responseID: "r_early"})
+
+	// Third PUT: same response_id, idempotent re-bind.
+	putChunk(t, srv, stagingID, 2, []byte("part2"), &putChunkOpts{responseID: "r_early"})
+
+	// Fourth PUT: conflicting response_id → 409 Conflict.
+	u := fmt.Sprintf("%s/responses/staging/%s/chunks/3?response_id=r_other", srv.URL, stagingID)
+	req, _ := http.NewRequest(http.MethodPut, u, bytes.NewReader([]byte("part3")))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusConflict, resp.StatusCode)
+
+	// Final PUT (separate /complete): uses the bound r_early; succeeds.
+	body := []byte("part0part1part2")
+	commitURL := fmt.Sprintf("%s/responses/staging/%s/complete?response_id=r_early&total=%d",
+		srv.URL, stagingID, len(body))
+	req, _ = http.NewRequest(http.MethodPut, commitURL, nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Equal(t, "/responses/r_early", resp.Header.Get("Location"))
 }
 
 // TestPUTChunkRequiresStagingID rejects PUT calls without a path
@@ -338,7 +373,7 @@ func TestPUTChunkAtUnknownStagingID(t *testing.T) {
 	srv := newTestServer(t)
 	bogus := "00000000-0000-0000-0000-000000000099"
 	req, _ := http.NewRequest(http.MethodPut,
-		srv.URL+"/responses/"+bogus+"?offset=0",
+		srv.URL+"/responses/staging/"+bogus+"/chunks/0",
 		bytes.NewReader([]byte("[]")))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)

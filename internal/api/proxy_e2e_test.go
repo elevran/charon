@@ -39,7 +39,7 @@ func resolve(t *testing.T, srv *httptest.Server, prevID string, requestBlob []by
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var r resolveResult
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&r))
 	return r

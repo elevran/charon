@@ -7,13 +7,18 @@ import (
 
 // Sentinel errors returned by *Store methods.
 var (
-	ErrNotFound       = errors.New("not found")
-	ErrChainCorrupted = errors.New("chain corrupted: missing node in parent chain")
-	ErrChainExpired   = errors.New("chain expired: ancestor node was capacity-evicted")
-	ErrStoreFull      = errors.New("store full: configured capacity exceeded")
-	ErrChainTooDeep   = errors.New("chain too deep: depth would overflow")
-	ErrNotImplemented = errors.New("not implemented")
-	ErrUnknownStaging = errors.New("unknown staging id: staging record absent or already committed")
+	ErrNotFound           = errors.New("not found")
+	ErrChainCorrupted     = errors.New("chain corrupted: missing node in parent chain")
+	ErrChainExpired       = errors.New("chain expired: ancestor node was capacity-evicted")
+	ErrStoreFull          = errors.New("store full: configured capacity exceeded")
+	ErrChainTooDeep       = errors.New("chain too deep: depth would overflow")
+	ErrNotImplemented     = errors.New("not implemented")
+	ErrUnknownStaging     = errors.New("unknown staging id: staging record absent or already committed")
+	ErrResponseIDTaken    = errors.New("response_id conflict: staging record already bound to a different response_id")
+	ErrChunkOutOfRange    = errors.New("chunk out of range: chunk number is not the next expected offset")
+	ErrStagingAborted     = errors.New("staging aborted: no further chunks will be accepted")
+	ErrStagingComplete    = errors.New("staging complete: chunks are immutable after commit")
+	ErrResponseIDRequired = errors.New("response_id required: complete without a bound or supplied responseID would leave the data unreachable")
 )
 
 // Turn is the data returned to callers by Resolve.
