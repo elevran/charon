@@ -87,6 +87,16 @@ func (s *Store) Entries() int64 { return max(s.entries.Load(), 0) }
 // Bytes returns the approximate total blob bytes (updated optimistically on write/delete).
 func (s *Store) Bytes() int64 { return max(s.bytes.Load(), 0) }
 
+// metricsAfterMutation refreshes the entries/bytes gauges after a write that
+// changed the persistent counters. No-op when no Registerer was supplied.
+func (s *Store) metricsAfterMutation(entries, bytes int64) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.entries.Set(float64(entries))
+	s.metrics.bytes.Set(float64(bytes))
+}
+
 // TTL returns the configured TTL duration (0 if TTL-based eviction is disabled).
 func (s *Store) TTL() time.Duration { return s.cfg.TTL }
 
@@ -226,6 +236,7 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 
 	entries := s.entries.Add(1)
 	totalBytes := s.bytes.Add(int64(len(requestBlob)))
+	s.metricsAfterMutation(entries, totalBytes)
 	if (s.cfg.MaxEntries > 0 && entries > s.cfg.MaxEntries) ||
 		(s.cfg.MaxBytes > 0 && totalBytes > s.cfg.MaxBytes) {
 		s.notifyCapacityExceeded()
@@ -251,7 +262,8 @@ func (s *Store) Complete(ctx context.Context, responseID, tenantKey string, resp
 	}); err != nil {
 		return fmt.Errorf("chainstore.Complete: commit: %w", err)
 	}
-	s.bytes.Add(int64(len(responseBlob)))
+	totalBytes := s.bytes.Add(int64(len(responseBlob)))
+	s.metricsAfterMutation(s.entries.Load(), totalBytes)
 	return nil
 }
 
@@ -319,6 +331,7 @@ func (s *Store) StoreWithStaging(ctx context.Context, stagingID, responseID, pre
 
 	entries := s.entries.Add(1)
 	totalBytes := s.bytes.Add(tx.StatsDelta.BytesDelta)
+	s.metricsAfterMutation(entries, totalBytes)
 	if (s.cfg.MaxEntries > 0 && entries > s.cfg.MaxEntries) ||
 		(s.cfg.MaxBytes > 0 && totalBytes > s.cfg.MaxBytes) {
 		s.notifyCapacityExceeded()
@@ -398,7 +411,7 @@ func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) (turn
 		if err != nil {
 			status = "error"
 		}
-		s.metrics.resolveLatency.WithLabelValues(status).Observe(time.Since(start).Seconds())
+		s.metrics.reconstructLatency.WithLabelValues(status).Observe(time.Since(start).Seconds())
 		if err == nil {
 			s.metrics.chainDepth.Observe(float64(len(turns)))
 		}
