@@ -17,6 +17,10 @@ type storeMetrics struct {
 	stagingReapErrTotal prometheus.Counter
 	entries             prometheus.Gauge
 	bytes               prometheus.Gauge
+	cacheHitsTotal      prometheus.Counter
+	cacheMissesTotal    prometheus.Counter
+	cacheEvictionsTotal prometheus.Counter
+	cacheBytes          prometheus.Gauge
 }
 
 // newStoreMetrics creates and registers chainstore metrics under reg.
@@ -52,6 +56,18 @@ func newStoreMetrics(reg prometheus.Registerer) (*storeMetrics, error) {
 		bytes: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "chainstore_bytes_total",
 		}),
+		cacheHitsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "chainstore_cache_hits_total",
+		}),
+		cacheMissesTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "chainstore_cache_misses_total",
+		}),
+		cacheEvictionsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "chainstore_cache_evictions_total",
+		}),
+		cacheBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "chainstore_cache_bytes",
+		}),
 	}
 	for _, c := range []prometheus.Collector{
 		m.reconstructLatency,
@@ -62,6 +78,10 @@ func newStoreMetrics(reg prometheus.Registerer) (*storeMetrics, error) {
 		m.stagingReapErrTotal,
 		m.entries,
 		m.bytes,
+		m.cacheHitsTotal,
+		m.cacheMissesTotal,
+		m.cacheEvictionsTotal,
+		m.cacheBytes,
 	} {
 		if err := reg.Register(c); err != nil {
 			var are prometheus.AlreadyRegisteredError
