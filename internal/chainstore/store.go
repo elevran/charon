@@ -1,6 +1,7 @@
 package chainstore
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -42,6 +43,31 @@ type Config struct {
 	// Staging records older than this are deleted by the background reaper.
 	// Set to 0 to disable staging reaping. Default when non-zero: 1h.
 	StagingTTL time.Duration
+
+	// In-memory LRU cache for resolved chains (Option B: full-context cache).
+	// On Resolve / ResolveAndStage the cache is consulted before LoadChain +
+	// GetBlobs; a hit eliminates all Pebble I/O for that call. Eager
+	// invalidation runs on the Commit path when Transaction.DeleteNodes is
+	// non-empty (capacity eviction, TTL reap, or Delete).
+	//
+	// CacheMaxBytes <= 0 disables the cache entirely (zero-value Config
+	// preserves the original "no caching" behaviour). When > 0, the default
+	// is DefaultCacheMaxBytes (64 MiB) and the bound is enforced by LRU
+	// eviction of the oldest entries.
+	//
+	// CacheTTL <= 0 falls back to DefaultCacheTTL (5 min). Set to 0 explicitly
+	// only if CacheMaxBytes is also 0 (cache disabled). The TTL bounds
+	// staleness from mutations that do not invalidate the cache (Complete,
+	// for example, mutates a turn's ResponseBlob in Pebble but does not
+	// invalidate cached entries for the same leaf).
+	//
+	// CacheTTL must be strictly less than TTL (when TTL > 0): a cache hit
+	// skips the LRU touch/BucketMove commit, so LastAccessUnix is not refreshed
+	// in Pebble for nodes served from the cache. If CacheTTL >= TTL, the
+	// background ttlReap would delete those Pebble nodes while the cache still
+	// serves them. New rejects that configuration with an error.
+	CacheMaxBytes int64
+	CacheTTL      time.Duration
 }
 
 func (c Config) bucketDuration() time.Duration {
@@ -73,6 +99,11 @@ type Store struct {
 	// and runs evictOldest immediately rather than waiting for the next tick.
 	nudgeEvict chan struct{}
 	nudgeCount atomic.Int64 // counts successful nudge sends; exported via export_test.go
+
+	// chainCache is a bounded LRU of resolved chains. nil when caching is
+	// disabled (Config.CacheMaxBytes <= 0). All access is through s.cache
+	// helpers so the nil case is handled at the call site.
+	cache *chainCache
 
 	metrics *storeMetrics
 
@@ -124,9 +155,35 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		cfg.Log = slog.Default()
 	}
 
+	// Guard: a cache TTL >= chain TTL would let the background ttlReap delete
+	// Pebble nodes that the cache is still serving (cache hits skip the LRU
+	// touch/BucketMove commit that refreshes LastAccessUnix). Reject that
+	// configuration explicitly rather than letting it fail silently.
+	if cfg.TTL > 0 && cfg.CacheTTL > 0 && cfg.CacheTTL >= cfg.TTL {
+		return nil, fmt.Errorf("chainstore.New: CacheTTL (%v) must be less than TTL (%v)", cfg.CacheTTL, cfg.TTL)
+	}
+
 	m, err := newStoreMetrics(cfg.Registerer)
 	if err != nil {
 		return nil, fmt.Errorf("chainstore.New: register metrics: %w", err)
+	}
+
+	// Wire the resolved-chain cache when CacheMaxBytes > 0. A zero-value
+	// Config leaves s.cache nil and the cache helpers short-circuit.
+	var cache *chainCache
+	if cfg.CacheMaxBytes > 0 {
+		ttl := cfg.CacheTTL
+		if ttl <= 0 {
+			ttl = DefaultCacheTTL
+		}
+		cache = &chainCache{
+			maxBytes: cfg.CacheMaxBytes,
+			ttl:      ttl,
+			now:      cfg.Clock.Now,
+			metrics:  m,
+			items:    make(map[NodeID]*list.Element),
+			order:    list.New(),
+		}
 	}
 
 	s := &Store{
@@ -134,6 +191,7 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		backend:    cfg.Backend,
 		clock:      cfg.Clock,
 		nudgeEvict: make(chan struct{}, 1),
+		cache:      cache,
 		metrics:    m,
 	}
 
@@ -380,6 +438,9 @@ func (s *Store) Delete(ctx context.Context, responseID, tenantKey string, keepDe
 	if err != nil {
 		return fmt.Errorf("chainstore.Delete: %w", err)
 	}
+	// Cache invalidation runs inside deleteNode/deleteSubtree on successful
+	// Commit — no separate pre-invalidation needed (and skipping it keeps the
+	// cache populated if the Commit fails, which is the correct behaviour).
 	if keepDescendants {
 		s.deleteNode(ctx, node)
 	} else {
@@ -425,7 +486,17 @@ func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) (turn
 // walkAndTouch loads the chain rooted at leaf, fetches blobs, updates LRU, and
 // returns (nodes leaf-first, turns root-first). Both callers — Resolve and
 // ResolveAndStage — need the leaf node's Depth, so nodes is returned alongside turns.
+//
+// Cache integration: a hit on the resolved-chain cache (s.cache) short-circuits
+// LoadChain, GetBlobs, and the touch/BucketMove commit that follows. The cache
+// has its own TTL (Config.CacheTTL) and is eagerly invalidated from the Commit
+// path when DeleteNodes is non-empty, so a hit is a safe O(1) read of the cached
+// nodes/turns slices.
 func (s *Store) walkAndTouch(ctx context.Context, leaf NodeID) (nodes []Node, turns []Turn, err error) {
+	if cachedNodes, cachedTurns, ok := s.cache.get(leaf); ok {
+		return cachedNodes, cachedTurns, nil
+	}
+
 	nodes, err = s.backend.LoadChain(ctx, leaf)
 	if err != nil {
 		return nil, nil, err
@@ -438,6 +509,7 @@ func (s *Store) walkAndTouch(ctx context.Context, leaf NodeID) (nodes []Node, tu
 	turns = make([]Turn, len(nodes))
 	updatedNodes := make([]Node, len(nodes))
 	bucketMoves := make([]BucketMove, 0, len(nodes))
+	var entryBytes int64
 
 	for i, node := range nodes {
 		var reqBlob, respBlob []byte
@@ -451,6 +523,7 @@ func (s *Store) walkAndTouch(ctx context.Context, leaf NodeID) (nodes []Node, tu
 			RequestBlob:  reqBlob,
 			ResponseBlob: respBlob,
 		}
+		entryBytes += int64(len(reqBlob)) + int64(len(respBlob))
 
 		updated := node
 		updated.LastAccessUnix = nowUnix
@@ -471,6 +544,11 @@ func (s *Store) walkAndTouch(ctx context.Context, leaf NodeID) (nodes []Node, tu
 	}); err != nil {
 		return nil, nil, err
 	}
+
+	// Populate the cache after a successful commit. Caching before commit
+	// would risk a Pebble write failure leaving the cache out of sync with
+	// the store. Complete does not invalidate; TTL bounds that staleness.
+	s.cache.put(leaf, nodes, turns, entryBytes)
 	return nodes, turns, nil
 }
 
