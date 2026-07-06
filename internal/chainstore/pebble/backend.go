@@ -384,6 +384,18 @@ func OpenBackend(dir string, opts *crdbpebble.Options) (*Backend, error) {
 	return &Backend{db: db}, nil
 }
 
+// NewBackend wraps an already-opened pebble.DB into a Backend.
+// Use this when you need to open Pebble with custom options not surfaced by
+// OpenBackend (e.g. ReadOnly mode for cmd/cache-check). The caller retains
+// ownership of db and must Close it after the Backend is no longer needed.
+//
+// The caller is REQUIRED to have opened db with opts.Merger = StatsMerger.
+// Without it, pebble.Open on a previously-written store will fail with a
+// merger-name mismatch on the stats key.
+func NewBackend(db *crdbpebble.DB) *Backend {
+	return &Backend{db: db}
+}
+
 // Open creates a pebble.Backend at dir, wires it into cfg, and returns a
 // fully-started *chainstore.Store. It is the standard entry point for production use.
 // Pass dir="" with vfs.NewMem() in Options.FS for in-memory use in tests.

@@ -9,7 +9,7 @@ import (
 // storeMetrics holds the Prometheus collectors for a Store.
 // All fields are nil when the Store was opened without a Registerer.
 type storeMetrics struct {
-	resolveLatency      *prometheus.HistogramVec
+	reconstructLatency  *prometheus.HistogramVec
 	chainDepth          prometheus.Histogram
 	evictionsTotal      prometheus.Counter
 	ttlExpirationsTotal prometheus.Counter
@@ -26,8 +26,8 @@ func newStoreMetrics(reg prometheus.Registerer) (*storeMetrics, error) {
 		return nil, nil
 	}
 	m := &storeMetrics{
-		resolveLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "chainstore_resolve_duration_seconds",
+		reconstructLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "chainstore_reconstruct_duration_seconds",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"status"}),
 		chainDepth: prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -47,14 +47,14 @@ func newStoreMetrics(reg prometheus.Registerer) (*storeMetrics, error) {
 			Name: "chainstore_staging_reap_errors_total",
 		}),
 		entries: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "chainstore_entries",
+			Name: "chainstore_entries_total",
 		}),
 		bytes: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "chainstore_bytes",
+			Name: "chainstore_bytes_total",
 		}),
 	}
 	for _, c := range []prometheus.Collector{
-		m.resolveLatency,
+		m.reconstructLatency,
 		m.chainDepth,
 		m.evictionsTotal,
 		m.ttlExpirationsTotal,
