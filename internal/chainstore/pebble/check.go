@@ -12,14 +12,17 @@ import (
 )
 
 // ConsistencyReport summarises a full consistency scan of a Pebble chainstore
-// directory. OK is true when no errors were found.
+// directory. OK is true when no errors were found. MissingParents is reported
+// but does not affect OK — it is the expected steady-state for any store that
+// has had capacity eviction.
 type ConsistencyReport struct {
 	NodesScanned      int             // total pfxMeta entries scanned
 	LRUEntriesScanned int             // total pfxLRU entries scanned
-	DepthErrors       []DepthError    // child.Depth != parent.Depth+1
+	DepthErrors       []DepthError    // child.Depth != parent.Depth+1 (parent present)
 	DanglingLRU       []NodeIDError   // pfxLRU entries with no pfxMeta node
 	DecodeErrors      []KeyValueError // pfxMeta records that failed to decode
-	OK                bool            // true iff all error slices are empty
+	MissingParents    []NodeIDError   // children whose parent is absent from pfxMeta (capacity eviction)
+	OK                bool            // true iff DepthErrors/DanglingLRU/DecodeErrors are empty
 }
 
 // DepthError is reported when a node's depth is inconsistent with its parent's.
@@ -119,15 +122,15 @@ func (b *Backend) ConsistencyCheck(ctx context.Context) (*ConsistencyReport, err
 		}
 		parentDepth, ok := depths[n.ParentID]
 		if !ok {
-			// Parent absent from pfxMeta — could be capacity-evicted (ErrChainExpired)
-			// or genuine corruption. We cannot distinguish here without the eviction log,
-			// so we surface it as a depth error against depth=0.
-			report.DepthErrors = append(report.DepthErrors, DepthError{
-				ChildID:  hex.EncodeToString(n.ID[:]),
-				ParentID: hex.EncodeToString(n.ParentID[:]),
-				Child:    n.Depth,
-				Parent:   0,
-			})
+			// Parent absent from pfxMeta. This is the expected steady-state
+			// after capacity eviction (non-cascading deleteNode removes the
+			// parent meta without touching children) — record it in
+			// MissingParents so operators can see it without OK=false. We
+			// cannot distinguish that from corruption without the eviction
+			// log; the count is reported and operators can inspect if needed.
+			report.MissingParents = append(report.MissingParents, NodeIDError(
+				fmt.Sprintf("child %s (depth=%d) references missing parent %s",
+					hex.EncodeToString(n.ID[:]), n.Depth, hex.EncodeToString(n.ParentID[:]))))
 			continue
 		}
 		if n.Depth != parentDepth+1 {
@@ -173,5 +176,6 @@ func (b *Backend) ConsistencyCheck(ctx context.Context) (*ConsistencyReport, err
 	}
 
 	report.OK = len(report.DepthErrors) == 0 && len(report.DanglingLRU) == 0 && len(report.DecodeErrors) == 0
+	// Note: MissingParents is reported but does not affect OK — see type doc.
 	return report, nil
 }

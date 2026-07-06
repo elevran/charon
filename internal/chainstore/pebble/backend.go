@@ -388,6 +388,10 @@ func OpenBackend(dir string, opts *crdbpebble.Options) (*Backend, error) {
 // Use this when you need to open Pebble with custom options not surfaced by
 // OpenBackend (e.g. ReadOnly mode for cmd/cache-check). The caller retains
 // ownership of db and must Close it after the Backend is no longer needed.
+//
+// The caller is REQUIRED to have opened db with opts.Merger = StatsMerger.
+// Without it, pebble.Open on a previously-written store will fail with a
+// merger-name mismatch on the stats key.
 func NewBackend(db *crdbpebble.DB) *Backend {
 	return &Backend{db: db}
 }

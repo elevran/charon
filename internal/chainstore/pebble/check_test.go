@@ -2,6 +2,7 @@ package pebble
 
 import (
 	"context"
+	"encoding/hex"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -132,14 +133,55 @@ func TestConsistencyCheck_EmptyStore(t *testing.T) {
 	assert.Equal(t, 0, report.LRUEntriesScanned)
 }
 
-// TestConsistencyCheck_MissingParent reports a child whose parent was deleted
-// (capacity-evicted) — surfaces as a depth error against parent=0 since the
-// parent is absent from pfxMeta.
-func TestConsistencyCheck_MissingParent(t *testing.T) {
+// TestConsistencyCheck_MissingParentAfterEviction verifies that a child whose
+// parent was capacity-evicted (parent inserted, then deleted non-cascading)
+// is reported under MissingParents and does NOT make OK=false. This is the
+// expected steady-state for any store that has hit capacity.
+func TestConsistencyCheck_MissingParentAfterEviction(t *testing.T) {
 	ctx := context.Background()
 	b := openMemBackend(t)
 
-	// Child references a parent that doesn't exist in pfxMeta.
+	parent := chainstore.Node{
+		Version: 1, ID: chainstore.NodeID{0x01}, BucketID: 1,
+		LastAccessUnix: 100, CreatedAt: 100, Depth: 0,
+	}
+	child := chainstore.Node{
+		Version: 1, ID: chainstore.NodeID{0x02},
+		ParentID:       parent.ID,
+		BucketID:       1,
+		LastAccessUnix: 100, CreatedAt: 100, Depth: 1,
+	}
+	// Insert parent + child normally.
+	require.NoError(t, b.Commit(ctx, chainstore.Transaction{
+		PutNodes: []chainstore.Node{parent, child},
+	}))
+	// Then capacity-evict the parent (non-cascading delete via DeleteNodes,
+	// matching appendNodeToDeleteTx in internal/chainstore/evict.go: also
+	// clear the LRU entry via BucketMove with NewBucket=0).
+	require.NoError(t, b.Commit(ctx, chainstore.Transaction{
+		DeleteNodes: []chainstore.NodeID{parent.ID},
+		BucketMoves: []chainstore.BucketMove{
+			{NodeID: parent.ID, OldBucket: parent.BucketID, NewBucket: 0},
+		},
+	}))
+
+	report, err := b.ConsistencyCheck(ctx)
+	require.NoError(t, err)
+	assert.True(t, report.OK, "capacity-evicted parent must not fail the check; got: %+v", report)
+	assert.Empty(t, report.DepthErrors)
+	assert.Empty(t, report.DanglingLRU)
+	assert.Empty(t, report.DecodeErrors)
+	require.Len(t, report.MissingParents, 1)
+	assert.Contains(t, string(report.MissingParents[0]), hex.EncodeToString(parent.ID[:]))
+}
+
+// TestConsistencyCheck_OrphanNodeWithMissingParent verifies the same
+// MissingParents reporting for the simplest case: a node that references a
+// parent that was never inserted. Same expected outcome — reported, not failed.
+func TestConsistencyCheck_OrphanNodeWithMissingParent(t *testing.T) {
+	ctx := context.Background()
+	b := openMemBackend(t)
+
 	orphan := chainstore.Node{
 		Version: 1, ID: chainstore.NodeID{0x02},
 		ParentID:       chainstore.NodeID{0xDE, 0xAD}, // never inserted
@@ -152,7 +194,7 @@ func TestConsistencyCheck_MissingParent(t *testing.T) {
 
 	report, err := b.ConsistencyCheck(ctx)
 	require.NoError(t, err)
-	assert.False(t, report.OK)
-	require.Len(t, report.DepthErrors, 1)
-	assert.Equal(t, uint32(0), report.DepthErrors[0].Parent, "absent parent reported as depth=0")
+	assert.True(t, report.OK)
+	assert.Empty(t, report.DepthErrors)
+	require.Len(t, report.MissingParents, 1)
 }
