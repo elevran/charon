@@ -60,6 +60,12 @@ type Config struct {
 	// staleness from mutations that do not invalidate the cache (Complete,
 	// for example, mutates a turn's ResponseBlob in Pebble but does not
 	// invalidate cached entries for the same leaf).
+	//
+	// CacheTTL must be strictly less than TTL (when TTL > 0): a cache hit
+	// skips the LRU touch/BucketMove commit, so LastAccessUnix is not refreshed
+	// in Pebble for nodes served from the cache. If CacheTTL >= TTL, the
+	// background ttlReap would delete those Pebble nodes while the cache still
+	// serves them. New rejects that configuration with an error.
 	CacheMaxBytes int64
 	CacheTTL      time.Duration
 }
@@ -147,6 +153,14 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	}
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
+	}
+
+	// Guard: a cache TTL >= chain TTL would let the background ttlReap delete
+	// Pebble nodes that the cache is still serving (cache hits skip the LRU
+	// touch/BucketMove commit that refreshes LastAccessUnix). Reject that
+	// configuration explicitly rather than letting it fail silently.
+	if cfg.TTL > 0 && cfg.CacheTTL > 0 && cfg.CacheTTL >= cfg.TTL {
+		return nil, fmt.Errorf("chainstore.New: CacheTTL (%v) must be less than TTL (%v)", cfg.CacheTTL, cfg.TTL)
 	}
 
 	m, err := newStoreMetrics(cfg.Registerer)

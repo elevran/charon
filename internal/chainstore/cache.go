@@ -56,7 +56,12 @@ type chainCache struct {
 	evictions int64
 }
 
-// get returns the cached chain for leaf if present and not expired.
+// get returns a defensive shallow copy of the cached chain for leaf if present
+// and not expired. The slices are freshly allocated so callers may mutate the
+// returned Node/Turn elements (e.g. extend a blob field) without corrupting
+// the cached entry. The NodeID and Turn blob fields are still aliases between
+// the returned slice and the cached entry; deep-copy those if you need to
+// mutate them.
 func (c *chainCache) get(leaf NodeID) ([]Node, []Turn, bool) {
 	if c == nil {
 		return nil, nil, false
@@ -76,7 +81,9 @@ func (c *chainCache) get(leaf NodeID) ([]Node, []Turn, bool) {
 	}
 	c.order.MoveToFront(el)
 	c.recordHit()
-	return entry.nodes, entry.turns, true
+	nodes := append([]Node(nil), entry.nodes...)
+	turns := append([]Turn(nil), entry.turns...)
+	return nodes, turns, true
 }
 
 // put inserts or refreshes the cached chain for leaf; bytes is the entry's
@@ -129,7 +136,8 @@ func (c *chainCache) enforceBoundLocked() {
 
 // invalidateNodes removes any entry whose nodes slice contains one of deleted.
 // Called from the Commit path when Transaction.DeleteNodes is non-empty.
-// O(entries * avgDepth); in practice most invalidations touch a single
+// O(entries * avgDepth * len(deleted)): three nested loops (cache entries x
+// deleted slice x entry nodes). In practice most invalidations touch a single
 // deleted node and the inner linear scan avoids a per-call map allocation.
 func (c *chainCache) invalidateNodes(deleted []NodeID) {
 	if c == nil || len(deleted) == 0 {

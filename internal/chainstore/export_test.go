@@ -17,9 +17,9 @@ func (s *Store) NudgesFired() int64 { return s.nudgeCount.Load() }
 
 func (s *Store) ReapStaging(ctx context.Context) { s.reapStaging(ctx) }
 
-// CacheStats returns the cache hit, miss, used-bytes, and entry-count snapshot
-// (for tests). Returns zeros when caching is disabled.
-func (s *Store) CacheStats() (hits, misses int64, bytes int64, entries int) {
-	h, m, _, b, e := s.cache.stats()
-	return h, m, b, e
+// CacheStats returns the cache hit, miss, eviction, used-bytes, and
+// entry-count snapshot (for tests). Returns zeros when caching is disabled.
+func (s *Store) CacheStats() (hits, misses, evictions int64, bytes int64, entries int) {
+	h, m, ev, b, e := s.cache.stats()
+	return h, m, ev, b, e
 }
