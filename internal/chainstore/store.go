@@ -131,6 +131,22 @@ func (s *Store) metricsAfterMutation(entries, bytes int64) {
 // TTL returns the configured TTL duration (0 if TTL-based eviction is disabled).
 func (s *Store) TTL() time.Duration { return s.cfg.TTL }
 
+// applyStatsAndMaybeNotify applies a transaction's stats delta to the
+// in-memory counters, refreshes the Prometheus gauges, and nudges the
+// eviction goroutine when configured capacities are exceeded. Pure
+// optimistic accounting: the persistent StatsDelta has already been
+// merged by backend.Commit; this updates the resident Load values so
+// subsequent capacity checks see fresh data.
+func (s *Store) applyStatsAndMaybeNotify(d StatsDelta) {
+	entries := s.entries.Add(d.EntryDelta)
+	totalBytes := s.bytes.Add(d.BytesDelta)
+	s.metricsAfterMutation(entries, totalBytes)
+	if (s.cfg.MaxEntries > 0 && entries > s.cfg.MaxEntries) ||
+		(s.cfg.MaxBytes > 0 && totalBytes > s.cfg.MaxBytes) {
+		s.notifyCapacityExceeded()
+	}
+}
+
 // New wires cfg into a Store and starts background goroutines.
 // ctx is used only for the initial Stats() call to reload persistent counters;
 // the store's own background goroutines run on an internal context.
@@ -292,13 +308,10 @@ func (s *Store) Store(ctx context.Context, responseID, previousResponseID, tenan
 		return fmt.Errorf("chainstore.Store: commit: %w", err)
 	}
 
-	entries := s.entries.Add(1)
-	totalBytes := s.bytes.Add(int64(len(requestBlob)))
-	s.metricsAfterMutation(entries, totalBytes)
-	if (s.cfg.MaxEntries > 0 && entries > s.cfg.MaxEntries) ||
-		(s.cfg.MaxBytes > 0 && totalBytes > s.cfg.MaxBytes) {
-		s.notifyCapacityExceeded()
-	}
+	s.applyStatsAndMaybeNotify(StatsDelta{
+		EntryDelta: 1,
+		BytesDelta: int64(len(requestBlob)),
+	})
 	return nil
 }
 
@@ -386,13 +399,7 @@ func (s *Store) StoreWithStaging(ctx context.Context, stagingID, responseID, pre
 		return fmt.Errorf("chainstore.StoreWithStaging: commit: %w", err)
 	}
 
-	entries := s.entries.Add(1)
-	totalBytes := s.bytes.Add(tx.StatsDelta.BytesDelta)
-	s.metricsAfterMutation(entries, totalBytes)
-	if (s.cfg.MaxEntries > 0 && entries > s.cfg.MaxEntries) ||
-		(s.cfg.MaxBytes > 0 && totalBytes > s.cfg.MaxBytes) {
-		s.notifyCapacityExceeded()
-	}
+	s.applyStatsAndMaybeNotify(tx.StatsDelta)
 	return nil
 }
 

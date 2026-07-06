@@ -207,11 +207,11 @@ type Transaction struct {
 	// PutStagingDone marks a staging record as terminally complete
 	// (responseID non-empty) or aborted (responseID empty). Set on
 	// /complete and /abort. GET /staging/{id} returns 410 Gone when
-	// this key exists.
+	// this key exists. There is intentionally no DeleteStagingDone —
+	// the done marker stays for the lifetime of the staging record
+	// so /staging/{id} reliably returns 410 even after the underlying
+	// node has been capacity-evicted.
 	PutStagingDone []StagingDoneEntry
-
-	// DeleteStagingDone removes the done-marker (reaper).
-	DeleteStagingDone []BlobID
 
 	// PutResponseIDIndex / DeleteResponseIDIndex maintain the
 	// responseID → stagingID reverse lookup.

@@ -386,12 +386,6 @@ func (b *Backend) Commit(ctx context.Context, tx chainstore.Transaction) error {
 		}
 	}
 
-	for _, sid := range tx.DeleteStagingDone {
-		if err := batch.Delete(stagingDoneKey(sid), nil); err != nil {
-			return err
-		}
-	}
-
 	if err := b.applyStatsDelta(batch, tx.StatsDelta); err != nil {
 		return err
 	}
@@ -499,18 +493,10 @@ func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID)
 }
 
 // StagingNextOffset returns the next-expected chunk offset for a staging
-// record. 0 if no chunks have been written yet. Returns ErrUnknownStaging
-// if the staging record itself is absent.
+// record, or 0 if no chunks have been written yet. Callers must have
+// already verified the staging record exists (via GetStagingNode); this
+// method reads only pfxStagingNext and does not check pfxStaging.
 func (b *Backend) StagingNextOffset(_ context.Context, stagingID chainstore.BlobID) (uint32, error) {
-	// Verify the staging record exists.
-	if _, closer, err := b.db.Get(stagingKey(stagingID)); err != nil {
-		if err == crdbpebble.ErrNotFound {
-			return 0, chainstore.ErrUnknownStaging
-		}
-		return 0, err
-	} else {
-		_ = closer.Close()
-	}
 	val, closer, err := b.db.Get(stagingNextKey(stagingID))
 	if err != nil {
 		if err == crdbpebble.ErrNotFound {

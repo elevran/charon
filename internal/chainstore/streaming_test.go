@@ -41,7 +41,7 @@ func TestStreamStore_SmallSingleChunk(t *testing.T) {
 
 	_, err = s.AppendChunk(ctx, stagingID, 0, one)
 	require.NoError(t, err)
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_small", "", "", 1, uint32(len(one))))
+	require.NoError(t, s.StreamStore(ctx, stagingID, "r_small", "", 1, uint32(len(one))))
 
 	node, turn, err := s.Retrieve(ctx, "r_small", "")
 	require.NoError(t, err)
@@ -73,7 +73,7 @@ func TestAppendChunk_LargeMultiChunk(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.NoError(t, s.BindResponseID(ctx, stagingID, "r_big"))
-	_, err = s.StreamStoreCommit(ctx, stagingID, "r_big", "", "", 0, nil, uint32(len(expected)))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_big", "", uint32(len(expected)))
 	require.NoError(t, err)
 
 	node, turn, err := s.Retrieve(ctx, "r_big", "")
@@ -104,7 +104,7 @@ func TestAppendChunk_PartialLastChunk(t *testing.T) {
 
 	total := uint32(len(c0) + len(c1))
 	require.NoError(t, s.BindResponseID(ctx, stagingID, "r_partial"))
-	_, err = s.StreamStoreCommit(ctx, stagingID, "r_partial", "", "", 0, nil, total)
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_partial", "", total)
 	require.NoError(t, err)
 
 	node, turn, err := s.Retrieve(ctx, "r_partial", "")
@@ -170,7 +170,7 @@ func TestStreamStore_MixedSingleAndChunked(t *testing.T) {
 	_, err = s.AppendChunk(ctx, stagingID, 1, []byte("chunk1-b"))
 	require.NoError(t, err)
 	const sz = uint32(len("chunk1-a") + len("chunk1-b"))
-	require.NoError(t, s.StreamStore(ctx, stagingID, "t1", "t0", "", 2, sz))
+	require.NoError(t, s.StreamStore(ctx, stagingID, "t1", "", 2, sz))
 
 	// Turn 2: single-blob again.
 	require.NoError(t, s.Store(ctx, "t2", "t1", "", []byte("req2")))
@@ -196,7 +196,7 @@ func TestStreamStore_DeleteChunkedNode(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.AppendChunk(ctx, stagingID, 1, chunkData(1, 4096))
 	require.NoError(t, err)
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_del", "", "", 2, 8192))
+	require.NoError(t, s.StreamStore(ctx, stagingID, "r_del", "", 2, 8192))
 
 	node, err := b.GetNode(ctx, chainstore.NodeIDFor("", "r_del"))
 	require.NoError(t, err)
@@ -239,7 +239,7 @@ func TestAppendChunk_IdempotentReplay(t *testing.T) {
 	require.NoError(t, err, "replay must succeed (idempotent at same offset)")
 
 	require.NoError(t, s.BindResponseID(ctx, stagingID, "r_replay"))
-	_, err = s.StreamStoreCommit(ctx, stagingID, "r_replay", "", "", 0, nil, uint32(len(first)))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_replay", "", uint32(len(first)))
 	require.NoError(t, err)
 
 	_, turn, err := s.Retrieve(ctx, "r_replay", "")
@@ -285,7 +285,7 @@ func TestStreamStore_PeakHeapBenchmark(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_bench", "", "", uint32(numChunks), uint32(totalSize)))
+	require.NoError(t, s.StreamStore(ctx, stagingID, "r_bench", "", uint32(numChunks), uint32(totalSize)))
 
 	runtime.GC()
 	var final runtime.MemStats
@@ -311,7 +311,7 @@ func TestStreamStore_CommitUnknownStagingReturnsErrUnknownStaging(t *testing.T) 
 	ctx := context.Background()
 
 	bogus := uuid.New().String()
-	err := s.StreamStore(ctx, bogus, "r1", "", "", 1, 4)
+	err := s.StreamStore(ctx, bogus, "r1", "", 1, 4)
 	assert.True(t, errors.Is(err, chainstore.ErrUnknownStaging))
 }
 
@@ -340,7 +340,7 @@ func TestAppendChunkAndCommit_ThreeChunks(t *testing.T) {
 	require.NoError(t, err)
 
 	// Bind and commit (responseID is now required; supply via call arg).
-	finalID, err := s.StreamStoreCommit(ctx, stagingID, "r_combined", "", "", 0, nil, uint32(len(expected)))
+	finalID, err := s.CompleteStreaming(ctx, stagingID, "r_combined", "", uint32(len(expected)))
 	require.NoError(t, err)
 	assert.Equal(t, "r_combined", finalID)
 
@@ -356,7 +356,7 @@ func TestStreamStoreCommit_UnknownStaging(t *testing.T) {
 	ctx := context.Background()
 
 	bogus := uuid.New().String()
-	_, err := s.StreamStoreCommit(ctx, bogus, "r_bogus", "", "", 0, nil, 1)
+	_, err := s.CompleteStreaming(ctx, bogus, "r_bogus", "", 1)
 	assert.True(t, errors.Is(err, chainstore.ErrUnknownStaging))
 }
 
@@ -372,12 +372,12 @@ func TestCompleteAcceptsBoundOrSuppliedResponseID(t *testing.T) {
 
 	// No chunks yet — completion with no responseID supplied and no
 	// binding → ErrResponseIDRequired.
-	_, err = s.StreamStoreCommit(ctx, stagingID, "", "", "", 0, nil, 0)
+	_, err = s.CompleteStreaming(ctx, stagingID, "", "", 0)
 	assert.ErrorIs(t, err, chainstore.ErrResponseIDRequired)
 
 	// Bind via BindResponseID, retry — uses bound value, no caller ID.
 	require.NoError(t, s.BindResponseID(ctx, stagingID, "r_via_bind"))
-	_, err = s.StreamStoreCommit(ctx, stagingID, "", "", "", 0, nil, 0)
+	_, err = s.CompleteStreaming(ctx, stagingID, "", "", 0)
 	require.NoError(t, err)
 
 	// Verify the bound value was used.
@@ -433,7 +433,7 @@ func TestAppendChunk_InternalSplitting(t *testing.T) {
 	}
 
 	// Commit so the retrieve path can reassemble.
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_split1mb", "", "", 4, uint32(bodySize)))
+	require.NoError(t, s.StreamStore(ctx, stagingID, "r_split1mb", "", 4, uint32(bodySize)))
 	node, turn, err := s.Retrieve(ctx, "r_split1mb", "")
 	require.NoError(t, err)
 	assert.Equal(t, body, turn.ResponseBlob, "1 MB reassembled from 4 chunks")
@@ -466,7 +466,7 @@ func TestAppendChunk_SplitsLargeBody(t *testing.T) {
 
 	// Now commit and read-back must reassemble exactly the input body.
 	require.NoError(t, s.BindResponseID(ctx, stagingID, "r_split"))
-	_, err = s.StreamStoreCommit(ctx, stagingID, "r_split", "", "", 0, nil, uint32(bodySize))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_split", "", uint32(bodySize))
 	require.NoError(t, err)
 
 	roundtrip, turn, err := s.Retrieve(ctx, "r_split", "")
@@ -478,16 +478,18 @@ func TestAppendChunk_SplitsLargeBody(t *testing.T) {
 // TestBindResponseID verifies that the early-binding API records the
 // responseID on the staging record and rejects conflicting bindings.
 func TestBindResponseID(t *testing.T) {
-	s := openMemStore(t, chainstore.Config{})
+	s, b := openMemStoreAndBackend(t, chainstore.Config{})
 	ctx := context.Background()
 
 	stagingID, _, err := s.ResolveAndStage(ctx, "", "", []byte("req"))
 	require.NoError(t, err)
 
+	sid := parseStagingID(t, stagingID)
+
 	require.NoError(t, s.BindResponseID(ctx, stagingID, "r_early"))
-	bound, err := s.BoundResponseID(ctx, stagingID)
+	node, err := b.GetStagingNode(ctx, sid)
 	require.NoError(t, err)
-	assert.Equal(t, "r_early", bound)
+	assert.Equal(t, "r_early", node.ResponseID)
 
 	// Re-binding to the same id is a no-op.
 	require.NoError(t, s.BindResponseID(ctx, stagingID, "r_early"))
@@ -497,12 +499,12 @@ func TestBindResponseID(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// TestStreamStoreCommit_UsesBoundResponseID: when the staging record is
-// already bound, StreamStoreCommit uses the bound value even when the
+// TestCompleteStreaming_UsesBoundResponseID: when the staging record is
+// already bound, CompleteStreaming uses the bound value even when the
 // caller passes a different one (conflict → error). This test exercises
-// the legacy 2-call (AppendChunk + StreamStoreCommit) path: chunks are
-// pre-written, then StreamStoreCommit finalizes the manifest atomically.
-func TestStreamStoreCommit_UsesBoundResponseID(t *testing.T) {
+// the 2-call (AppendChunk + CompleteStreaming) path: chunks are
+// pre-written, then CompleteStreaming finalizes the manifest atomically.
+func TestCompleteStreaming_UsesBoundResponseID(t *testing.T) {
 	s := openMemStore(t, chainstore.Config{})
 	ctx := context.Background()
 
@@ -517,7 +519,7 @@ func TestStreamStoreCommit_UsesBoundResponseID(t *testing.T) {
 	require.NoError(t, err)
 
 	// StreamStoreCommit (legacy 2-call path) uses the bound value.
-	_, err = s.StreamStoreCommit(ctx, stagingID, "r_bound", "", "", 0, nil, uint32(len(body)))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_bound", "", uint32(len(body)))
 	require.NoError(t, err)
 
 	// Verify the bound value was used.
@@ -542,12 +544,12 @@ func TestCompleteRequiresResponseIDOrBinding(t *testing.T) {
 	require.NoError(t, err)
 
 	// No bound value, no caller-supplied responseID → error.
-	_, err = s.StreamStoreCommit(ctx, stagingID, "", "", "", 0, nil, 7)
+	_, err = s.CompleteStreaming(ctx, stagingID, "", "", 7)
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, chainstore.ErrResponseIDRequired)
 
 	// Now bind via a chunk PUT, retry — should succeed.
 	require.NoError(t, s.BindResponseID(ctx, stagingID, "r_bound"))
-	_, err = s.StreamStoreCommit(ctx, stagingID, "", "", "", 0, nil, 7)
+	_, err = s.CompleteStreaming(ctx, stagingID, "", "", 7)
 	require.NoError(t, err)
 }

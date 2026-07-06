@@ -183,20 +183,6 @@ func (s *Store) BindResponseID(ctx context.Context, stagingID, responseID string
 	return nil
 }
 
-// BoundResponseID returns the responseID currently bound to a staging
-// record, or "" if none.
-func (s *Store) BoundResponseID(ctx context.Context, stagingID string) (string, error) {
-	sid, err := parseStagingIDBlobID(stagingID)
-	if err != nil {
-		return "", fmt.Errorf("chainstore.BoundResponseID: %w", err)
-	}
-	staged, err := s.backend.GetStagingNode(ctx, sid)
-	if err != nil {
-		return "", fmt.Errorf("chainstore.BoundResponseID: staging lookup: %w", err)
-	}
-	return staged.ResponseID, nil
-}
-
 // LookupStagingByResponseID returns the stagingID bound to responseID.
 func (s *Store) LookupStagingByResponseID(ctx context.Context, responseID string) (string, error) {
 	sid, err := s.backend.LookupStagingByResponseID(ctx, responseID)
@@ -253,8 +239,8 @@ func (s *Store) AbortStaging(ctx context.Context, stagingID string) error {
 	staged, err := s.backend.GetStagingNode(ctx, sid)
 	if err != nil {
 		if errors.Is(err, ErrUnknownStaging) {
-			// Already gone or never-existed. Check for a stale done
-			// marker (the only remaining side effect of an abort).
+			// Already gone or never-existed. The done-marker (which is
+			// the only remaining side effect of an abort) is preserved.
 			return nil
 		}
 		return fmt.Errorf("chainstore.AbortStaging: %w", err)
@@ -266,15 +252,11 @@ func (s *Store) AbortStaging(ctx context.Context, stagingID string) error {
 		// empty for aborted.
 		PutStagingDone: []StagingDoneEntry{{StagingID: sid, ResponseID: ""}},
 	}
-	if staged.ResponseBlobID != (BlobID{}) {
-		chunks, listErr := s.backend.ListChunks(ctx, staged.ResponseBlobID)
-		if listErr != nil {
-			return fmt.Errorf("chainstore.AbortStaging: list chunks: %w", listErr)
-		}
-		for _, c := range chunks {
-			tx.DeleteChunks = append(tx.DeleteChunks, ChunkEntry{BlobID: c.BlobID, Offset: c.Offset})
-		}
-	}
+	// chunks (and the manifest, if any) live under the staging record's
+	// ResponseBlobID. expandChunkedDelete handles both DeleteManifests and
+	// DeleteChunks for chunked payloads and is a no-op for single-blob.
+	staged.BlobType = BlobTypeChunked
+	s.expandChunkedDelete(ctx, &tx, staged)
 	if staged.ResponseID != "" {
 		tx.DeleteResponseIDIndex = []string{staged.ResponseID}
 	}
@@ -284,14 +266,16 @@ func (s *Store) AbortStaging(ctx context.Context, stagingID string) error {
 	return nil
 }
 
-// StreamStore commits a chunked blob: writes the manifest and the final Node
-// (BlobType=Chunked) in one atomic transaction. The caller passes the
-// assembled chunk count and total byte size — the manifest is the source of
-// truth, NOT a re-scan of the chunks (which would be an unbounded O(N) read).
+// StreamStore commits a chunked blob (legacy caller-supplied count path).
+// Writes the manifest and the final Node (BlobType=Chunked) in one atomic
+// transaction and deletes the staging record. The caller passes the
+// assembled chunk count and total byte size — the manifest is the source
+// of truth, NOT a re-scan of the chunks (which would be an unbounded
+// O(N) read). Prefer CompleteStreaming for new callers (it derives the
+// chunk count from the server-tracked pfxStagingNext and requires the
+// responseID).
 //
-// stagingID is the value returned by ResolveAndStage. previousResponseID and
-// tenantKey are used exactly as in StoreWithStaging to bind the new node into
-// the parent chain.
+// tenantKey binds the new node into the parent chain.
 //
 // Crash safety:
 //   - Crash before any chunk lands: orphaned staging record (no chunks).
@@ -299,9 +283,9 @@ func (s *Store) AbortStaging(ctx context.Context, stagingID string) error {
 //     staging ID's ResponseBlobID — reaped by the staging TTL reaper.
 //   - Crash after manifest: chunked blob is fully visible; staging reaper
 //     finds and deletes the (now-stale) staging record on next run.
-func (s *Store) StreamStore(ctx context.Context, stagingID, responseID, _, tenantKey string, chunkCount uint32, totalSize uint32) error {
-	if len(responseID) > 255 {
-		return fmt.Errorf("chainstore.StreamStore: responseID exceeds 255 bytes (len=%d)", len(responseID))
+func (s *Store) StreamStore(ctx context.Context, stagingID, responseID, tenantKey string, chunkCount uint32, totalSize uint32) error {
+	if len(responseID) > responseIDMaxLen {
+		return fmt.Errorf("chainstore.StreamStore: responseID exceeds %d bytes (len=%d)", responseIDMaxLen, len(responseID))
 	}
 	sid, err := parseStagingIDBlobID(stagingID)
 	if err != nil {
@@ -348,12 +332,7 @@ func (s *Store) StreamStore(ctx context.Context, stagingID, responseID, _, tenan
 		return fmt.Errorf("chainstore.StreamStore: commit: %w", err)
 	}
 
-	entries := s.entries.Add(1)
-	totalBytes := s.bytes.Add(tx.StatsDelta.BytesDelta)
-	if (s.cfg.MaxEntries > 0 && entries > s.cfg.MaxEntries) ||
-		(s.cfg.MaxBytes > 0 && totalBytes > s.cfg.MaxBytes) {
-		s.notifyCapacityExceeded()
-	}
+	s.applyStatsAndMaybeNotify(tx.StatsDelta)
 	return nil
 }
 
@@ -381,11 +360,6 @@ func parseStagingIDBlobID(s string) (BlobID, error) {
 // an error (the data would be unreachable via /responses/{id} after
 // /staging/{id} flips to 410).
 //
-// finalOffset / finalData are reserved for the older combined write+commit
-// entry point and are not used here (chunk writes happen via AppendChunk
-// before this call). Kept on the signature for back-compat with the
-// previous StreamStoreCommit caller.
-//
 // totalSize is the cumulative byte count across ALL chunks. Currently
 // recorded in the Node's ResponseBlobSize and the ManifestEntry's
 // TotalSize for read-time validation; not used as a control value.
@@ -394,9 +368,9 @@ func parseStagingIDBlobID(s string) (BlobID, error) {
 // leaves the staging record + chunks in their prior state (no manifest
 // → reads return ErrNotFound via the assembled-blob path). On restart
 // the proxy can simply retry the /complete call.
-func (s *Store) CompleteStreaming(ctx context.Context, stagingID, responseID, _, tenantKey string, _ uint32, _ []byte, totalSize uint32) (string, error) {
-	if responseID != "" && len(responseID) > 255 {
-		return "", fmt.Errorf("chainstore.Complete: responseID exceeds 255 bytes (len=%d)", len(responseID))
+func (s *Store) CompleteStreaming(ctx context.Context, stagingID, responseID, tenantKey string, totalSize uint32) (string, error) {
+	if responseID != "" && len(responseID) > responseIDMaxLen {
+		return "", fmt.Errorf("chainstore.Complete: responseID exceeds %d bytes (len=%d)", responseIDMaxLen, len(responseID))
 	}
 	sid, err := parseStagingIDBlobID(stagingID)
 	if err != nil {
@@ -474,20 +448,6 @@ func (s *Store) CompleteStreaming(ctx context.Context, stagingID, responseID, _,
 		return "", fmt.Errorf("chainstore.Complete: commit: %w", err)
 	}
 
-	entries := s.entries.Add(1)
-	totalBytes := s.bytes.Add(tx.StatsDelta.BytesDelta)
-	if (s.cfg.MaxEntries > 0 && entries > s.cfg.MaxEntries) ||
-		(s.cfg.MaxBytes > 0 && totalBytes > s.cfg.MaxBytes) {
-		s.notifyCapacityExceeded()
-	}
+	s.applyStatsAndMaybeNotify(tx.StatsDelta)
 	return finalID, nil
-}
-
-// StreamStoreCommit is the legacy name for CompleteStreaming. Kept for
-// back-compat with callers (and tests) that pre-date the chunk-path
-// refactor. See CompleteStreaming for the full contract.
-//
-// Deprecated: use CompleteStreaming.
-func (s *Store) StreamStoreCommit(ctx context.Context, stagingID, responseID, previousResponseID, tenantKey string, finalOffset uint32, finalData []byte, totalSize uint32) (string, error) {
-	return s.CompleteStreaming(ctx, stagingID, responseID, previousResponseID, tenantKey, finalOffset, finalData, totalSize)
 }
