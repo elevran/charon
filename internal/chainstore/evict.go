@@ -237,6 +237,7 @@ func (s *Store) deleteNode(ctx context.Context, node Node) {
 		return
 	}
 	s.metricsAfterMutation(s.entries.Load(), totalBytes)
+	s.cache.invalidateNodes(tx.DeleteNodes)
 }
 
 // deleteSubtree deletes root and all descendants via BFS using GetChildren.
@@ -281,6 +282,7 @@ func (s *Store) deleteSubtree(ctx context.Context, root NodeID) {
 			s.entries.Add(tx.StatsDelta.EntryDelta)
 			totalBytes := s.bytes.Add(tx.StatsDelta.BytesDelta)
 			s.metricsAfterMutation(s.entries.Load(), totalBytes)
+			s.cache.invalidateNodes(tx.DeleteNodes)
 		}
 
 		frontier = next
