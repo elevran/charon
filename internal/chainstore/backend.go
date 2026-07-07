@@ -38,15 +38,16 @@ type Node struct {
 	ID               NodeID
 	ParentID         NodeID   // zero value = root node
 	RequestBlobID    BlobID   // UUID → request (input) blob; zero until request is stored
-	ResponseBlobID   BlobID   // UUID → response (output) blob; zero until turn is completed
+	ResponseBlobID   BlobID   // UUID → response blob ID; interpretation depends on BlobType
 	LastAccessUnix   int64    // Unix seconds; updated on access
 	CreatedAt        int64    // Unix seconds; set at store time, never updated
 	BucketID         BucketID // bucket at last promotion; ground truth for eviction order
 	RequestBlobSize  uint32
 	ResponseBlobSize uint32
-	Depth            uint32 // 0 = root; enables slice preallocation in LoadChain
-	Status           uint8  // NodeStatusCompleted or NodeStatusFailed
-	ResponseID       string // external caller-supplied ID; stored verbatim, max 255 bytes
+	Depth            uint32   // 0 = root; enables slice preallocation in LoadChain
+	Status           uint8    // NodeStatusCompleted or NodeStatusFailed
+	BlobType         BlobType // single-blob or chunked (Phase 6 streaming ingest)
+	ResponseID       string   // external caller-supplied ID; stored verbatim, max 255 bytes
 }
 
 // Node status constants.
@@ -54,6 +55,40 @@ const (
 	NodeStatusCompleted uint8 = iota
 	NodeStatusFailed
 )
+
+// BlobType distinguishes single-blob nodes (one pfxBlob key) from chunked
+// nodes (a pfxManifest key plus one pfxChunk key per batch).
+// Default zero value is BlobTypeSingle; chunked nodes are explicitly set to
+// BlobTypeChunked when a StreamStore commit lands.
+type BlobType uint8
+
+const (
+	// BlobTypeSingle stores the response payload as one pfxBlob key.
+	// This is the default for non-streaming stores.
+	BlobTypeSingle BlobType = iota
+	// BlobTypeChunked stores the response payload as a pfxManifest key plus
+	// one pfxChunk key per appended batch. Set by Store.StreamStore.
+	BlobTypeChunked
+)
+
+// ChunkEntry is one batch of a chunked blob in a Transaction.
+// offset is the 0-based item index; same (blobID, offset) repeated is idempotent
+// (last write wins on duplicates).
+type ChunkEntry struct {
+	BlobID BlobID
+	Offset uint32
+	Data   []byte
+}
+
+// ManifestEntry seals a chunked blob in a Transaction (the atomic commit point).
+// ChunkCount and TotalSize are recorded so reads can size buffers without
+// scanning, and so the eviction/reaper code can find orphan chunks via
+// staging key (which carries the same BlobID).
+type ManifestEntry struct {
+	BlobID     BlobID
+	ChunkCount uint32
+	TotalSize  uint32
+}
 
 // BlobEntry carries a blob's ID and raw bytes in a Transaction.
 type BlobEntry struct {
@@ -92,6 +127,28 @@ type StagingEntry struct {
 	Node      Node
 }
 
+// StagingNextEntry pairs a staging key with the next-expected chunk
+// offset (0-based). Used for server-validated ordering: AppendChunk
+// rejects k > next with ErrChunkOutOfRange.
+type StagingNextEntry struct {
+	StagingID  BlobID
+	NextOffset uint32
+}
+
+// StagingDoneEntry marks a staging record as terminally complete or
+// aborted. Value is the bound responseID for complete, empty for aborted.
+type StagingDoneEntry struct {
+	StagingID  BlobID
+	ResponseID string // "" for aborted
+}
+
+// ResponseIDIndexEntry pairs a responseID with its stagingID — the
+// reverse lookup index that powers GET /responses/by-response-id/{rid}.
+type ResponseIDIndexEntry struct {
+	ResponseID string
+	StagingID  BlobID
+}
+
 // Transaction describes what to change, not how.
 // Each backend translates it to its native atomic primitive.
 // OpID makes commits idempotent — backends that support retries use it to detect
@@ -101,9 +158,12 @@ type StagingEntry struct {
 //   - Store a turn:    PutNodes + PutBlobs (request blob) + PutChildren + StatsDelta
 //   - Complete a turn: PutNodes + PutBlobs (response blob) + StatsDelta
 //   - Touch/promote:   PutNodes (LastAccessUnix) + BucketMoves
-//   - Delete:          DeleteNodes + DeleteBlobs + DeleteChildren + StatsDelta
+//   - Delete:          DeleteNodes + DeleteBlobs + DeleteChunks + DeleteChildren + StatsDelta
 //   - Stage a request: PutStagingNodes + PutBlobs (request blob)
 //   - Commit staged:   PutNodes + PutBlobs (response blob) + PutChildren + DeleteStagingNodes + StatsDelta
+//   - Streaming append: Chunks (one per PUT batch)
+//   - Streaming commit: PutNodes (BlobType=Chunked) + Manifests + DeleteStagingNodes + StatsDelta
+//   - Reap orphans:     DeleteStagingNodes + DeleteBlobs + DeleteChunks
 type Transaction struct {
 	OpID uuid.UUID
 
@@ -113,6 +173,24 @@ type Transaction struct {
 	PutBlobs    []BlobEntry
 	DeleteBlobs []BlobID
 
+	// PutChunks / DeleteChunks append or remove individual chunk pages of a
+	// chunked blob. Chunks are stored under pfxChunk+blobID+offset; the
+	// manifest (pfxManifest) is the atomic commit point that makes a chunked
+	// blob visible to reads.
+	PutChunks    []ChunkEntry
+	DeleteChunks []ChunkEntry // entries address by (BlobID,Offset); Data is unused on delete
+
+	// PutManifests record the (BlobID, ChunkCount, TotalSize) of a chunked
+	// blob's atomic commit point under pfxManifest. Commit ordering must
+	// place the manifest write in the same Transaction as the corresponding
+	// Node update so reads see BlobType=Chunked and the manifest atomically.
+	PutManifests []ManifestEntry
+
+	// DeleteManifests removes the manifest key (the atomic commit point) for
+	// a chunked blob. Used by deleteNode/deleteSubtree paths; the staging
+	// reaper and orphan chunk cleanup also rely on it.
+	DeleteManifests []BlobID
+
 	PutChildren    []ChildEntry
 	DeleteChildren []ChildEntry
 
@@ -121,6 +199,24 @@ type Transaction struct {
 	// Staging record operations; invisible to chain walks and eviction scans.
 	PutStagingNodes    []StagingEntry
 	DeleteStagingNodes []BlobID // staging IDs only; blobs go in DeleteBlobs
+
+	// PutStagingNext sets the next-expected chunk offset for a staging
+	// record. Updated atomically with each chunk write.
+	PutStagingNext []StagingNextEntry
+
+	// PutStagingDone marks a staging record as terminally complete
+	// (responseID non-empty) or aborted (responseID empty). Set on
+	// /complete and /abort. GET /staging/{id} returns 410 Gone when
+	// this key exists. There is intentionally no DeleteStagingDone —
+	// the done marker stays for the lifetime of the staging record
+	// so /staging/{id} reliably returns 410 even after the underlying
+	// node has been capacity-evicted.
+	PutStagingDone []StagingDoneEntry
+
+	// PutResponseIDIndex / DeleteResponseIDIndex maintain the
+	// responseID → stagingID reverse lookup.
+	PutResponseIDIndex    []ResponseIDIndexEntry
+	DeleteResponseIDIndex []string
 
 	StatsDelta StatsDelta
 }
@@ -160,10 +256,34 @@ type Backend interface {
 	// Returns ErrUnknownStaging if the staging record is absent.
 	GetStagingNode(ctx context.Context, stagingID BlobID) (Node, error)
 
+	// StagingNextOffset returns the next-expected chunk offset for a staging
+	// record (0 when no chunks have been written). Returns ErrUnknownStaging
+	// if the staging record is absent.
+	StagingNextOffset(ctx context.Context, stagingID BlobID) (uint32, error)
+
+	// GetStagingDone returns the done-marker for a staging record.
+	// Returns ErrUnknownStaging if the marker is absent (in-progress).
+	// The returned responseID is "" for aborted, non-empty for complete.
+	GetStagingDone(ctx context.Context, stagingID BlobID) (responseID string, err error)
+
+	// LookupStagingByResponseID returns the stagingID currently bound to
+	// responseID. Returns ErrNotFound if no staging record is bound to it.
+	LookupStagingByResponseID(ctx context.Context, responseID string) (BlobID, error)
+
 	// ListStagingOlderThan returns all staging entries whose Node.CreatedAt
 	// is before cutoff. Used by the staging TTL reaper to clean orphaned records
 	// left by a proxy crash between ResolveAndStage and StoreWithStaging.
 	ListStagingOlderThan(ctx context.Context, cutoff time.Time) ([]StagingEntry, error)
+
+	// GetManifest returns the manifest for a chunked blob.
+	// Returns ErrNotFound if no manifest exists for blobID (chunked blob never
+	// committed, or has been deleted).
+	GetManifest(ctx context.Context, blobID BlobID) (ManifestEntry, error)
+
+	// ListChunks scans and returns all chunks for blobID in offset order.
+	// len(result) <= ChunkCount of the manifest; orphans (chunks present but
+	// no manifest) are returned when called by the staging reaper.
+	ListChunks(ctx context.Context, blobID BlobID) ([]ChunkEntry, error)
 
 	// Stats returns current entry count and total blob bytes.
 	Stats(ctx context.Context) (entries int64, bytes int64, err error)

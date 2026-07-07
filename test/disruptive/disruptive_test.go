@@ -76,13 +76,12 @@ func startNormalStack(t *testing.T, infSrv *httptest.Server) *fullStack {
 	return &fullStack{charonSrv: charonSrv, proxySrv: proxySrv}
 }
 
-// failingCharonMux returns an http.Handler that returns 507 for all POST /responses/{id}
-// (store) requests and delegates all other requests to the real Charon handler.
-// Store calls are POST /responses/{id} — distinguished from resolve (POST /responses)
-// by the presence of an additional path segment.
+// failingCharonMux returns an http.Handler that returns 507 for all PUT
+// /staging/{id}/chunks/* and PUT /staging/{id}/complete requests (the two
+// calls that make up a Store) and delegates everything else to the real handler.
 func failingCharonMux(realMux http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/responses/") {
+		if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/staging/") {
 			http.Error(w, "injected store failure", http.StatusInsufficientStorage)
 			return
 		}
