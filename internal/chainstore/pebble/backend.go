@@ -95,22 +95,84 @@ func (b *Backend) GetNode(_ context.Context, id chainstore.NodeID) (chainstore.N
 // Either blob is nil if its BlobID is zero (not yet stored).
 // Returns (requestBlob, responseBlob, err).
 //
+// Dispatches on Node.BlobType:
+//   - BlobTypeSingle: response blob fetched from pfxBlob (one read)
+//   - BlobTypeChunked: chunks fetched from pfxChunk and reassembled in order
+//
 // NOTE: blob reads are not snapshot-isolated with respect to LoadChain. A
 // concurrent Store that completes a turn (writing ResponseBlobID) between
 // LoadChain and GetBlobs may cause Resolve to return an unexpectedly non-nil
 // ResponseBlob for a node that appeared incomplete in the chain snapshot. This
 // is a benign over-read (the data is valid) and will be addressed in a future
 // phase when Resolve is refactored to use a snapshot-spanning read path.
-func (b *Backend) GetBlobs(_ context.Context, node chainstore.Node) ([]byte, []byte, error) {
+func (b *Backend) GetBlobs(ctx context.Context, node chainstore.Node) ([]byte, []byte, error) {
 	requestBlob, err := b.fetchBlob(node.RequestBlobID)
 	if err != nil {
 		return nil, nil, err
 	}
-	responseBlob, err := b.fetchBlob(node.ResponseBlobID)
+	if node.ResponseBlobID == (chainstore.BlobID{}) {
+		return requestBlob, nil, nil
+	}
+	responseBlob, err := b.fetchResponseBlob(ctx, node)
 	if err != nil {
 		return nil, nil, err
 	}
 	return requestBlob, responseBlob, nil
+}
+
+// fetchResponseBlob reads a response blob, dispatching on Node.BlobType.
+// The zero-BlobID guard is inlined in GetBlobs so that callers can short-circuit
+// before any backend work.
+func (b *Backend) fetchResponseBlob(ctx context.Context, node chainstore.Node) ([]byte, error) {
+	if node.BlobType == chainstore.BlobTypeChunked {
+		return b.assembleChunked(ctx, node.ResponseBlobID)
+	}
+	return b.fetchBlob(node.ResponseBlobID)
+}
+
+// assembleChunked reads the manifest for blobID, then scans pfxChunk+blobID for
+// every chunk and concatenates them in offset order. To avoid materializing
+// every chunk body in an intermediate ChunkEntry slice, we stream chunks
+// directly from the iterator into the output buffer — halving memory and
+// memcpy on chunked reads. Reads are NOT snapshot-isolated against a concurrent
+// StreamStore commit; partial reads are benign.
+func (b *Backend) assembleChunked(ctx context.Context, blobID chainstore.BlobID) ([]byte, error) {
+	manifest, err := b.GetManifest(ctx, blobID)
+	if err != nil {
+		return nil, err
+	}
+	lower := chunkKeyPrefix(blobID)
+	// Upper bound must be blobID-scoped: append one byte past the maximum
+	// 4-byte big-endian offset so the range is exclusive and stays within
+	// the pfxChunk+blobID namespace. Using upper[0]=pfxChunk+1 is wrong —
+	// it bleeds into pfxManifest keys for blobIDs that sort before ours.
+	upper := make([]byte, 22) // 1 (pfx) + 16 (blobID) + 4 (max offset) + 1 (sentinel)
+	copy(upper, chunkKey(blobID, ^uint32(0)))
+	// upper[21] is 0x00 — any value makes this 22-byte key sort after
+	// all valid 21-byte chunk keys for this blobID.
+	iter, err := b.db.NewIter(&crdbpebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, fmt.Errorf("chainstore/pebble: assembleChunked iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	out := make([]byte, 0, manifest.TotalSize)
+	count := uint32(0)
+	for iter.First(); iter.Valid(); iter.Next() {
+		val, vErr := iter.ValueAndErr()
+		if vErr != nil {
+			return nil, vErr
+		}
+		out = append(out, val...)
+		count++
+	}
+	if err := iter.Error(); err != nil {
+		return nil, err
+	}
+	if count != manifest.ChunkCount {
+		return nil, fmt.Errorf("chainstore/pebble: chunked blob %x has %d chunks, manifest declares %d", blobID, count, manifest.ChunkCount)
+	}
+	return out, nil
 }
 
 // fetchBlob retrieves one blob by ID; returns nil (not an error) for a zero BlobID.
@@ -126,6 +188,51 @@ func (b *Backend) fetchBlob(id chainstore.BlobID) ([]byte, error) {
 	out := make([]byte, len(val))
 	copy(out, val)
 	return out, nil
+}
+
+// GetManifest returns the manifest for a chunked blob. ErrNotFound if absent.
+func (b *Backend) GetManifest(_ context.Context, blobID chainstore.BlobID) (chainstore.ManifestEntry, error) {
+	val, closer, err := b.db.Get(manifestKey(blobID))
+	if err != nil {
+		return chainstore.ManifestEntry{}, mapErr(err)
+	}
+	defer func() { _ = closer.Close() }()
+	m, err := decodeManifest(val)
+	if err != nil {
+		return chainstore.ManifestEntry{}, fmt.Errorf("chainstore/pebble: decode manifest %x: %w", blobID, err)
+	}
+	m.BlobID = blobID
+	return m, nil
+}
+
+// ListChunks scans pfxChunk+blobID in offset order and returns all chunks.
+func (b *Backend) ListChunks(_ context.Context, blobID chainstore.BlobID) ([]chainstore.ChunkEntry, error) {
+	lower := chunkKeyPrefix(blobID)
+	upper := make([]byte, 22) // blobID-scoped upper bound; see assembleChunked comment
+	copy(upper, chunkKey(blobID, ^uint32(0)))
+
+	iter, err := b.db.NewIter(&crdbpebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return nil, fmt.Errorf("chainstore/pebble: ListChunks iter: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	var out []chainstore.ChunkEntry
+	for iter.First(); iter.Valid(); iter.Next() {
+		val, err := iter.ValueAndErr()
+		if err != nil {
+			return nil, err
+		}
+		offset := binary.BigEndian.Uint32(iter.Key()[17:21])
+		buf := make([]byte, len(val))
+		copy(buf, val)
+		out = append(out, chainstore.ChunkEntry{
+			BlobID: blobID,
+			Offset: offset,
+			Data:   buf,
+		})
+	}
+	return out, iter.Error()
 }
 
 // Commit translates a domain Transaction into a pebble.Batch and commits atomically.
@@ -192,6 +299,30 @@ func (b *Backend) Commit(ctx context.Context, tx chainstore.Transaction) error {
 		}
 	}
 
+	for _, c := range tx.PutChunks {
+		if err := batch.Set(chunkKey(c.BlobID, c.Offset), c.Data, nil); err != nil {
+			return err
+		}
+	}
+
+	for _, c := range tx.DeleteChunks {
+		if err := batch.Delete(chunkKey(c.BlobID, c.Offset), nil); err != nil {
+			return err
+		}
+	}
+
+	for _, m := range tx.PutManifests {
+		if err := batch.Set(manifestKey(m.BlobID), encodeManifest(m), nil); err != nil {
+			return err
+		}
+	}
+
+	for _, bid := range tx.DeleteManifests {
+		if err := batch.Delete(manifestKey(bid), nil); err != nil {
+			return err
+		}
+	}
+
 	for _, bm := range tx.BucketMoves {
 		// OldBucket=0 means "no old entry to delete" (reserved sentinel — never a real bucket).
 		if bm.OldBucket != 0 {
@@ -211,10 +342,50 @@ func (b *Backend) Commit(ctx context.Context, tx chainstore.Transaction) error {
 		if err := batch.Set(stagingKey(se.StagingID), encodeNode(se.Node), nil); err != nil {
 			return err
 		}
+		// Early binding: when the staging Node carries a non-empty
+		// ResponseID, write it under pfxStagingRID so GetStagingNode
+		// surfaces it to the API layer on the next read.
+		if se.Node.ResponseID != "" {
+			if err := batch.Set(stagingResponseIDKey(se.StagingID), []byte(se.Node.ResponseID), nil); err != nil {
+				return err
+			}
+		}
 	}
 
 	for _, sid := range tx.DeleteStagingNodes {
 		if err := batch.Delete(stagingKey(sid), nil); err != nil {
+			return err
+		}
+		if err := batch.Delete(stagingResponseIDKey(sid), nil); err != nil {
+			return err
+		}
+		if err := batch.Delete(stagingNextKey(sid), nil); err != nil {
+			return err
+		}
+	}
+
+	for _, sn := range tx.PutStagingNext {
+		var buf [4]byte
+		binary.BigEndian.PutUint32(buf[:], sn.NextOffset)
+		if err := batch.Set(stagingNextKey(sn.StagingID), buf[:], nil); err != nil {
+			return err
+		}
+	}
+
+	for _, ix := range tx.PutResponseIDIndex {
+		if err := batch.Set(responseIDIndexKey(ix.ResponseID), ix.StagingID[:], nil); err != nil {
+			return err
+		}
+	}
+
+	for _, rid := range tx.DeleteResponseIDIndex {
+		if err := batch.Delete(responseIDIndexKey(rid), nil); err != nil {
+			return err
+		}
+	}
+
+	for _, sd := range tx.PutStagingDone {
+		if err := batch.Set(stagingDoneKey(sd.StagingID), []byte(sd.ResponseID), nil); err != nil {
 			return err
 		}
 	}
@@ -299,7 +470,9 @@ func (b *Backend) GetChildren(_ context.Context, parentID chainstore.NodeID) ([]
 }
 
 // GetStagingNode fetches the partial Node stored under a staging key.
-// Returns ErrUnknownStaging if the staging record is absent.
+// Returns ErrUnknownStaging if the staging record is absent. The
+// Node.ResponseID field is sourced from a separate pfxStagingRID key so
+// the bound responseID is visible to early-binding callers.
 func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID) (chainstore.Node, error) {
 	val, closer, err := b.db.Get(stagingKey(stagingID))
 	if err != nil {
@@ -313,7 +486,67 @@ func (b *Backend) GetStagingNode(_ context.Context, stagingID chainstore.BlobID)
 	if err != nil {
 		return chainstore.Node{}, fmt.Errorf("chainstore/pebble: decode staging node %x: %w", stagingID, err)
 	}
+	// Surface the bound responseID (if any) from pfxStagingRID.
+	if ridVal, ridCloser, ridErr := b.db.Get(stagingResponseIDKey(stagingID)); ridErr == nil {
+		node.ResponseID = string(ridVal)
+		_ = ridCloser.Close()
+	} else if ridErr != crdbpebble.ErrNotFound {
+		return chainstore.Node{}, ridErr
+	}
 	return node, nil
+}
+
+// StagingNextOffset returns the next-expected chunk offset for a staging
+// record, or 0 if no chunks have been written yet. Callers must have
+// already verified the staging record exists (via GetStagingNode); this
+// method reads only pfxStagingNext and does not check pfxStaging.
+func (b *Backend) StagingNextOffset(_ context.Context, stagingID chainstore.BlobID) (uint32, error) {
+	val, closer, err := b.db.Get(stagingNextKey(stagingID))
+	if err != nil {
+		if err == crdbpebble.ErrNotFound {
+			return 0, nil // no chunks yet
+		}
+		return 0, err
+	}
+	defer func() { _ = closer.Close() }()
+	if len(val) < 4 {
+		return 0, fmt.Errorf("chainstore/pebble: corrupt staging-next record (len=%d)", len(val))
+	}
+	return binary.BigEndian.Uint32(val[:4]), nil
+}
+
+// LookupStagingByResponseID returns the stagingID bound to responseID, or
+// ErrNotFound if no staging record is bound to that responseID.
+func (b *Backend) LookupStagingByResponseID(_ context.Context, responseID string) (chainstore.BlobID, error) {
+	val, closer, err := b.db.Get(responseIDIndexKey(responseID))
+	if err != nil {
+		if err == crdbpebble.ErrNotFound {
+			return chainstore.BlobID{}, chainstore.ErrNotFound
+		}
+		return chainstore.BlobID{}, err
+	}
+	defer func() { _ = closer.Close() }()
+	if len(val) != 16 {
+		return chainstore.BlobID{}, fmt.Errorf("chainstore/pebble: corrupt responseID index (len=%d)", len(val))
+	}
+	var sid chainstore.BlobID
+	copy(sid[:], val)
+	return sid, nil
+}
+
+// GetStagingDone returns the done-marker for a staging record.
+// Returns ErrUnknownStaging if the marker is absent (in-progress).
+// The returned responseID is "" for aborted, non-empty for complete.
+func (b *Backend) GetStagingDone(_ context.Context, stagingID chainstore.BlobID) (string, error) {
+	val, closer, err := b.db.Get(stagingDoneKey(stagingID))
+	if err != nil {
+		if err == crdbpebble.ErrNotFound {
+			return "", chainstore.ErrUnknownStaging
+		}
+		return "", err
+	}
+	defer func() { _ = closer.Close() }()
+	return string(val), nil
 }
 
 // ListStagingOlderThan scans all pfxStaging keys and returns entries whose

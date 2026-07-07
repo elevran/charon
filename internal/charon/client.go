@@ -70,18 +70,18 @@ func New(baseURL string, timeout time.Duration) *Client {
 	}
 }
 
-// resolveResponse is the JSON body returned by POST /responses?prev={id}.
+// resolveResponse is the JSON body returned by POST /staging?prev={id}.
 type resolveResponse struct {
 	StagingID string        `json:"staging_id"`
 	Turns     []ResolveTurn `json:"turns"`
 }
 
-// Resolve calls POST /responses?prev={previousID}.
+// Resolve calls POST /staging?prev={previousID}.
 // Sends the raw request blob as the body, returns (stagingID, turns) on success.
 // When previousID is empty the "prev" query param is omitted (first-turn staging).
 // tenantKey is forwarded as X-Tenant-Key (empty string sends an empty header, treated as no tenant).
 func (c *Client) Resolve(ctx context.Context, previousID, tenantKey string, requestBlob []byte) (string, []ResolveTurn, error) {
-	u := c.baseURL + "/responses"
+	u := c.baseURL + "/staging"
 	if previousID != "" {
 		u += "?" + url.Values{"prev": {previousID}}.Encode()
 	}
@@ -106,18 +106,115 @@ func (c *Client) Resolve(ctx context.Context, previousID, tenantKey string, requ
 	return r.StagingID, r.Turns, nil
 }
 
-// Store calls POST /responses/{id}?req={stagingID}.
-// Sends responseBlob as the raw body; stagingID is passed as the "req" query param.
+// Store commits a completed response turn.
+//
+// When stagingID is non-empty (the proxy has an open staging record from a
+// prior Resolve call), responseBlob is written as a single chunk and then
+// completed: two round trips to PUT /staging/{sid}/chunks/0 and
+// PUT /staging/{sid}/complete.
+//
+// When stagingID is empty (no prior staging, e.g. direct root write in
+// tests), the call falls through to POST /responses (buffered path) with
+// just the response blob.
 func (c *Client) Store(ctx context.Context, id, stagingID, tenantKey string, responseBlob []byte) error {
-	u := c.baseURL + "/responses/" + id
 	if stagingID != "" {
-		u += "?" + url.Values{"req": {stagingID}}.Encode()
+		if err := c.AppendChunk(ctx, stagingID, 0, id, responseBlob); err != nil {
+			return err
+		}
+		_, err := c.Complete(ctx, stagingID, id, tenantKey, uint32(len(responseBlob)))
+		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(responseBlob))
+	// No staging record: buffered single-call path.
+	return c.storeBuffered(ctx, "", id, tenantKey, nil, responseBlob)
+}
+
+// storeBuffered calls POST /responses with both blobs in a single JSON body.
+// prevID may be empty for a root response; responseID may be empty to let the
+// server assign a UUID.
+func (c *Client) storeBuffered(ctx context.Context, prevID, responseID, tenantKey string, requestBlob, responseBlob []byte) error {
+	payload, err := json.Marshal(struct {
+		PrevID       string          `json:"prev_id,omitempty"`
+		ResponseID   string          `json:"response_id,omitempty"`
+		RequestBlob  json.RawMessage `json:"request_blob,omitempty"`
+		ResponseBlob json.RawMessage `json:"response_blob,omitempty"`
+	}{
+		PrevID:       prevID,
+		ResponseID:   responseID,
+		RequestBlob:  json.RawMessage(requestBlob),
+		ResponseBlob: json.RawMessage(responseBlob),
+	})
 	if err != nil {
 		return err
 	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/responses", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Tenant-Key", tenantKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return c.checkStatus(resp)
+}
+
+// AppendChunk calls PUT /staging/{stagingID}/chunks/{k}.
+// Sends chunkBody as the raw body. responseID optionally binds the staging
+// record on first call; subsequent calls with a different responseID return an error.
+func (c *Client) AppendChunk(ctx context.Context, stagingID string, k uint32, responseID string, chunkBody []byte) error {
+	u := fmt.Sprintf("%s/staging/%s/chunks/%d", c.baseURL, stagingID, k)
+	if responseID != "" {
+		u += "?" + url.Values{"response_id": {responseID}}.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(chunkBody))
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return c.checkStatus(resp)
+}
+
+// Complete calls PUT /staging/{stagingID}/complete?response_id=...&total=...
+// to finalize a streaming ingest. Returns the final responseID.
+func (c *Client) Complete(ctx context.Context, stagingID, responseID, tenantKey string, total uint32) (string, error) {
+	u := fmt.Sprintf("%s/staging/%s/complete?%s", c.baseURL, stagingID,
+		url.Values{"response_id": {responseID}, "total": {strconv.FormatUint(uint64(total), 10)}}.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("X-Tenant-Key", tenantKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := c.checkStatus(resp); err != nil {
+		return "", err
+	}
+	var r struct {
+		ResponseID string `json:"response_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return "", fmt.Errorf("decode complete response: %w", err)
+	}
+	return r.ResponseID, nil
+}
+
+// Abort calls PUT /staging/{stagingID}/abort to terminate a staging record.
+func (c *Client) Abort(ctx context.Context, stagingID string) error {
+	u := fmt.Sprintf("%s/staging/%s/abort", c.baseURL, stagingID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, nil)
+	if err != nil {
+		return err
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err

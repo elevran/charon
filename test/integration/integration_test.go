@@ -64,6 +64,58 @@ func responseBlob(id, status string) []byte {
 	return b
 }
 
+// storeRoot stores a root response via POST /responses (buffered path).
+func storeRoot(t *testing.T, fx *fixture, id string, blob []byte) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]interface{}{
+		"response_id":   id,
+		"response_blob": json.RawMessage(blob),
+	})
+	resp, err := http.Post(fx.URL()+"/responses", "application/json", bytes.NewReader(body))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+// openStaging calls POST /staging?prev={prevID} and returns the staging ID.
+func openStaging(t *testing.T, fx *fixture, prevID string) string {
+	t.Helper()
+	u := fx.URL() + "/staging"
+	if prevID != "" {
+		u += "?prev=" + prevID
+	}
+	resp, err := http.Post(u, "application/octet-stream", bytes.NewReader(nil))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var r struct {
+		StagingID string `json:"staging_id"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&r))
+	return r.StagingID
+}
+
+// commitStaging writes blob as a single chunk then completes the staging record.
+func commitStaging(t *testing.T, fx *fixture, stagingID, responseID string, blob []byte) {
+	t.Helper()
+	// PUT chunk 0
+	chunkURL := fmt.Sprintf("%s/staging/%s/chunks/0?response_id=%s", fx.URL(), stagingID, responseID)
+	req, _ := http.NewRequest(http.MethodPut, chunkURL, bytes.NewReader(blob))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.True(t, resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusOK)
+
+	// PUT complete
+	commitURL := fmt.Sprintf("%s/staging/%s/complete?response_id=%s&total=%d",
+		fx.URL(), stagingID, responseID, len(blob))
+	req, _ = http.NewRequest(http.MethodPut, commitURL, nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
 // --- Tests ---
 
 func TestMetricsEndpoint(t *testing.T) {
@@ -82,12 +134,7 @@ func TestMetricsEndpoint(t *testing.T) {
 func TestFullStoreCycle(t *testing.T) {
 	fx := newFixture(t)
 	blob := responseBlob("resp_smoke1", "completed")
-
-	storeResp, err := http.Post(fx.URL()+"/responses/resp_smoke1",
-		"application/octet-stream", bytes.NewReader(blob))
-	require.NoError(t, err)
-	defer storeResp.Body.Close()
-	assert.Equal(t, http.StatusOK, storeResp.StatusCode)
+	storeRoot(t, fx, "resp_smoke1", blob)
 
 	getResp, err := http.Get(fx.URL() + "/responses/resp_smoke1")
 	require.NoError(t, err)
@@ -103,36 +150,16 @@ func TestChainStoreAndResolve(t *testing.T) {
 
 	// Store root
 	b0 := responseBlob("resp_chain0", "completed")
-	r0, err := http.Post(fx.URL()+"/responses/resp_chain0",
-		"application/octet-stream", bytes.NewReader(b0))
-	require.NoError(t, err)
-	defer r0.Body.Close()
-	require.Equal(t, http.StatusOK, r0.StatusCode)
+	storeRoot(t, fx, "resp_chain0", b0)
 
-	// Resolve continuation
-	resolveResp, err := http.Post(fx.URL()+"/responses?prev=resp_chain0",
-		"application/octet-stream", bytes.NewReader(nil))
-	require.NoError(t, err)
-	defer resolveResp.Body.Close()
-	require.Equal(t, http.StatusOK, resolveResp.StatusCode)
+	// Open staging for next turn — opens a staging record for the next turn,
+	// returns 201 Created with Location: /staging/<id>.
+	stagingID := openStaging(t, fx, "resp_chain0")
+	assert.NotEmpty(t, stagingID)
 
-	var resolved struct {
-		StagingID string            `json:"staging_id"`
-		Turns     []json.RawMessage `json:"turns"`
-	}
-	require.NoError(t, json.NewDecoder(resolveResp.Body).Decode(&resolved))
-	assert.NotEmpty(t, resolved.StagingID)
-	assert.Len(t, resolved.Turns, 1)
-
-	// Store continuation
+	// Commit continuation via streaming path
 	b1 := responseBlob("resp_chain1", "completed")
-	req, _ := http.NewRequest(http.MethodPost,
-		fx.URL()+"/responses/resp_chain1?req="+resolved.StagingID,
-		bytes.NewReader(b1))
-	r1, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer r1.Body.Close()
-	assert.Equal(t, http.StatusOK, r1.StatusCode)
+	commitStaging(t, fx, stagingID, "resp_chain1", b1)
 
 	// Verify depth
 	get1, err := http.Get(fx.URL() + "/responses/resp_chain1")
@@ -152,28 +179,13 @@ func TestMultiTurnChain(t *testing.T) {
 
 	// Store root
 	b := responseBlob(ids[0], "completed")
-	r, _ := http.Post(fx.URL()+"/responses/"+ids[0],
-		"application/octet-stream", bytes.NewReader(b))
-	r.Body.Close()
-	require.Equal(t, http.StatusOK, r.StatusCode)
+	storeRoot(t, fx, ids[0], b)
 
-	// Store continuation turns
+	// Store continuation turns via staging path
 	for i := 1; i < n; i++ {
-		resolveResp, _ := http.Post(fx.URL()+"/responses?prev="+ids[i-1],
-			"application/octet-stream", bytes.NewReader(nil))
-		var resolved struct {
-			StagingID string `json:"staging_id"`
-		}
-		json.NewDecoder(resolveResp.Body).Decode(&resolved)
-		resolveResp.Body.Close()
-
+		stagingID := openStaging(t, fx, ids[i-1])
 		blob := responseBlob(ids[i], "completed")
-		req, _ := http.NewRequest(http.MethodPost,
-			fx.URL()+"/responses/"+ids[i]+"?req="+resolved.StagingID,
-			bytes.NewReader(blob))
-		storeResp, _ := http.DefaultClient.Do(req)
-		storeResp.Body.Close()
-		require.Equal(t, http.StatusOK, storeResp.StatusCode, "turn %d", i)
+		commitStaging(t, fx, stagingID, ids[i], blob)
 	}
 
 	// Verify depth of last turn
@@ -186,10 +198,7 @@ func TestMultiTurnChain(t *testing.T) {
 func TestDeleteThenGet(t *testing.T) {
 	fx := newFixture(t)
 	blob := responseBlob("resp_del_intg", "completed")
-
-	r, _ := http.Post(fx.URL()+"/responses/resp_del_intg",
-		"application/octet-stream", bytes.NewReader(blob))
-	r.Body.Close()
+	storeRoot(t, fx, "resp_del_intg", blob)
 
 	delReq, _ := http.NewRequest(http.MethodDelete, fx.URL()+"/responses/resp_del_intg", nil)
 	delResp, _ := http.DefaultClient.Do(delReq)
@@ -205,8 +214,12 @@ func TestTenantIsolation(t *testing.T) {
 	fx := newFixture(t)
 	blob := responseBlob("resp_iso_intg", "completed")
 
-	req, _ := http.NewRequest(http.MethodPost, fx.URL()+"/responses/resp_iso_intg",
-		bytes.NewReader(blob))
+	body, _ := json.Marshal(map[string]interface{}{
+		"response_id":   "resp_iso_intg",
+		"response_blob": json.RawMessage(blob),
+	})
+	req, _ := http.NewRequest(http.MethodPost, fx.URL()+"/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Tenant-Key", "alice")
 	r, _ := http.DefaultClient.Do(req)
 	r.Body.Close()
