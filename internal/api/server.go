@@ -23,25 +23,28 @@ func NewServer(addr string, h *Handler, log *slog.Logger) *Server {
 
 // RegisterHandlers registers the response API routes on mux.
 // If mux is nil, http.DefaultServeMux is used.
+//
+// Route namespaces:
+//   - POST /responses          — buffered (atomic) store: proxy supplies both blobs
+//   - GET/DELETE /responses/*  — read/delete committed turns
+//   - /staging/*               — in-flight streaming state; separate authZ surface
 func RegisterHandlers(mux *http.ServeMux, h *Handler) {
 	if mux == nil {
 		mux = http.DefaultServeMux
 	}
 	mux.HandleFunc("GET /healthz", h.HandleHealthz)
 	mux.HandleFunc("GET /readyz", h.HandleReadyz)
-	// /responses and /responses/staging are aliases for the open-staging
-	// entry point: the legacy client-facing POST /responses keeps the same
-	// surface while the canonical REST sub-resource path is
-	// /responses/staging.
-	mux.HandleFunc("POST /responses", h.HandleOpenStaging)
-	mux.HandleFunc("POST /responses/staging", h.HandleOpenStaging)
-	mux.HandleFunc("POST /responses/{id}", h.HandleStore)
-	mux.HandleFunc("PUT /responses/staging/{id}/chunks/{k}", h.HandleAppendChunk)
-	mux.HandleFunc("PUT /responses/staging/{id}/complete", h.HandleComplete)
-	mux.HandleFunc("PUT /responses/staging/{id}/abort", h.HandleAbort)
-	mux.HandleFunc("GET /responses/staging/{id}", h.HandleStagingStatus)
+	// Committed responses.
+	mux.HandleFunc("POST /responses", h.HandleBufferedStore)
 	mux.HandleFunc("GET /responses/{id}", h.HandleRetrieve)
 	mux.HandleFunc("DELETE /responses/{id}", h.HandleDelete)
+	// In-flight staging — intentionally under a separate prefix so authZ
+	// policies for /responses/* do not inadvertently reach staging ops.
+	mux.HandleFunc("POST /staging", h.HandleOpenStaging)
+	mux.HandleFunc("PUT /staging/{id}/chunks/{k}", h.HandleAppendChunk)
+	mux.HandleFunc("PUT /staging/{id}/complete", h.HandleComplete)
+	mux.HandleFunc("PUT /staging/{id}/abort", h.HandleAbort)
+	mux.HandleFunc("GET /staging/{id}", h.HandleStagingStatus)
 }
 
 // newServer is the shared constructor.

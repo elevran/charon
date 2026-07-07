@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/google/uuid"
+
 	"github.com/elevran/charon/internal/chainstore"
 	"github.com/elevran/charon/internal/httputil"
 )
@@ -92,22 +94,81 @@ type resolveResponseTurn struct {
 	ResponseBlob json.RawMessage `json:"response_blob"`
 }
 
-// resolveResponse is the JSON body returned by POST /responses?prev={id}.
+// resolveResponse is the JSON body returned by POST /staging?prev={id}.
 type resolveResponse struct {
 	StagingID string                `json:"staging_id"`
 	Turns     []resolveResponseTurn `json:"turns"`
 }
 
-// HandleOpenStaging handles POST /responses?prev={id} and POST /responses/staging
-// (the two paths are alias-registered to this same handler in server.go).
-//
+// bufferedStoreRequest is the JSON body accepted by POST /responses.
+type bufferedStoreRequest struct {
+	PrevID       string          `json:"prev_id"`
+	ResponseID   string          `json:"response_id"`
+	RequestBlob  json.RawMessage `json:"request_blob"`
+	ResponseBlob json.RawMessage `json:"response_blob"`
+}
+
+// bufferedStoreResponse is the JSON body returned by POST /responses.
+type bufferedStoreResponse struct {
+	ResponseID string                `json:"response_id"`
+	Turns      []resolveResponseTurn `json:"turns"`
+}
+
+// HandleBufferedStore handles POST /responses.
+// Atomic (non-streaming) path: the proxy already holds both the request and
+// response blobs and wants to commit them in a single round trip. The
+// response_id may be supplied by the caller; when absent the server generates
+// a UUID. Returns 201 Created with Location: /responses/<id> and a JSON body
+// containing the assigned response_id and the resolved turn history.
+func (h *Handler) HandleBufferedStore(w http.ResponseWriter, r *http.Request) {
+	tenantKey := r.Header.Get("X-Tenant-Key")
+	b, ok := h.readBodyOr400(w, r)
+	if !ok {
+		return
+	}
+	var req bufferedStoreRequest
+	if err := json.Unmarshal(b, &req); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	responseID := req.ResponseID
+	if responseID == "" {
+		responseID = uuid.NewString()
+	}
+
+	stagingID, turns, err := h.svc.ResolveAndStage(r.Context(), req.PrevID, tenantKey, []byte(req.RequestBlob))
+	if err != nil {
+		h.writeErr(w, "buffered-resolve", req.PrevID, err)
+		return
+	}
+
+	if err := h.svc.StoreWithStaging(r.Context(), stagingID, responseID, "", tenantKey, []byte(req.ResponseBlob)); err != nil {
+		h.writeErr(w, "buffered-store", responseID, err)
+		return
+	}
+
+	respTurns := make([]resolveResponseTurn, len(turns))
+	for i, t := range turns {
+		respTurns[i] = resolveResponseTurn{
+			RequestBlob:  blobToRaw(t.RequestBlob),
+			ResponseBlob: blobToRaw(t.ResponseBlob),
+		}
+	}
+
+	w.Header().Set("Location", "/responses/"+responseID)
+	httputil.WriteJSON(w, http.StatusCreated, bufferedStoreResponse{
+		ResponseID: responseID,
+		Turns:      respTurns,
+	})
+}
+
+// HandleOpenStaging handles POST /staging?prev={id}.
 // Reads the raw request blob from the body, stages it, and returns the turn
 // history root-first plus an opaque staging ID for the subsequent PUTs that
 // append chunks. The optional "prev" query parameter specifies the previous
 // response ID; when absent the request is a first-turn with no prior context.
-//
-// Returns 201 Created with Location: /responses/staging/<stagingID> and a
-// JSON body containing the staging_id and the resolved turns.
+// Returns 201 Created with Location: /staging/<stagingID>.
 func (h *Handler) HandleOpenStaging(w http.ResponseWriter, r *http.Request) {
 	prevID := r.URL.Query().Get("prev")
 	tenantKey := r.Header.Get("X-Tenant-Key")
@@ -136,7 +197,7 @@ func (h *Handler) HandleOpenStaging(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Location", "/responses/staging/"+stagingID)
+	w.Header().Set("Location", "/staging/"+stagingID)
 	w.Header().Set("X-Staging-ID", stagingID)
 	httputil.WriteJSON(w, http.StatusCreated, resolveResponse{
 		StagingID: stagingID,
@@ -144,7 +205,7 @@ func (h *Handler) HandleOpenStaging(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HandleStagingStatus handles GET /responses/staging/<id>.
+// HandleStagingStatus handles GET /staging/<id>.
 //   - 200 OK with the assembled in-progress body while chunks are arriving.
 //   - 410 Gone once the staging record has flipped to complete or aborted.
 //     For complete records, the response includes Location: /responses/<id>
@@ -192,73 +253,6 @@ func (h *Handler) HandleStagingStatus(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(turn.ResponseBlob)
 }
 
-// HandleStore handles POST /responses/{id} (legacy back-compat entry point).
-// Streaming clients should use PUT /responses/staging/{sid}/complete instead;
-// this endpoint is retained for non-streaming callers that POST the response
-// body directly. When the caller does pass a stagingID that already carries
-// chunks from earlier PUT batches, this endpoint falls through to StreamStore
-// using the server-tracked chunk count.
-func (h *Handler) HandleStore(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	tenantKey := r.Header.Get("X-Tenant-Key")
-	stagingID := r.URL.Query().Get("req")
-	q := r.URL.Query()
-	chunksQ := q.Get("chunks")
-	totalQ := q.Get("total")
-	if len(stagingID) > 64 {
-		httputil.WriteError(w, http.StatusBadRequest, "invalid staging id")
-		return
-	}
-
-	var commitErr error
-	switch {
-	case chunksQ != "":
-		// Streaming commit: client supplied chunk count and total size.
-		chunks, parseErr := strconv.ParseUint(chunksQ, 10, 32)
-		if parseErr != nil {
-			httputil.WriteError(w, http.StatusBadRequest, "invalid chunks")
-			return
-		}
-		total, parseErr := strconv.ParseUint(totalQ, 10, 32)
-		if parseErr != nil {
-			httputil.WriteError(w, http.StatusBadRequest, "invalid total")
-			return
-		}
-		commitErr = h.svc.StreamStore(r.Context(), stagingID, id, tenantKey, uint32(chunks), uint32(total))
-	case stagingID != "":
-		// No explicit chunks/total: detect via the staging record. If the
-		// proxy PUT batches via HandleAppendChunk then the staging record
-		// already carries them; commit as a chunked node. Otherwise fall
-		// through to the legacy single-blob path with the body.
-		hasChunks, chunks, total, peekErr := h.svc.PeekStreamingState(r.Context(), stagingID)
-		if peekErr != nil {
-			h.writeErr(w, "store-peek", stagingID, peekErr)
-			return
-		}
-		if hasChunks {
-			commitErr = h.svc.StreamStore(r.Context(), stagingID, id, tenantKey, chunks, total)
-		} else {
-			b, ok := h.readBodyOr400(w, r)
-			if !ok {
-				return
-			}
-			commitErr = h.svc.StoreWithStaging(r.Context(), stagingID, id, "", tenantKey, b)
-		}
-	default:
-		b, ok := h.readBodyOr400(w, r)
-		if !ok {
-			return
-		}
-		commitErr = h.svc.StoreWithStaging(r.Context(), "", id, "", tenantKey, b)
-	}
-
-	if commitErr != nil {
-		h.writeErr(w, "store", id, commitErr)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
 // readBodyOr400 reads up to maxBodyBytes; on overflow or read error it
 // writes a 400 and returns ok==false. The caller MUST stop processing
 // when ok==false (the response is already written); the returned bytes
@@ -277,7 +271,7 @@ func (h *Handler) readBodyOr400(w http.ResponseWriter, r *http.Request) (b []byt
 	return b, true
 }
 
-// HandleAppendChunk handles PUT /responses/staging/<stagingID>/chunks/<k>.
+// HandleAppendChunk handles PUT /staging/<stagingID>/chunks/<k>.
 // The chunk number is in the URL path (NOT the query string) so the request
 // is genuinely idempotent at the wire level — same URL = same chunk key =
 // safe to retry. The body is one HTTP batch (1 MB default, 4 MB hard cap).
@@ -359,7 +353,7 @@ func (h *Handler) HandleAppendChunk(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HandleComplete handles PUT /responses/staging/<stagingID>/complete?response_id=...&total=...
+// HandleComplete handles PUT /staging/<stagingID>/complete?response_id=...&total=...
 // The terminal commit call. Writes the manifest + final Node + deletes the
 // staging record (and bound respidx) in one Pebble batch. Returns 201
 // Created with Location: /responses/<final_id> and a body containing the
@@ -397,7 +391,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, http.StatusCreated, map[string]string{"response_id": finalID})
 }
 
-// HandleAbort handles PUT /responses/staging/<stagingID>/abort.
+// HandleAbort handles PUT /staging/<stagingID>/abort.
 // Marks the staging record as terminally failed. Deletes the staging
 // record, all its chunks, and the respidx entry. Idempotent.
 func (h *Handler) HandleAbort(w http.ResponseWriter, r *http.Request) {

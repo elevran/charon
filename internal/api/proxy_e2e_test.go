@@ -2,9 +2,9 @@ package api_test
 
 // Proxy E2E tests verify the Charon internal API operations as the proxy performs them:
 //
-//  1. Store a root response       POST /responses/{id} (no staging ID)
-//  2. Resolve for continuation    POST /responses?prev={id} → staging_id + turns
-//  3. Store continuation          POST /responses/{id}?req={staging_id}
+//  1. Store a root response       POST /responses  (buffered path, JSON body)
+//  2. Resolve for continuation    POST /staging?prev={id} → staging_id + turns
+//  3. Store continuation          PUT /staging/{sid}/chunks/0, PUT /staging/{sid}/complete
 //  4. Retrieve / Delete           GET/DELETE /responses/{id}
 //
 // The flat context is assembled by the proxy from turns; these tests verify
@@ -31,7 +31,7 @@ type resolveResult struct {
 
 func resolve(t *testing.T, srv *httptest.Server, prevID string, requestBlob []byte) resolveResult {
 	t.Helper()
-	url := srv.URL + "/responses"
+	url := srv.URL + "/staging"
 	if prevID != "" {
 		url += "?prev=" + prevID
 	}

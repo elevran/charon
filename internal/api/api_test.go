@@ -36,27 +36,32 @@ func newTestServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// storeRoot stores a root response directly — no staging ID (bypasses staging for test setup).
+// storeRoot stores a root response using POST /responses (buffered path).
 func storeRoot(t *testing.T, srv *httptest.Server, id string, blob []byte, tenantKey string) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/responses/"+id, bytes.NewReader(blob))
+	body, _ := json.Marshal(map[string]interface{}{
+		"response_id":   id,
+		"response_blob": json.RawMessage(blob),
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	if tenantKey != "" {
 		req.Header.Set("X-Tenant-Key", tenantKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 }
 
-// resolveAndStage sends POST /responses?prev={prevID} and returns the staging ID and decoded body.
+// resolveAndStage sends POST /staging?prev={prevID} and returns the staging ID and decoded body.
 func resolveAndStage(t *testing.T, srv *httptest.Server, prevID string, requestBlob []byte, tenantKey string) (string, map[string]json.RawMessage) {
 	t.Helper()
-	url := srv.URL + "/responses"
+	u := srv.URL + "/staging"
 	if prevID != "" {
-		url += "?prev=" + prevID
+		u += "?prev=" + prevID
 	}
-	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(requestBlob))
+	req, _ := http.NewRequest(http.MethodPost, u, bytes.NewReader(requestBlob))
 	if tenantKey != "" {
 		req.Header.Set("X-Tenant-Key", tenantKey)
 	}
@@ -71,20 +76,33 @@ func resolveAndStage(t *testing.T, srv *httptest.Server, prevID string, requestB
 	return stagingID, body
 }
 
-// storeWithStaging sends POST /responses/{id}?req={stagingID}.
+// storeWithStaging commits a continuation turn via the streaming path:
+// PUT /staging/{stagingID}/chunks/0 then PUT /staging/{stagingID}/complete.
 func storeWithStaging(t *testing.T, srv *httptest.Server, id, stagingID string, blob []byte, tenantKey string) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/responses/"+id+"?req="+stagingID, bytes.NewReader(blob))
+	chunkURL := fmt.Sprintf("%s/staging/%s/chunks/0?response_id=%s", srv.URL, stagingID, id)
+	req, _ := http.NewRequest(http.MethodPut, chunkURL, bytes.NewReader(blob))
 	if tenantKey != "" {
 		req.Header.Set("X-Tenant-Key", tenantKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
+	resp.Body.Close()
+	require.True(t, resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusOK)
+
+	commitURL := fmt.Sprintf("%s/staging/%s/complete?response_id=%s&total=%d",
+		srv.URL, stagingID, id, len(blob))
+	req, _ = http.NewRequest(http.MethodPut, commitURL, nil)
+	if tenantKey != "" {
+		req.Header.Set("X-Tenant-Key", tenantKey)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
 	defer resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 }
 
-// putChunk sends PUT /responses/staging/<stagingID>/chunks/<k>[?response_id=...]
+// putChunk sends PUT /staging/<stagingID>/chunks/<k>[?response_id=...]
 // (streaming ingest). The chunk number is in the URL path so the request
 // is genuinely idempotent at the wire level. response_id is bound on
 // first use and locked thereafter.
@@ -94,7 +112,7 @@ type putChunkOpts struct {
 
 func putChunk(t *testing.T, srv *httptest.Server, stagingID string, k uint32, chunk []byte, opts *putChunkOpts) {
 	t.Helper()
-	u := fmt.Sprintf("%s/responses/staging/%s/chunks/%d", srv.URL, stagingID, k)
+	u := fmt.Sprintf("%s/staging/%s/chunks/%d", srv.URL, stagingID, k)
 	if opts != nil && opts.responseID != "" {
 		u += "?response_id=" + opts.responseID
 	}
@@ -123,7 +141,7 @@ func doGET(t *testing.T, srv *httptest.Server, path string, tenantKey string) *h
 func TestFirstTurnStaging(t *testing.T) {
 	srv := newTestServer(t)
 	reqBlob := []byte(`{"input":[{"type":"message","role":"user","content":"hello"}]}`)
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/responses", bytes.NewReader(reqBlob))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/staging", bytes.NewReader(reqBlob))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -140,7 +158,7 @@ func TestFirstTurnStaging(t *testing.T) {
 
 func TestResolveUnknownPrevID(t *testing.T) {
 	srv := newTestServer(t)
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/responses?prev=resp_unknown", nil)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/staging?prev=resp_unknown", nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -159,6 +177,99 @@ func TestStoreRootAndRetrieve(t *testing.T) {
 	assert.JSONEq(t, string(blob), string(body))
 	assert.NotEmpty(t, resp.Header.Get("X-Created-At"))
 	assert.Equal(t, "0", resp.Header.Get("X-Depth"))
+}
+
+// TestBufferedStoreAndRetrieve exercises POST /responses directly:
+// verifies 201, Location header, response_id in body, and round-trip GET.
+func TestBufferedStoreAndRetrieve(t *testing.T) {
+	srv := newTestServer(t)
+	blob := []byte(`{"id":"resp_buf1","model":"test","status":"completed","output":[]}`)
+	body, _ := json.Marshal(map[string]interface{}{
+		"response_id":   "resp_buf1",
+		"response_blob": json.RawMessage(blob),
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Equal(t, "/responses/resp_buf1", resp.Header.Get("Location"))
+
+	var respBody map[string]json.RawMessage
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&respBody))
+	var gotID string
+	require.NoError(t, json.Unmarshal(respBody["response_id"], &gotID))
+	assert.Equal(t, "resp_buf1", gotID)
+
+	got := doGET(t, srv, "/responses/resp_buf1", "")
+	defer got.Body.Close()
+	require.Equal(t, http.StatusOK, got.StatusCode)
+	gotBlob, _ := io.ReadAll(got.Body)
+	assert.JSONEq(t, string(blob), string(gotBlob))
+	assert.Equal(t, "0", got.Header.Get("X-Depth"))
+}
+
+// TestBufferedStoreServerAssignsID verifies that omitting response_id causes
+// the server to generate one, which is returned in the body and reachable via GET.
+func TestBufferedStoreServerAssignsID(t *testing.T) {
+	srv := newTestServer(t)
+	blob := []byte(`{"status":"completed","output":[]}`)
+	body, _ := json.Marshal(map[string]interface{}{
+		"response_blob": json.RawMessage(blob),
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var respBody map[string]json.RawMessage
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&respBody))
+	var assignedID string
+	require.NoError(t, json.Unmarshal(respBody["response_id"], &assignedID))
+	require.NotEmpty(t, assignedID, "server must assign a non-empty response_id")
+	assert.Equal(t, "/responses/"+assignedID, resp.Header.Get("Location"))
+
+	got := doGET(t, srv, "/responses/"+assignedID, "")
+	defer got.Body.Close()
+	assert.Equal(t, http.StatusOK, got.StatusCode)
+}
+
+// TestBufferedStoreChain verifies that prev_id in the buffered path links turns
+// correctly: depth increments and the body is round-tripped.
+func TestBufferedStoreChain(t *testing.T) {
+	srv := newTestServer(t)
+
+	blob0 := []byte(`{"id":"resp_bc0","status":"completed","output":[]}`)
+	storeRoot(t, srv, "resp_bc0", blob0, "")
+
+	blob1 := []byte(`{"id":"resp_bc1","status":"completed","output":[]}`)
+	body, _ := json.Marshal(map[string]interface{}{
+		"prev_id":       "resp_bc0",
+		"response_id":   "resp_bc1",
+		"response_blob": json.RawMessage(blob1),
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var respBody map[string]json.RawMessage
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&respBody))
+	var turns []json.RawMessage
+	require.NoError(t, json.Unmarshal(respBody["turns"], &turns))
+	assert.Len(t, turns, 1, "buffered store with prev_id returns 1 prior turn")
+
+	got := doGET(t, srv, "/responses/resp_bc1", "")
+	defer got.Body.Close()
+	require.Equal(t, http.StatusOK, got.StatusCode)
+	gotBlob, _ := io.ReadAll(got.Body)
+	assert.JSONEq(t, string(blob1), string(gotBlob))
+	assert.Equal(t, "1", got.Header.Get("X-Depth"))
 }
 
 func TestResolveReturnsTurns(t *testing.T) {
@@ -218,10 +329,10 @@ func TestDeleteNotFound(t *testing.T) {
 
 func TestStoreWithUnknownStagingID(t *testing.T) {
 	srv := newTestServer(t)
-	blob := []byte(`{"id":"resp_x","status":"completed","output":[]}`)
-	req, _ := http.NewRequest(http.MethodPost,
-		srv.URL+"/responses/resp_x?req=00000000-0000-0000-0000-000000000001",
-		bytes.NewReader(blob))
+	bogus := "00000000-0000-0000-0000-000000000001"
+	// Complete against a staging ID that was never opened returns 422.
+	u := fmt.Sprintf("%s/staging/%s/complete?response_id=resp_x&total=1", srv.URL, bogus)
+	req, _ := http.NewRequest(http.MethodPut, u, nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -244,9 +355,9 @@ func TestPUTChunkAndPOSTCommit(t *testing.T) {
 	putChunk(t, srv, stagingID, 1, chunk1, nil)
 	putChunk(t, srv, stagingID, 2, chunk2, nil)
 
-	// Commit via PUT /responses/staging/<sid>/complete?response_id=...&total=...
+	// Commit via PUT /staging/<sid>/complete?response_id=...&total=...
 	combined := append(append(chunk0, chunk1...), chunk2...)
-	commitURL := fmt.Sprintf("%s/responses/staging/%s/complete?response_id=resp_stream&total=%d",
+	commitURL := fmt.Sprintf("%s/staging/%s/complete?response_id=resp_stream&total=%d",
 		srv.URL, stagingID, len(combined))
 	req, _ := http.NewRequest(http.MethodPut, commitURL, nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -276,7 +387,7 @@ func TestPUTChunkAppendOnly(t *testing.T) {
 
 	// Commit.
 	combined := append(append(chunk0, chunk1...), chunk2...)
-	commitURL := fmt.Sprintf("%s/responses/staging/%s/complete?response_id=resp_stream&total=%d",
+	commitURL := fmt.Sprintf("%s/staging/%s/complete?response_id=resp_stream&total=%d",
 		srv.URL, stagingID, len(combined))
 	req, _ := http.NewRequest(http.MethodPut, commitURL, nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -296,7 +407,7 @@ func TestCompleteRequiresResponseID(t *testing.T) {
 	srv := newTestServer(t)
 	stagingID, _ := resolveAndStage(t, srv, "", nil, "")
 
-	u := fmt.Sprintf("%s/responses/staging/%s/complete?total=2", srv.URL, stagingID)
+	u := fmt.Sprintf("%s/staging/%s/complete?total=2", srv.URL, stagingID)
 	req, _ := http.NewRequest(http.MethodPut, u, nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -310,7 +421,7 @@ func TestCompleteRequiresTotal(t *testing.T) {
 	srv := newTestServer(t)
 	stagingID, _ := resolveAndStage(t, srv, "", nil, "")
 
-	u := fmt.Sprintf("%s/responses/staging/%s/complete?response_id=r1", srv.URL, stagingID)
+	u := fmt.Sprintf("%s/staging/%s/complete?response_id=r1", srv.URL, stagingID)
 	req, _ := http.NewRequest(http.MethodPut, u, nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -335,7 +446,7 @@ func TestPUTChunkEarlyBinding(t *testing.T) {
 	putChunk(t, srv, stagingID, 2, []byte("part2"), &putChunkOpts{responseID: "r_early"})
 
 	// Fourth PUT: conflicting response_id → 409 Conflict.
-	u := fmt.Sprintf("%s/responses/staging/%s/chunks/3?response_id=r_other", srv.URL, stagingID)
+	u := fmt.Sprintf("%s/staging/%s/chunks/3?response_id=r_other", srv.URL, stagingID)
 	req, _ := http.NewRequest(http.MethodPut, u, bytes.NewReader([]byte("part3")))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -344,7 +455,7 @@ func TestPUTChunkEarlyBinding(t *testing.T) {
 
 	// Final PUT (separate /complete): uses the bound r_early; succeeds.
 	body := []byte("part0part1part2")
-	commitURL := fmt.Sprintf("%s/responses/staging/%s/complete?response_id=r_early&total=%d",
+	commitURL := fmt.Sprintf("%s/staging/%s/complete?response_id=r_early&total=%d",
 		srv.URL, stagingID, len(body))
 	req, _ = http.NewRequest(http.MethodPut, commitURL, nil)
 	resp, err = http.DefaultClient.Do(req)
@@ -373,7 +484,7 @@ func TestPUTChunkAtUnknownStagingID(t *testing.T) {
 	srv := newTestServer(t)
 	bogus := "00000000-0000-0000-0000-000000000099"
 	req, _ := http.NewRequest(http.MethodPut,
-		srv.URL+"/responses/staging/"+bogus+"/chunks/0",
+		srv.URL+"/staging/"+bogus+"/chunks/0",
 		bytes.NewReader([]byte("[]")))
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -406,7 +517,7 @@ func TestHandleStagingStatus_TerminalStates(t *testing.T) {
 		stagingID, _ := resolveAndStage(t, srv, "", []byte("req"), "")
 
 		putChunk(t, srv, stagingID, 0, []byte("payload"), nil)
-		commitURL := fmt.Sprintf("%s/responses/staging/%s/complete?response_id=r_done&total=7",
+		commitURL := fmt.Sprintf("%s/staging/%s/complete?response_id=r_done&total=7",
 			srv.URL, stagingID)
 		commitReq, _ := http.NewRequest(http.MethodPut, commitURL, nil)
 		commitResp, err := http.DefaultClient.Do(commitReq)
@@ -418,7 +529,7 @@ func TestHandleStagingStatus_TerminalStates(t *testing.T) {
 		client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse // do not follow redirect
 		}}
-		statusResp, err := client.Get(srv.URL + "/responses/staging/" + stagingID)
+		statusResp, err := client.Get(srv.URL + "/staging/" + stagingID)
 		require.NoError(t, err)
 		statusResp.Body.Close()
 		assert.Equal(t, http.StatusSeeOther, statusResp.StatusCode)
@@ -430,13 +541,13 @@ func TestHandleStagingStatus_TerminalStates(t *testing.T) {
 		stagingID, _ := resolveAndStage(t, srv, "", []byte("req"), "")
 
 		abortReq, _ := http.NewRequest(http.MethodPut,
-			fmt.Sprintf("%s/responses/staging/%s/abort", srv.URL, stagingID), nil)
+			fmt.Sprintf("%s/staging/%s/abort", srv.URL, stagingID), nil)
 		abortResp, err := http.DefaultClient.Do(abortReq)
 		require.NoError(t, err)
 		abortResp.Body.Close()
 		require.Equal(t, http.StatusNoContent, abortResp.StatusCode)
 
-		statusResp, err := http.Get(srv.URL + "/responses/staging/" + stagingID)
+		statusResp, err := http.Get(srv.URL + "/staging/" + stagingID)
 		require.NoError(t, err)
 		statusResp.Body.Close()
 		assert.Equal(t, http.StatusGone, statusResp.StatusCode)
