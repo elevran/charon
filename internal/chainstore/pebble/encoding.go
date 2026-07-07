@@ -7,28 +7,33 @@ import (
 	"github.com/elevran/charon/internal/chainstore"
 )
 
-// Node wire layout (110 bytes, big-endian for multi-byte fields):
+// Node wire layout (111 bytes, big-endian for multi-byte fields):
 //
 //	offset  size  field
 //	  0       1    Version
 //	  1      20    ID
-//	 21      20    ParentID         (zero = root)
-//	 41      16    RequestBlobID    (zero until request is stored)
-//	 57      16    ResponseBlobID   (zero until turn is completed)
+//	 21      20    ParentID           (zero = root)
+//	 41      16    RequestBlobID      (zero until request is stored)
+//	 57      16    ResponseBlobID     (zero until turn is completed; interpretation depends on BlobType)
 //	 73       8    LastAccessUnix
 //	 81       8    CreatedAt
 //	 89       8    BucketID
 //	 97       4    RequestBlobSize
 //	101       4    ResponseBlobSize
 //	105       4    Depth
-//	109       1    Status           (0=completed, 1=failed)
+//	109       1    Status             (0=completed, 1=failed)
+//	110       1    BlobType           (Phase 6 — 0=single, 1=chunked)
 //
 // Node.ResponseID is NOT encoded here; it is stored as a separate
 // pfxResponseID key (see keys.go) to keep this record fixed-size.
 //
 // Big-endian is used for multi-byte numeric fields for consistency with lruKey,
 // where big-endian BucketID encoding is required for correct lexicographic sort order.
-const nodeSize = 110
+//
+// Backwards compatibility: nodes written by the Phase 5 layout (110 bytes) are
+// decoded as if BlobType=Single (zero). Chunked nodes always carry BlobType=Chunked
+// because the chunked commit path sets the value explicitly.
+const nodeSize = 111
 
 func encodeNode(n chainstore.Node) []byte {
 	b := make([]byte, nodeSize)
@@ -44,6 +49,7 @@ func encodeNode(n chainstore.Node) []byte {
 	binary.BigEndian.PutUint32(b[101:105], n.ResponseBlobSize)
 	binary.BigEndian.PutUint32(b[105:109], n.Depth)
 	b[109] = n.Status
+	b[110] = uint8(n.BlobType)
 	return b
 }
 
@@ -67,5 +73,34 @@ func decodeNode(b []byte) (chainstore.Node, error) {
 	n.ResponseBlobSize = binary.BigEndian.Uint32(b[101:105])
 	n.Depth = binary.BigEndian.Uint32(b[105:109])
 	n.Status = b[109]
+	n.BlobType = chainstore.BlobType(b[110])
 	return n, nil
+}
+
+// encodeManifest / decodeManifest round-trip the fixed-size ManifestEntry
+// record stored at pfxManifest+blobID. The wire layout is 8 bytes total:
+//
+//	offset  size  field
+//	  0       4    ChunkCount
+//	  4       4    TotalSize
+//
+// Note: ManifestEntry.BlobID is the key (pfxManifest+blobID) — it is NOT
+// encoded in the value bytes. Decoders patch it back from the key they read.
+const manifestSize = 8
+
+func encodeManifest(m chainstore.ManifestEntry) []byte {
+	b := make([]byte, manifestSize)
+	binary.BigEndian.PutUint32(b[0:4], m.ChunkCount)
+	binary.BigEndian.PutUint32(b[4:8], m.TotalSize)
+	return b
+}
+
+func decodeManifest(b []byte) (chainstore.ManifestEntry, error) {
+	if len(b) < manifestSize {
+		return chainstore.ManifestEntry{}, fmt.Errorf("short manifest record: len=%d", len(b))
+	}
+	return chainstore.ManifestEntry{
+		ChunkCount: binary.BigEndian.Uint32(b[0:4]),
+		TotalSize:  binary.BigEndian.Uint32(b[4:8]),
+	}, nil
 }
