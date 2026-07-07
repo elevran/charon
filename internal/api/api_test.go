@@ -396,6 +396,53 @@ func TestTenantIsolation(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 }
 
+// TestHandleStagingStatus_TerminalStates verifies that GET /responses/staging/<id>
+// returns the correct status for each terminal outcome:
+//   - 303 See Other (with Location) once the staging record is committed
+//   - 410 Gone once the staging record is aborted
+func TestHandleStagingStatus_TerminalStates(t *testing.T) {
+	t.Run("completed_redirects", func(t *testing.T) {
+		srv := newTestServer(t)
+		stagingID, _ := resolveAndStage(t, srv, "", []byte("req"), "")
+
+		putChunk(t, srv, stagingID, 0, []byte("payload"), nil)
+		commitURL := fmt.Sprintf("%s/responses/staging/%s/complete?response_id=r_done&total=7",
+			srv.URL, stagingID)
+		commitReq, _ := http.NewRequest(http.MethodPut, commitURL, nil)
+		commitResp, err := http.DefaultClient.Do(commitReq)
+		require.NoError(t, err)
+		commitResp.Body.Close()
+		require.Equal(t, http.StatusCreated, commitResp.StatusCode)
+
+		// GET /staging/{id} must redirect to the canonical resource, not return 410.
+		client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse // do not follow redirect
+		}}
+		statusResp, err := client.Get(srv.URL + "/responses/staging/" + stagingID)
+		require.NoError(t, err)
+		statusResp.Body.Close()
+		assert.Equal(t, http.StatusSeeOther, statusResp.StatusCode)
+		assert.Equal(t, "/responses/r_done", statusResp.Header.Get("Location"))
+	})
+
+	t.Run("aborted_is_gone", func(t *testing.T) {
+		srv := newTestServer(t)
+		stagingID, _ := resolveAndStage(t, srv, "", []byte("req"), "")
+
+		abortReq, _ := http.NewRequest(http.MethodPut,
+			fmt.Sprintf("%s/responses/staging/%s/abort", srv.URL, stagingID), nil)
+		abortResp, err := http.DefaultClient.Do(abortReq)
+		require.NoError(t, err)
+		abortResp.Body.Close()
+		require.Equal(t, http.StatusNoContent, abortResp.StatusCode)
+
+		statusResp, err := http.Get(srv.URL + "/responses/staging/" + stagingID)
+		require.NoError(t, err)
+		statusResp.Body.Close()
+		assert.Equal(t, http.StatusGone, statusResp.StatusCode)
+	})
+}
+
 func TestHealthzReadyz(t *testing.T) {
 	srv := newTestServer(t)
 

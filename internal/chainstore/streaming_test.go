@@ -529,6 +529,50 @@ func TestCompleteStreaming_UsesBoundResponseID(t *testing.T) {
 	assert.Equal(t, body, turn.ResponseBlob)
 }
 
+// TestReapStaging_SkipsCommittedBlobs: after a CompleteStreaming call, the
+// staging record acquires a done-marker. ReapStaging must not delete the
+// chunks — they are the only copy of the committed response.
+func TestReapStaging_SkipsCommittedBlobs(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	const stagingTTL = time.Hour
+	s, b := openMemStoreAndBackend(t, chainstore.Config{Clock: clk, StagingTTL: stagingTTL})
+	ctx := context.Background()
+
+	stagingID, _, err := s.ResolveAndStage(ctx, "", "", []byte("req"))
+	require.NoError(t, err)
+	sid := parseStagingID(t, stagingID)
+
+	payload := chunkData(0, 1024)
+	_, err = s.AppendChunk(ctx, stagingID, 0, payload)
+	require.NoError(t, err)
+
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_committed", "", uint32(len(payload)))
+	require.NoError(t, err)
+
+	// Baseline: committed response is readable.
+	_, turn, err := s.Retrieve(ctx, "r_committed", "")
+	require.NoError(t, err)
+	require.Equal(t, payload, turn.ResponseBlob)
+
+	// Advance past StagingTTL and reap — the reaper must skip the done record.
+	clk.Advance(stagingTTL + time.Second)
+	s.ReapStaging(ctx)
+
+	// Staging record still exists (committed records are kept for /responses/{id} lookups).
+	staged, err := b.GetStagingNode(ctx, sid)
+	require.NoError(t, err)
+
+	// Chunks must survive.
+	chunks, err := b.ListChunks(ctx, staged.ResponseBlobID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, chunks, "committed chunks must not be reaped")
+
+	// Response must still be retrievable.
+	_, turn2, err := s.Retrieve(ctx, "r_committed", "")
+	require.NoError(t, err)
+	assert.Equal(t, payload, turn2.ResponseBlob, "response must be readable after reap")
+}
+
 // TestCompleteRequiresResponseIDOrBinding: /complete must have a responseID
 // either bound via an earlier chunk PUT or supplied on the call. Without
 // one, the data would be unreachable after /staging/{id} flips to 410 —

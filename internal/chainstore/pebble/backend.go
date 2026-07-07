@@ -105,7 +105,7 @@ func (b *Backend) GetNode(_ context.Context, id chainstore.NodeID) (chainstore.N
 // ResponseBlob for a node that appeared incomplete in the chain snapshot. This
 // is a benign over-read (the data is valid) and will be addressed in a future
 // phase when Resolve is refactored to use a snapshot-spanning read path.
-func (b *Backend) GetBlobs(_ context.Context, node chainstore.Node) ([]byte, []byte, error) {
+func (b *Backend) GetBlobs(ctx context.Context, node chainstore.Node) ([]byte, []byte, error) {
 	requestBlob, err := b.fetchBlob(node.RequestBlobID)
 	if err != nil {
 		return nil, nil, err
@@ -113,7 +113,7 @@ func (b *Backend) GetBlobs(_ context.Context, node chainstore.Node) ([]byte, []b
 	if node.ResponseBlobID == (chainstore.BlobID{}) {
 		return requestBlob, nil, nil
 	}
-	responseBlob, err := b.fetchResponseBlob(node)
+	responseBlob, err := b.fetchResponseBlob(ctx, node)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -123,9 +123,9 @@ func (b *Backend) GetBlobs(_ context.Context, node chainstore.Node) ([]byte, []b
 // fetchResponseBlob reads a response blob, dispatching on Node.BlobType.
 // The zero-BlobID guard is inlined in GetBlobs so that callers can short-circuit
 // before any backend work.
-func (b *Backend) fetchResponseBlob(node chainstore.Node) ([]byte, error) {
+func (b *Backend) fetchResponseBlob(ctx context.Context, node chainstore.Node) ([]byte, error) {
 	if node.BlobType == chainstore.BlobTypeChunked {
-		return b.assembleChunked(node.ResponseBlobID)
+		return b.assembleChunked(ctx, node.ResponseBlobID)
 	}
 	return b.fetchBlob(node.ResponseBlobID)
 }
@@ -136,15 +136,20 @@ func (b *Backend) fetchResponseBlob(node chainstore.Node) ([]byte, error) {
 // directly from the iterator into the output buffer — halving memory and
 // memcpy on chunked reads. Reads are NOT snapshot-isolated against a concurrent
 // StreamStore commit; partial reads are benign.
-func (b *Backend) assembleChunked(blobID chainstore.BlobID) ([]byte, error) {
-	manifest, err := b.GetManifest(context.Background(), blobID)
+func (b *Backend) assembleChunked(ctx context.Context, blobID chainstore.BlobID) ([]byte, error) {
+	manifest, err := b.GetManifest(ctx, blobID)
 	if err != nil {
 		return nil, err
 	}
 	lower := chunkKeyPrefix(blobID)
-	upper := make([]byte, len(lower))
-	copy(upper, lower)
-	upper[0] = pfxChunk + 1
+	// Upper bound must be blobID-scoped: append one byte past the maximum
+	// 4-byte big-endian offset so the range is exclusive and stays within
+	// the pfxChunk+blobID namespace. Using upper[0]=pfxChunk+1 is wrong —
+	// it bleeds into pfxManifest keys for blobIDs that sort before ours.
+	upper := make([]byte, 22) // 1 (pfx) + 16 (blobID) + 4 (max offset) + 1 (sentinel)
+	copy(upper, chunkKey(blobID, ^uint32(0)))
+	// upper[21] is 0x00 — any value makes this 22-byte key sort after
+	// all valid 21-byte chunk keys for this blobID.
 	iter, err := b.db.NewIter(&crdbpebble.IterOptions{LowerBound: lower, UpperBound: upper})
 	if err != nil {
 		return nil, fmt.Errorf("chainstore/pebble: assembleChunked iter: %w", err)
@@ -203,9 +208,8 @@ func (b *Backend) GetManifest(_ context.Context, blobID chainstore.BlobID) (chai
 // ListChunks scans pfxChunk+blobID in offset order and returns all chunks.
 func (b *Backend) ListChunks(_ context.Context, blobID chainstore.BlobID) ([]chainstore.ChunkEntry, error) {
 	lower := chunkKeyPrefix(blobID)
-	upper := make([]byte, len(lower))
-	copy(upper, lower)
-	upper[0] = pfxChunk + 1 // exclusive upper bound at the next prefix
+	upper := make([]byte, 22) // blobID-scoped upper bound; see assembleChunked comment
+	copy(upper, chunkKey(blobID, ^uint32(0)))
 
 	iter, err := b.db.NewIter(&crdbpebble.IterOptions{LowerBound: lower, UpperBound: upper})
 	if err != nil {

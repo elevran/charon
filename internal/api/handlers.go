@@ -98,7 +98,7 @@ type resolveResponse struct {
 	Turns     []resolveResponseTurn `json:"turns"`
 }
 
-// openStaging handles POST /responses?prev={id} and POST /responses/staging
+// HandleOpenStaging handles POST /responses?prev={id} and POST /responses/staging
 // (the two paths are alias-registered to this same handler in server.go).
 //
 // Reads the raw request blob from the body, stages it, and returns the turn
@@ -108,7 +108,7 @@ type resolveResponse struct {
 //
 // Returns 201 Created with Location: /responses/staging/<stagingID> and a
 // JSON body containing the staging_id and the resolved turns.
-func (h *Handler) openStaging(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleOpenStaging(w http.ResponseWriter, r *http.Request) {
 	prevID := r.URL.Query().Get("prev")
 	tenantKey := r.Header.Get("X-Tenant-Key")
 
@@ -158,13 +158,17 @@ func (h *Handler) HandleStagingStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	// 410 path: done-marker present (complete or aborted).
+	// Done-marker present: terminal state.
 	doneID, err := h.svc.GetStagingDone(ctx, stagingID)
 	if err == nil {
 		if doneID != "" {
+			// Completed: redirect to the canonical committed resource.
 			w.Header().Set("Location", "/responses/"+doneID)
+			w.WriteHeader(http.StatusSeeOther)
+		} else {
+			// Aborted or expired: resource is permanently gone.
+			w.WriteHeader(http.StatusGone)
 		}
-		w.WriteHeader(http.StatusGone)
 		return
 	}
 	if !errors.Is(err, chainstore.ErrUnknownStaging) {

@@ -86,6 +86,11 @@ func (s *Store) reapStaging(ctx context.Context) {
 	}
 	tx := Transaction{}
 	for _, se := range entries {
+		// Skip completed or aborted records: they carry a done-marker and their
+		// chunks are the only copy of the committed response blob.
+		if _, err := s.backend.GetStagingDone(ctx, se.StagingID); err == nil {
+			continue
+		}
 		tx.DeleteStagingNodes = append(tx.DeleteStagingNodes, se.StagingID)
 		if se.Node.RequestBlobID != (BlobID{}) {
 			tx.DeleteBlobs = append(tx.DeleteBlobs, se.Node.RequestBlobID)
