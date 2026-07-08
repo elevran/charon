@@ -29,7 +29,7 @@ func main() {
 func run() error {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	opts := config.NewServerOptions()
+	opts := config.NewCharonOptions()
 	fs := flag.NewFlagSet("charon", flag.ExitOnError)
 	opts.AddFlags(fs)
 	_ = fs.Parse(os.Args[1:])
@@ -64,7 +64,7 @@ func run() error {
 	}
 	defer func() { _ = svc.Close() }()
 
-	tp, err := telemetry.Init(context.Background(), opts.Telemetry.CharonService, opts.Telemetry.ExporterURL)
+	tp, err := telemetry.Init(context.Background(), opts.Telemetry.ServiceName, opts.Telemetry.ExporterURL)
 	if err != nil {
 		log.Error("init tracer", "err", err)
 		return err
@@ -78,10 +78,10 @@ func run() error {
 	}
 
 	h := server.NewHandler(svc, log).WithMaxBodyBytes(int64(opts.MaxPayload))
-	srv := server.NewServerWithRegistry(opts.CharonListen, h, log, reg, tp)
+	srv := server.NewServerWithRegistry(opts.Listen, h, log, reg, tp)
 
 	go func() {
-		log.Info("starting charon", "addr", opts.CharonListen)
+		log.Info("starting charon", "addr", opts.Listen)
 		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
 			log.Error("charon server error", "err", err)
 		}

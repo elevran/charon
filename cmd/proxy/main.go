@@ -26,10 +26,8 @@ func main() {
 func run() error {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	opts := config.NewServerOptions()
+	opts := config.NewProxyOptions()
 	fs := flag.NewFlagSet("proxy", flag.ExitOnError)
-	// TODO: split config.ServerOptions into CharonOptions + ProxyOptions so this
-	// binary doesn't silently accept (and ignore) Charon storage/TTL flags.
 	opts.AddFlags(fs)
 	_ = fs.Parse(os.Args[1:])
 	if err := opts.Complete(fs); err != nil {
@@ -41,7 +39,7 @@ func run() error {
 		return err
 	}
 
-	tp, err := telemetry.Init(context.Background(), opts.Telemetry.ProxyService, opts.Telemetry.ExporterURL)
+	tp, err := telemetry.Init(context.Background(), opts.Telemetry.ServiceName, opts.Telemetry.ExporterURL)
 	if err != nil {
 		log.Error("init tracer", "err", err)
 		return err
@@ -54,17 +52,17 @@ func run() error {
 		}()
 	}
 
-	timeout := time.Duration(opts.InferenceTimeoutSeconds) * time.Second
-	infClient := inference.New(opts.ProxyBackend, opts.ProxyAPIKey, timeout)
-	charonClient := charon.New(opts.ProxyCharonURL, timeout)
+	timeout := time.Duration(opts.TimeoutSeconds) * time.Second
+	infClient := inference.New(opts.Backend, opts.APIKey, timeout)
+	charonClient := charon.New(opts.CharonURL, timeout)
 
 	h := NewHandler(charonClient, infClient, log)
 	mux := http.NewServeMux()
 	RegisterHandlers(mux, h)
-	srv := server.NewServerFromMux(opts.ProxyListen, mux, log, tp)
+	srv := server.NewServerFromMux(opts.Listen, mux, log, tp)
 
 	go func() {
-		log.Info("starting proxy", "addr", opts.ProxyListen)
+		log.Info("starting proxy", "addr", opts.Listen)
 		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
 			log.Error("proxy server error", "err", err)
 		}
