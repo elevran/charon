@@ -3,27 +3,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
-	"io"
-	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
-
-	crdbpebble "github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
-
-	"github.com/elevran/charon/internal/chainstore"
-	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	"github.com/elevran/charon/internal/inference"
-	"github.com/elevran/charon/internal/server"
-	"github.com/elevran/charon/pkg/charon"
 )
 
 // The 11 non-GPU tests that can be validated with a deterministic mock.
@@ -42,7 +27,7 @@ const bunFilterTests = "basic-response,streaming-response,system-prompt,multi-tu
 //
 // Run with:
 //
-//	go test -tags openresponses-bun-compliance ./test/compliance/... -run TestBunComplianceSuite -v
+//	go test -tags openresponses-bun-compliance ./cmd/proxy/... -run TestBunComplianceSuite -v
 //
 // Or via the Makefile:
 //
@@ -59,7 +44,8 @@ func TestBunComplianceSuite(t *testing.T) {
 	}
 
 	// Boot the full stack on real TCP ports (bun connects from a separate process).
-	proxyURL := startRealStack(t)
+	s := newTestStack(t, withRealListeners(), withTimeout(15*time.Second))
+	proxyURL := s.proxyURL
 
 	t.Logf("proxy listening at %s", proxyURL)
 	t.Logf("running: bun run test:compliance --base-url %s --filter %s --json", proxyURL, bunFilterTests)
@@ -74,7 +60,6 @@ func TestBunComplianceSuite(t *testing.T) {
 	cmd.Dir = openresponsesDir
 	out, err := cmd.Output()
 	if err != nil {
-		// Print stderr for debugging.
 		if ee, ok := err.(*exec.ExitError); ok {
 			t.Logf("bun stderr:\n%s", ee.Stderr)
 		}
@@ -94,7 +79,6 @@ func TestBunComplianceSuite(t *testing.T) {
 		Results []testResult `json:"results"`
 	}
 
-	// Find the JSON output (may be preceded by non-JSON lines).
 	jsonStart := strings.Index(string(out), "{")
 	if jsonStart < 0 {
 		t.Fatalf("no JSON in bun output:\n%s", out)
@@ -110,52 +94,4 @@ func TestBunComplianceSuite(t *testing.T) {
 			t.Errorf("FAIL %s: %s", r.Name, r.Error)
 		}
 	}
-}
-
-// startRealStack boots the proxy stack on OS-assigned TCP ports and returns
-// the proxy base URL (e.g. "http://127.0.0.1:12345").
-func startRealStack(t *testing.T) string {
-	t.Helper()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	opts := &crdbpebble.Options{FS: vfs.NewMem()}
-	svc, err := pebblebe.Open(context.Background(), "", opts, chainstore.Config{})
-	if err != nil {
-		t.Fatalf("open pebble: %v", err)
-	}
-	t.Cleanup(func() { _ = svc.Close() })
-	charonH := server.NewHandler(svc, log)
-	charonMux := http.NewServeMux()
-	server.RegisterHandlers(charonMux, charonH)
-
-	charonLn := mustListen(t)
-	charonSrv := &http.Server{Handler: charonMux}
-	go charonSrv.Serve(charonLn) //nolint:errcheck
-	charonURL := fmt.Sprintf("http://127.0.0.1:%d", charonLn.Addr().(*net.TCPAddr).Port)
-	t.Cleanup(func() { charonSrv.Close() })
-
-	mockInf := inference.NewMockServer()
-	t.Cleanup(mockInf.Close)
-
-	charonClient := charon.New(charonURL, 15*time.Second)
-	infClient := inference.New(mockInf.URL, "", 15*time.Second)
-	proxyH := NewHandler(charonClient, infClient, log)
-	proxyMux := http.NewServeMux()
-	RegisterHandlers(proxyMux, proxyH)
-
-	proxyLn := mustListen(t)
-	proxySrv := &http.Server{Handler: proxyMux}
-	go proxySrv.Serve(proxyLn) //nolint:errcheck
-	t.Cleanup(func() { proxySrv.Close() })
-
-	return fmt.Sprintf("http://127.0.0.1:%d", proxyLn.Addr().(*net.TCPAddr).Port)
-}
-
-func mustListen(t *testing.T) net.Listener {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	return ln
 }
