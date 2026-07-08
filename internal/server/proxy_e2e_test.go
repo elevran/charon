@@ -1,4 +1,4 @@
-package api_test
+package server_test
 
 // Proxy E2E tests verify the Charon internal API operations as the proxy performs them:
 //

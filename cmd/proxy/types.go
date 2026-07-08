@@ -1,9 +1,9 @@
-package proxy
+package main
 
 import (
 	"encoding/json"
 
-	"github.com/elevran/charon/internal/charon"
+	"github.com/elevran/charon/pkg/charon"
 )
 
 // storedRequest is the format written as the request blob by Resolve.
