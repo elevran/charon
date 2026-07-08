@@ -112,6 +112,9 @@ func (c *Client) Stream(ctx context.Context, req map[string]json.RawMessage) (<-
 	return ch, nil
 }
 
+// BaseURL returns the base URL of the inference backend (no trailing slash).
+func (c *Client) BaseURL() string { return c.baseURL }
+
 func (c *Client) setHeaders(r *http.Request) {
 	r.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
@@ -123,6 +126,8 @@ func (c *Client) setHeaders(r *http.Request) {
 type Backend interface {
 	Complete(ctx context.Context, req map[string]json.RawMessage) (*Response, error)
 	Stream(ctx context.Context, req map[string]json.RawMessage) (<-chan SSEEvent, error)
+	// BaseURL returns the base URL of the inference backend (no trailing slash).
+	BaseURL() string
 }
 
 var _ Backend = (*Client)(nil)

@@ -26,12 +26,17 @@ func NewHandler(ch charon.Backend, inf inference.Backend, log *slog.Logger) *Han
 }
 
 // RegisterHandlers mounts Responses API routes on mux.
+// All requests that do not match a /responses route are reverse-proxied
+// verbatim to the inference backend.
 func RegisterHandlers(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("POST /responses", h.HandleCreate)
 	mux.HandleFunc("GET /responses/{id}", h.HandleRetrieve)
 	mux.HandleFunc("DELETE /responses/{id}", h.HandleDelete)
 	mux.HandleFunc("POST /responses/compact", h.HandleCompact)
 	mux.HandleFunc("GET /responses", h.HandleListOrWS) // WebSocket upgrade added in Phase 7
+
+	// Catch-all: forward everything else to the inference backend.
+	mux.Handle("/", newPassthroughProxy(h.inf.BaseURL()))
 }
 
 // HandleCreate handles POST /responses.
