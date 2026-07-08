@@ -10,7 +10,7 @@ import (
 )
 
 func TestConfigDefaults(t *testing.T) {
-	opts := charonconfig.NewCharonOptions()
+	opts := charonconfig.NewOptions()
 	require.Equal(t, ":8081", opts.Listen)
 	require.Equal(t, 30, opts.TTLDays)
 }

@@ -1,29 +1,15 @@
 package charonconfig
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"time"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/elevran/charon/internal/telemetry"
 )
-
-// ByteSize is an int64 that unmarshals from either a plain integer (bytes) or
-// a string with an optional unit suffix: B, KB, MB, GB. K=1024.
-type ByteSize = byteSizeType
-
-// TelemetryOptions holds OpenTelemetry settings.
-type TelemetryOptions struct {
-	ExporterURL string // OTLP HTTP endpoint; empty = disabled
-	ServiceName string // identifies this binary in traces
-}
-
-// AddFlags registers the --telemetry-exporter-url flag on fs.
-func (o *TelemetryOptions) AddFlags(fs *flag.FlagSet) {
-	fs.StringVar(&o.ExporterURL, "telemetry-exporter-url", o.ExporterURL, "OTLP HTTP exporter URL (e.g. http://localhost:4318); empty disables tracing")
-}
 
 // CharonOptions holds configuration for the Charon response-storage server.
 type CharonOptions struct {
@@ -45,17 +31,17 @@ type CharonOptions struct {
 	// WorkerTTLInterval is how often the background TTL reaper runs (not the TTL itself).
 	WorkerTTLInterval time.Duration
 
-	Telemetry TelemetryOptions
+	Telemetry telemetry.Options
 }
 
-// NewCharonOptions returns a CharonOptions pre-filled with built-in defaults.
-func NewCharonOptions() *CharonOptions {
+// NewOptions returns a CharonOptions pre-filled with built-in defaults.
+func NewOptions() *CharonOptions {
 	return &CharonOptions{
 		Listen:            ":8081",
 		DataDir:           "./data",
 		TTLDays:           30,
 		WorkerTTLInterval: time.Hour,
-		Telemetry:         TelemetryOptions{ServiceName: "charon"},
+		Telemetry:         telemetry.Options{ServiceName: "charon"},
 	}
 }
 
@@ -101,7 +87,7 @@ func (o *CharonOptions) Complete(fs *flag.FlagSet) error {
 	if !setFlags["telemetry-exporter-url"] {
 		o.Telemetry.ExporterURL = fc.Telemetry.ExporterURL
 	}
-	o.Telemetry.ServiceName = fc.Telemetry.CharonService
+	o.Telemetry.ServiceName = fc.Telemetry.ServiceName
 
 	return nil
 }
@@ -119,7 +105,6 @@ func (o *CharonOptions) Validate() error {
 // ---------------------------------------------------------------------------
 
 type fileConfig struct {
-	Proxy     json.RawMessage     `json:"proxy"` // accepted but unused — avoids strict-parse rejection of shared config files
 	Charon    fileCharonConfig    `json:"charon"`
 	Telemetry fileTelemetryConfig `json:"telemetry"`
 }
@@ -131,12 +116,12 @@ type fileCharonConfig struct {
 }
 
 type fileStorageConfig struct {
-	DataDir         string       `json:"data_dir"`
-	TTLDays         int          `json:"ttl_days"`
-	MaxResponses    int64        `json:"max_responses"`
-	MaxPayload      byteSizeType `json:"max_payload"`
-	MaxChainDepth   int          `json:"max_chain_depth"`
-	MaxContextBytes byteSizeType `json:"max_context_bytes"`
+	DataDir         string   `json:"data_dir"`
+	TTLDays         int      `json:"ttl_days"`
+	MaxResponses    int64    `json:"max_responses"`
+	MaxPayload      ByteSize `json:"max_payload"`
+	MaxChainDepth   int      `json:"max_chain_depth"`
+	MaxContextBytes ByteSize `json:"max_context_bytes"`
 }
 
 type fileWorkerConfig struct {
@@ -144,9 +129,8 @@ type fileWorkerConfig struct {
 }
 
 type fileTelemetryConfig struct {
-	ExporterURL   string `json:"exporter_url"`
-	CharonService string `json:"charon_service"`
-	ProxyService  string `json:"proxy_service"` // accepted but unused — avoids strict-parse rejection of shared config files
+	ExporterURL string `json:"exporter_url"`
+	ServiceName string `json:"service_name"`
 }
 
 func applyFileDefaults(fc *fileConfig) {
@@ -162,15 +146,13 @@ func applyFileDefaults(fc *fileConfig) {
 	if fc.Charon.Workers.TTLInterval <= 0 {
 		fc.Charon.Workers.TTLInterval = time.Hour
 	}
-	if fc.Telemetry.CharonService == "" {
-		fc.Telemetry.CharonService = "charon"
+	if fc.Telemetry.ServiceName == "" {
+		fc.Telemetry.ServiceName = "charon"
 	}
 }
 
 func loadFileConfig(path string) (fileConfig, error) {
 	var fc fileConfig
-	applyFileDefaults(&fc)
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fc, fmt.Errorf("read config: %w", err)

@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/elevran/charon/cmd/proxy/inference"
+	"github.com/elevran/charon/internal/server"
 	"github.com/elevran/charon/pkg/charon"
 )
 
@@ -76,7 +77,7 @@ func (h *Handler) HandleListOrWS(w http.ResponseWriter, r *http.Request) {
 		h.HandleWebSocket(w, r)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	server.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"object":   "list",
 		"data":     []interface{}{},
 		"has_more": false,

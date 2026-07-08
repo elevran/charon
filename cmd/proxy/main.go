@@ -26,7 +26,7 @@ func main() {
 func run() error {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	opts := proxyconfig.NewProxyOptions()
+	opts := proxyconfig.NewOptions()
 	fs := flag.NewFlagSet("proxy", flag.ExitOnError)
 	opts.AddFlags(fs)
 	_ = fs.Parse(os.Args[1:])

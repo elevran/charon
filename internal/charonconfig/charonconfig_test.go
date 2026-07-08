@@ -14,7 +14,7 @@ import (
 )
 
 func TestCharonOptionsDefaultsWithNoConfig(t *testing.T) {
-	opts := charonconfig.NewCharonOptions()
+	opts := charonconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse(nil))
@@ -28,7 +28,7 @@ func TestCharonOptionsDefaultsWithNoConfig(t *testing.T) {
 }
 
 func TestCharonOptionsCompleteLoadsFile(t *testing.T) {
-	opts := charonconfig.NewCharonOptions()
+	opts := charonconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/config.yaml"}))
@@ -39,7 +39,7 @@ func TestCharonOptionsCompleteLoadsFile(t *testing.T) {
 }
 
 func TestCharonOptionsCLIOverridesFile(t *testing.T) {
-	opts := charonconfig.NewCharonOptions()
+	opts := charonconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/config.yaml", "--listen", ":7777"}))
@@ -49,7 +49,7 @@ func TestCharonOptionsCLIOverridesFile(t *testing.T) {
 }
 
 func TestCharonOptionsValidateOK(t *testing.T) {
-	opts := charonconfig.NewCharonOptions()
+	opts := charonconfig.NewOptions()
 	require.NoError(t, opts.Validate())
 }
 
@@ -59,7 +59,7 @@ func TestCharonOptionsDataDirCLIOverridesFile(t *testing.T) {
 	err := os.WriteFile(cfgPath, []byte("charon:\n  storage:\n    data_dir: /tmp/test-data\n"), 0600)
 	require.NoError(t, err)
 
-	opts := charonconfig.NewCharonOptions()
+	opts := charonconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", cfgPath, "--storage-data-dir", "./my-data"}))
@@ -68,31 +68,8 @@ func TestCharonOptionsDataDirCLIOverridesFile(t *testing.T) {
 	assert.Equal(t, "./my-data", opts.DataDir)
 }
 
-func TestLoadDefaults(t *testing.T) {
-	charon := charonconfig.NewCharonOptions()
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	charon.AddFlags(fs)
-	require.NoError(t, fs.Parse(nil))
-	require.NoError(t, charon.Complete(fs))
-
-	assert.Equal(t, ":8081", charon.Listen)
-	assert.Equal(t, "./data", charon.DataDir)
-	assert.Equal(t, 30, charon.TTLDays)
-	assert.Equal(t, time.Hour, charon.WorkerTTLInterval)
-	assert.Equal(t, "charon", charon.Telemetry.ServiceName)
-}
-
-func TestLoadFromFile(t *testing.T) {
-	charon := charonconfig.NewCharonOptions()
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	charon.AddFlags(fs)
-	require.NoError(t, fs.Parse([]string{"--config", "testdata/config.yaml"}))
-	require.NoError(t, charon.Complete(fs))
-	assert.Equal(t, 30, charon.TTLDays)
-}
-
 func TestLoadStrictRejectsUnknownFields(t *testing.T) {
-	charon := charonconfig.NewCharonOptions()
+	charon := charonconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	charon.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/invalid.yaml"}))

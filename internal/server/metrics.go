@@ -7,11 +7,11 @@ import (
 )
 
 var (
-	httpRequestsTotal = prometheus.NewCounterVec(
+	requestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "http_requests_total"},
 		[]string{"endpoint", "status"},
 	)
-	httpRequestDuration = prometheus.NewHistogramVec(
+	requestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{Name: "http_request_duration_seconds"},
 		[]string{"endpoint"},
 	)
@@ -29,8 +29,8 @@ func RegisterMetrics(reg prometheus.Registerer, namespace string) error {
 	}
 	wrapped := prometheus.WrapRegistererWithPrefix(namespace+"_", reg)
 	for _, c := range []prometheus.Collector{
-		httpRequestsTotal,
-		httpRequestDuration,
+		requestsTotal,
+		requestDuration,
 	} {
 		if err := wrapped.Register(c); err != nil {
 			var are prometheus.AlreadyRegisteredError

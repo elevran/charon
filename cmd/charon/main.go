@@ -28,7 +28,7 @@ func main() {
 func run() error {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	opts := charonconfig.NewCharonOptions()
+	opts := charonconfig.NewOptions()
 	fs := flag.NewFlagSet("charon", flag.ExitOnError)
 	opts.AddFlags(fs)
 	_ = fs.Parse(os.Args[1:])

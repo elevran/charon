@@ -74,8 +74,8 @@ func RequestLogger(log *slog.Logger) Middleware {
 				"duration_ms", dur.Milliseconds(),
 			)
 			endpoint := r.Method + " " + r.Pattern
-			httpRequestsTotal.WithLabelValues(endpoint, strconv.Itoa(status)).Inc()
-			httpRequestDuration.WithLabelValues(endpoint).Observe(dur.Seconds())
+			requestsTotal.WithLabelValues(endpoint, strconv.Itoa(status)).Inc()
+			requestDuration.WithLabelValues(endpoint).Observe(dur.Seconds())
 		})
 	}
 }

@@ -7,8 +7,9 @@ import (
 	"strings"
 )
 
-// byteSizeType is the concrete type; ByteSize aliases it so tests can reference it.
-type byteSizeType int64
+// ByteSize is an int64 that unmarshals from either a plain integer (bytes) or
+// a string with an optional unit suffix: B, KB, MB, GB. K=1024.
+type ByteSize int64
 
 var unitMultipliers = map[string]int64{
 	"b":  1,
@@ -17,10 +18,10 @@ var unitMultipliers = map[string]int64{
 	"gb": 1024 * 1024 * 1024,
 }
 
-func (b *byteSizeType) UnmarshalJSON(data []byte) error {
+func (b *ByteSize) UnmarshalJSON(data []byte) error {
 	var n int64
 	if err := json.Unmarshal(data, &n); err == nil {
-		*b = byteSizeType(n)
+		*b = ByteSize(n)
 		return nil
 	}
 
@@ -59,6 +60,6 @@ func (b *byteSizeType) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("bytesize: negative size %q", s)
 	}
 
-	*b = byteSizeType(n * mult)
+	*b = ByteSize(n * mult)
 	return nil
 }

@@ -13,7 +13,7 @@ import (
 )
 
 func TestProxyOptionsDefaultsWithNoConfig(t *testing.T) {
-	opts := proxyconfig.NewProxyOptions()
+	opts := proxyconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse(nil))
@@ -27,7 +27,7 @@ func TestProxyOptionsDefaultsWithNoConfig(t *testing.T) {
 }
 
 func TestProxyOptionsCompleteLoadsFile(t *testing.T) {
-	opts := proxyconfig.NewProxyOptions()
+	opts := proxyconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/config.yaml"}))
@@ -39,7 +39,7 @@ func TestProxyOptionsCompleteLoadsFile(t *testing.T) {
 }
 
 func TestProxyOptionsCLIOverridesFile(t *testing.T) {
-	opts := proxyconfig.NewProxyOptions()
+	opts := proxyconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/config.yaml", "--listen", ":5555"}))
@@ -54,7 +54,7 @@ func TestProxyOptionsBackendCLIOverridesFile(t *testing.T) {
 	err := os.WriteFile(cfgPath, []byte("proxy:\n  inference:\n    base_url: http://file-backend:11434\n"), 0600)
 	require.NoError(t, err)
 
-	opts := proxyconfig.NewProxyOptions()
+	opts := proxyconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", cfgPath, "--backend", "http://cli-backend:11434"}))
@@ -69,7 +69,7 @@ func TestProxyOptionsCharonURLCLIOverridesFile(t *testing.T) {
 	err := os.WriteFile(cfgPath, []byte("proxy:\n  charon_url: http://file-charon:8081\n"), 0600)
 	require.NoError(t, err)
 
-	opts := proxyconfig.NewProxyOptions()
+	opts := proxyconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", cfgPath, "--charon-url", "http://cli-charon:9999"}))
@@ -79,12 +79,12 @@ func TestProxyOptionsCharonURLCLIOverridesFile(t *testing.T) {
 }
 
 func TestProxyOptionsValidateOK(t *testing.T) {
-	opts := proxyconfig.NewProxyOptions()
+	opts := proxyconfig.NewOptions()
 	require.NoError(t, opts.Validate())
 }
 
 func TestProxyOptionsValidateEmptyBackendFails(t *testing.T) {
-	opts := proxyconfig.NewProxyOptions()
+	opts := proxyconfig.NewOptions()
 	opts.Backend = ""
 	err := opts.Validate()
 	require.Error(t, err)
@@ -92,7 +92,7 @@ func TestProxyOptionsValidateEmptyBackendFails(t *testing.T) {
 }
 
 func TestCharonURLDerivedFromListen(t *testing.T) {
-	opts := proxyconfig.NewProxyOptions()
+	opts := proxyconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/config.yaml"}))
@@ -100,11 +100,17 @@ func TestCharonURLDerivedFromListen(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1:9090", opts.CharonURL)
 }
 
-func TestLoadFromFile(t *testing.T) {
-	proxy := proxyconfig.NewProxyOptions()
+func TestLoadStrictRejectsUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "bad.yaml")
+	err := os.WriteFile(cfgPath, []byte("proxy:\n  unknown_key: true\n"), 0600)
+	require.NoError(t, err)
+
+	opts := proxyconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	proxy.AddFlags(fs)
-	require.NoError(t, fs.Parse([]string{"--config", "testdata/config.yaml"}))
-	require.NoError(t, proxy.Complete(fs))
-	assert.Equal(t, ":0", proxy.Listen)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--config", cfgPath}))
+	err = opts.Complete(fs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse config")
 }

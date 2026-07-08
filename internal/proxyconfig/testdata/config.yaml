@@ -2,5 +2,3 @@ proxy:
   listen: ":0"
 charon:
   listen: ":9090"
-  storage:
-    data_dir: ./data
