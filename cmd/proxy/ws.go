@@ -1,4 +1,4 @@
-package proxy
+package main
 
 import (
 	"context"
@@ -13,8 +13,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/inference"
+	"github.com/elevran/charon/pkg/charon"
 )
 
 var upgrader = websocket.Upgrader{

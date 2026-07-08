@@ -1,4 +1,4 @@
-package compliance_test
+package main
 
 import (
 	"bytes"
@@ -18,7 +18,7 @@ import (
 // BenchmarkCreateSmallRequest measures POST /responses throughput with a
 // minimal single-item input (single-hop: no previous_response_id).
 func BenchmarkCreateSmallRequest(b *testing.B) {
-	s := startStack(b)
+	s := newTestStack(b)
 	body, _ := json.Marshal(map[string]interface{}{
 		"model": "test",
 		"input": "hello",
@@ -26,7 +26,7 @@ func BenchmarkCreateSmallRequest(b *testing.B) {
 	b.ResetTimer()
 	for i := range b.N {
 		req, _ := http.NewRequestWithContext(context.Background(), "POST",
-			s.proxySrv.URL+"/responses", bytes.NewReader(body))
+			s.proxyURL+"/responses", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -42,7 +42,7 @@ func BenchmarkCreateSmallRequest(b *testing.B) {
 // BenchmarkCreateLargeContext measures POST /responses throughput with a
 // large input array (50 items simulating a long conversation).
 func BenchmarkCreateLargeContext(b *testing.B) {
-	s := startStack(b)
+	s := newTestStack(b)
 
 	items := make([]map[string]interface{}, 50)
 	for i := range items {
@@ -63,7 +63,7 @@ func BenchmarkCreateLargeContext(b *testing.B) {
 	b.ResetTimer()
 	for i := range b.N {
 		req, _ := http.NewRequestWithContext(context.Background(), "POST",
-			s.proxySrv.URL+"/responses", bytes.NewReader(body))
+			s.proxyURL+"/responses", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -79,11 +79,11 @@ func BenchmarkCreateLargeContext(b *testing.B) {
 // BenchmarkCreateWithChain measures POST /responses throughput for continuation
 // turns (with previous_response_id — involves a Charon resolve call).
 func BenchmarkCreateWithChain(b *testing.B) {
-	s := startStack(b)
+	s := newTestStack(b)
 
 	// Store turn 0 to seed the chain.
 	seed, _ := json.Marshal(map[string]interface{}{"model": "test", "input": "seed"})
-	req0, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxySrv.URL+"/responses", bytes.NewReader(seed))
+	req0, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxyURL+"/responses", bytes.NewReader(seed))
 	req0.Header.Set("Content-Type", "application/json")
 	resp0, _ := http.DefaultClient.Do(req0)
 	var r0 struct {
@@ -101,7 +101,7 @@ func BenchmarkCreateWithChain(b *testing.B) {
 			"previous_response_id": prevID,
 		})
 		req, _ := http.NewRequestWithContext(context.Background(), "POST",
-			s.proxySrv.URL+"/responses", bytes.NewReader(body))
+			s.proxyURL+"/responses", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -121,7 +121,7 @@ func BenchmarkCreateWithChain(b *testing.B) {
 
 // BenchmarkStreamResponse measures POST /responses with stream:true throughput.
 func BenchmarkStreamResponse(b *testing.B) {
-	s := startStack(b)
+	s := newTestStack(b)
 	body, _ := json.Marshal(map[string]interface{}{
 		"model":  "test",
 		"input":  "hello",
@@ -130,7 +130,7 @@ func BenchmarkStreamResponse(b *testing.B) {
 	b.ResetTimer()
 	for i := range b.N {
 		req, _ := http.NewRequestWithContext(context.Background(), "POST",
-			s.proxySrv.URL+"/responses", bytes.NewReader(body))
+			s.proxyURL+"/responses", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -172,7 +172,7 @@ func BenchmarkConcurrent100(b *testing.B) {
 
 func benchmarkConcurrent(b *testing.B, concurrency int) {
 	b.Helper()
-	s := startStack(b)
+	s := newTestStack(b)
 	body, _ := json.Marshal(map[string]interface{}{"model": "test", "input": "hello"})
 
 	b.ResetTimer()
@@ -181,7 +181,7 @@ func benchmarkConcurrent(b *testing.B, concurrency int) {
 		client := &http.Client{}
 		for pb.Next() {
 			req, _ := http.NewRequestWithContext(context.Background(), "POST",
-				s.proxySrv.URL+"/responses", bytes.NewReader(body))
+				s.proxyURL+"/responses", bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := client.Do(req)
 			if err != nil {
@@ -200,7 +200,7 @@ func benchmarkConcurrent(b *testing.B, concurrency int) {
 // TestScaleSequentialChain verifies 100-turn chain reconstruction is correct
 // under the full proxy+Charon stack (exercises checkpointing + chain walk).
 func TestScaleSequentialChain(t *testing.T) {
-	s := startStack(t)
+	s := newTestStack(t)
 
 	var prevID string
 	const turns = 100
@@ -215,7 +215,7 @@ func TestScaleSequentialChain(t *testing.T) {
 		}
 		bodyBytes, _ := json.Marshal(body)
 		req, _ := http.NewRequestWithContext(context.Background(), "POST",
-			s.proxySrv.URL+"/responses", bytes.NewReader(bodyBytes))
+			s.proxyURL+"/responses", bytes.NewReader(bodyBytes))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -240,7 +240,7 @@ func TestScaleSequentialChain(t *testing.T) {
 // TestScaleConcurrentNewChains sends 50 independent new-chain requests
 // concurrently and verifies all succeed.
 func TestScaleConcurrentNewChains(t *testing.T) {
-	s := startStack(t)
+	s := newTestStack(t)
 	const n = 50
 	var wg sync.WaitGroup
 	errors := make(chan error, n)
@@ -254,7 +254,7 @@ func TestScaleConcurrentNewChains(t *testing.T) {
 				"input": fmt.Sprintf("concurrent request %d", idx),
 			})
 			req, _ := http.NewRequestWithContext(context.Background(), "POST",
-				s.proxySrv.URL+"/responses", bytes.NewReader(body))
+				s.proxyURL+"/responses", bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {

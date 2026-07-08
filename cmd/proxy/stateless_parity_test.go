@@ -1,4 +1,4 @@
-package proxy_test
+package main
 
 // TestStatelessStatefulParity demonstrates that the inference backend always
 // receives the complete conversation context (a stateless view), even though
@@ -16,30 +16,19 @@ package proxy_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	crdbpebble "github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
-
-	apihandler "github.com/elevran/charon/internal/api"
-	"github.com/elevran/charon/internal/chainstore"
-	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/inference"
-	"github.com/elevran/charon/internal/proxy"
 )
 
 // capturedInfReq records a single request body received by the inference server.
@@ -101,43 +90,15 @@ func (c *capturingInfServer) captured() []capturedInfReq {
 	return out
 }
 
-// startParityStack wires a full Charon + proxy stack with a capturing inference server.
-func startParityStack(t *testing.T) (*httptest.Server, *capturingInfServer) {
-	t.Helper()
-
-	opts := &crdbpebble.Options{FS: vfs.NewMem()}
-	svc, err := pebblebe.Open(context.Background(), "", opts, chainstore.Config{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = svc.Close() })
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	charonH := apihandler.NewHandler(svc, log)
-	charonMux := http.NewServeMux()
-	apihandler.RegisterHandlers(charonMux, charonH)
-	charonSrv := httptest.NewServer(charonMux)
-	t.Cleanup(charonSrv.Close)
-
-	infSrv := newCapturingInfServer(t)
-
-	charonClient := charon.New(charonSrv.URL, 5*time.Second)
-	infClient := inference.New(infSrv.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log)
-	proxyMux := http.NewServeMux()
-	proxy.RegisterHandlers(proxyMux, proxyH)
-	proxySrv := httptest.NewServer(proxyMux)
-	t.Cleanup(proxySrv.Close)
-
-	return proxySrv, infSrv
-}
-
 // postResponse sends POST /responses to the proxy and returns the decoded resource.
-func postResponse(t *testing.T, client *http.Client, baseURL string, body map[string]any) proxy.ResponseResource {
+func postResponse(t *testing.T, client *http.Client, baseURL string, body map[string]any) ResponseResource {
 	t.Helper()
 	b, _ := json.Marshal(body)
 	resp, err := client.Post(baseURL+"/responses", "application/json", bytes.NewReader(b))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var r proxy.ResponseResource
+	var r ResponseResource
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&r))
 	return r
 }
@@ -171,10 +132,14 @@ func assertItemsJSONEqual(t *testing.T, want, got []json.RawMessage) {
 // that the proxy assembled the full conversation context — identical to what a
 // stateless client would have to construct manually.
 func TestStatelessStatefulParity(t *testing.T) {
-	proxySrv, infSrv := startParityStack(t)
-	client := proxySrv.Client()
-	post := func(body map[string]any) proxy.ResponseResource {
-		return postResponse(t, client, proxySrv.URL, body)
+	infSrv := newCapturingInfServer(t)
+	s := newTestStack(t, withInferenceURL(infSrv.URL))
+	client := http.DefaultClient
+	if s.proxySrv != nil {
+		client = s.proxySrv.Client()
+	}
+	post := func(body map[string]any) ResponseResource {
+		return postResponse(t, client, s.proxyURL, body)
 	}
 
 	// ----------------------------------------------------------------
@@ -220,7 +185,6 @@ func TestStatelessStatefulParity(t *testing.T) {
 	assert.Equal(t, "user", msgRole(t, captured[0].Input[0]))
 
 	// Turn 1: inference sees [t0_user, t0_assistant, t1_user] — 3 items.
-	// The proxy prepended the flat context (t0 input + t0 output) before t1's message.
 	require.Len(t, captured[1].Input, 3, "turn 1: inference sees 3 items (prior 2 + 1 new)")
 	assert.Equal(t, "user", msgRole(t, captured[1].Input[0]), "t0 input")
 	assert.Equal(t, "assistant", msgRole(t, captured[1].Input[1]), "t0 output")
@@ -235,21 +199,16 @@ func TestStatelessStatefulParity(t *testing.T) {
 	assert.Equal(t, "user", msgRole(t, captured[2].Input[4]), "t2 input")
 
 	// ----------------------------------------------------------------
-	// Stateless equivalence: the context prefix in turn N+1 exactly
-	// matches what was sent in turn N.  A stateless client doing the
-	// same conversation would build this prefix manually; the proxy
-	// reconstructs it transparently from Charon's stored flat context.
+	// Stateless equivalence check.
 	// ----------------------------------------------------------------
 
-	// captured[1].Input[0:1] == captured[0].Input[0:1]  (t0 user message preserved)
 	assertItemsJSONEqual(t,
-		captured[0].Input[:1], // stateless: what we sent in turn 0
-		captured[1].Input[:1], // proxy: what it prepended in turn 1
+		captured[0].Input[:1],
+		captured[1].Input[:1],
 	)
 
-	// captured[2].Input[0:3] == captured[1].Input[0:3]  (turns 0+1 preserved)
 	assertItemsJSONEqual(t,
-		captured[1].Input[:3], // stateless: what we sent in turn 1
-		captured[2].Input[:3], // proxy: what it prepended in turn 2
+		captured[1].Input[:3],
+		captured[2].Input[:3],
 	)
 }

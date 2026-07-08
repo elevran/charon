@@ -54,13 +54,14 @@ test-integration:
 	go test -race ./test/integration/...
 
 # test-compliance: Go compliance suite (mock inference, no external deps).
+# Tests moved from test/compliance/ into cmd/proxy/ (package main).
 test-compliance:
-	go test -race ./test/compliance/...
+	go test -race ./cmd/proxy/...
 
 # test-disruptive: end-to-end disruptive tests (proxy/stack failure paths).
-# Store-level disruptive tests live in internal/store/ and run via test-unit.
+# Tests moved from test/disruptive/ into cmd/proxy/ (package main).
 test-disruptive:
-	go test -race ./test/disruptive/...
+	go test -race ./cmd/proxy/...
 
 # test-system: canonical openresponses.org suite via bun.
 # Requires: bun (https://bun.sh) and OPENRESPONSES_DIR set to a clone of
@@ -71,7 +72,7 @@ test-system: test-compliance-bun
 test-compliance-bun:
 	OPENRESPONSES_DIR=$(OPENRESPONSES_DIR) \
 	go test -tags openresponses_bun_compliance -v -count=1 \
-	  ./test/compliance/... -run TestBunComplianceSuite
+	  ./cmd/proxy/... -run TestBunComplianceSuite
 
 # ── Dependency management ─────────────────────────────────────────────────────
 

@@ -21,10 +21,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/elevran/charon/internal/api"
 	"github.com/elevran/charon/internal/chainstore"
 	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
 	"github.com/elevran/charon/internal/metrics"
+	api "github.com/elevran/charon/internal/server"
 )
 
 // fixture bundles the Charon API test server.

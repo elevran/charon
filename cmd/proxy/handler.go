@@ -1,4 +1,4 @@
-package proxy
+package main
 
 import (
 	"encoding/json"
@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/httputil"
 	"github.com/elevran/charon/internal/inference"
+	"github.com/elevran/charon/pkg/charon"
 )
 
 // Handler is the client-facing Responses API proxy handler.

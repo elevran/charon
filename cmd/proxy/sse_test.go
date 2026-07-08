@@ -1,4 +1,4 @@
-package proxy_test
+package main
 
 import (
 	"bufio"
@@ -10,13 +10,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/elevran/charon/internal/proxy"
 )
 
 type parsedSSE struct {
 	events        []map[string]json.RawMessage
-	finalResponse *proxy.ResponseResource
+	finalResponse *ResponseResource
 }
 
 func parseSSE(t *testing.T, resp *http.Response) parsedSSE {
@@ -38,7 +36,7 @@ func parseSSE(t *testing.T, resp *http.Response) parsedSSE {
 		_ = json.Unmarshal(evt["type"], &typeStr)
 		if typeStr == "response.completed" {
 			var full struct {
-				Response proxy.ResponseResource `json:"response"`
+				Response ResponseResource `json:"response"`
 			}
 			_ = json.Unmarshal([]byte(data), &full)
 			r := full.Response
@@ -49,9 +47,9 @@ func parseSSE(t *testing.T, resp *http.Response) parsedSSE {
 }
 
 func TestStreamBasicResponse(t *testing.T) {
-	s := startStack(t)
+	s := newTestStack(t)
 
-	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxySrv.URL+"/responses", strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxyURL+"/responses", strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -77,9 +75,9 @@ func TestStreamBasicResponse(t *testing.T) {
 }
 
 func TestStreamEventSequenceNumbers(t *testing.T) {
-	s := startStack(t)
+	s := newTestStack(t)
 
-	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxySrv.URL+"/responses", strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxyURL+"/responses", strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -93,9 +91,9 @@ func TestStreamEventSequenceNumbers(t *testing.T) {
 }
 
 func TestStreamCreatedIDMatchesCompleted(t *testing.T) {
-	s := startStack(t)
+	s := newTestStack(t)
 
-	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxySrv.URL+"/responses", strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxyURL+"/responses", strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
