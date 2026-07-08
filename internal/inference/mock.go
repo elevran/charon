@@ -33,6 +33,10 @@ func NewMockServer() *MockServer {
 // Calls returns the total number of inference requests handled.
 func (m *MockServer) Calls() int64 { return m.counter.Load() }
 
+// BaseURL returns the mock server's base URL (no trailing slash), satisfying
+// the inference.Backend interface.
+func (m *MockServer) BaseURL() string { return m.URL }
+
 func (m *MockServer) nextID() string {
 	n := m.counter.Add(1)
 	return fmt.Sprintf("resp_%032x", n)
