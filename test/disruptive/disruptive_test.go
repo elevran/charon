@@ -67,7 +67,7 @@ func startNormalStack(t *testing.T, infSrv *httptest.Server) *fullStack {
 
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)
 	infClient := inference.New(infSrv.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log, 0)
+	proxyH := proxy.NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
 	proxy.RegisterHandlers(proxyMux, proxyH)
 	proxySrv := httptest.NewServer(proxyMux)
@@ -107,7 +107,7 @@ func startFailingStoreStack(t *testing.T, infSrv *httptest.Server) *fullStack {
 
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)
 	infClient := inference.New(infSrv.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log, 0)
+	proxyH := proxy.NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
 	proxy.RegisterHandlers(proxyMux, proxyH)
 	proxySrv := httptest.NewServer(proxyMux)

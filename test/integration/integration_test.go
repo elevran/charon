@@ -37,14 +37,16 @@ func (f *fixture) URL() string { return f.srv.URL }
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	opts := &crdbpebble.Options{FS: vfs.NewMem()}
-	svc, err := pebblebe.Open(context.Background(), "", opts, chainstore.Config{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = svc.Close() })
-	h := api.NewHandler(svc, log)
 
 	reg := prometheus.NewRegistry()
 	require.NoError(t, metrics.Register(reg, ""))
+
+	opts := &crdbpebble.Options{FS: vfs.NewMem()}
+	// Pass reg so chainstore metrics (chainstore_entries_total, etc.) are exported.
+	svc, err := pebblebe.Open(context.Background(), "", opts, chainstore.Config{Registerer: reg})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = svc.Close() })
+	h := api.NewHandler(svc, log)
 
 	mux := http.NewServeMux()
 	api.RegisterHandlers(mux, h)
@@ -126,8 +128,8 @@ func TestMetricsEndpoint(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	body, _ := io.ReadAll(resp.Body)
-	// The fixture registers application metrics; any of the responses_* names must appear.
-	assert.Contains(t, string(body), "responses_",
+	// The fixture registers chainstore metrics; any of the chainstore_* names must appear.
+	assert.Contains(t, string(body), "chainstore_",
 		"metrics response must contain registered application metrics")
 }
 

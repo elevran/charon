@@ -24,7 +24,6 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1:8081", opts.ProxyCharonURL)
 	assert.Equal(t, "http://localhost:11434", opts.ProxyBackend)
 	assert.Equal(t, 120, opts.InferenceTimeoutSeconds)
-	assert.Equal(t, 65536, opts.InferenceStoreBufferBytes)
 	// Charon defaults
 	assert.Equal(t, ":8081", opts.CharonListen)
 	assert.Equal(t, "./data", opts.DataDir)

@@ -3,6 +3,7 @@ package chainstore
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -59,7 +60,7 @@ const (
 // BlobType distinguishes single-blob nodes (one pfxBlob key) from chunked
 // nodes (a pfxManifest key plus one pfxChunk key per batch).
 // Default zero value is BlobTypeSingle; chunked nodes are explicitly set to
-// BlobTypeChunked when a StreamStore commit lands.
+// BlobTypeChunked when CompleteStreaming lands.
 type BlobType uint8
 
 const (
@@ -67,7 +68,7 @@ const (
 	// This is the default for non-streaming stores.
 	BlobTypeSingle BlobType = iota
 	// BlobTypeChunked stores the response payload as a pfxManifest key plus
-	// one pfxChunk key per appended batch. Set by Store.StreamStore.
+	// one pfxChunk key per appended batch. Set by CompleteStreaming.
 	BlobTypeChunked
 )
 
@@ -219,6 +220,30 @@ type Transaction struct {
 	DeleteResponseIDIndex []string
 
 	StatsDelta StatsDelta
+}
+
+// Validate reports clearly-invalid Transaction combinations.
+// Called by Backend.Commit implementations to catch programming errors early.
+// The check is a denylist: it rejects contradictions rather than requiring an
+// exact known combination, so valid future extensions don't need a Validate update.
+func (tx Transaction) Validate() error {
+	hasPutNodes := len(tx.PutNodes) > 0
+	hasDelNodes := len(tx.DeleteNodes) > 0
+	hasPutStaging := len(tx.PutStagingNodes) > 0
+
+	// Cannot write and delete the same logical set of nodes.
+	if hasPutNodes && hasDelNodes {
+		return fmt.Errorf("chainstore.Transaction.Validate: PutNodes and DeleteNodes are mutually exclusive")
+	}
+	// Cannot simultaneously open and close a staging record.
+	if hasPutStaging && len(tx.DeleteStagingNodes) > 0 {
+		return fmt.Errorf("chainstore.Transaction.Validate: PutStagingNodes and DeleteStagingNodes are mutually exclusive")
+	}
+	// A manifest seals a chunked blob; combining with raw blobs in one commit is a bug.
+	if len(tx.PutManifests) > 0 && len(tx.PutBlobs) > 0 {
+		return fmt.Errorf("chainstore.Transaction.Validate: PutManifests and PutBlobs are mutually exclusive")
+	}
+	return nil
 }
 
 // Backend is the only interface the business logic sees.

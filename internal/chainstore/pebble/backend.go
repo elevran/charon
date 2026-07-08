@@ -240,6 +240,9 @@ func (b *Backend) Commit(ctx context.Context, tx chainstore.Transaction) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := tx.Validate(); err != nil {
+		return err
+	}
 	batch := b.db.NewBatch()
 	defer func() { _ = batch.Close() }()
 

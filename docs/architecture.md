@@ -21,8 +21,8 @@ client surface (e.g., `/v1/responses/` API).
 Client
   ↓  OpenAI Responses API (HTTP / SSE / WebSocket)
 Proxy ──────────────────────────────────────► Charon
-  │  GET /responses/{id}/context (resolve)      (context resolution + storage)
-  │  POST /responses/{id}        (store)
+  │  POST /staging (resolve + open staging)     (context resolution + storage)
+  │  PUT /staging/{id}/complete (store)
   │
   ↓  stateless Responses API (full flat_context as input)
 Inference Backend (OpenAI-compatible)
@@ -49,11 +49,10 @@ The proxy owns all client-facing concerns:
 
 Charon owns storage and resolution:
 
-- Resolves `previous_response_id` chains into flat `[]Item` context arrays
-- Assigns reservation IDs for write-intent correlation; canonical response IDs are assigned by the inference server
-- Persists response payloads (input items, output items) to durable storage
-- Manages write-intent safety across the index and payload stores
-- Runs background workers: TTL expiry, write-intent recovery
+- Resolves `previous_response_id` chains into flat `[]Turn` context arrays via `POST /staging`
+- Persists request and response blobs to durable Pebble storage
+- Manages staging records for in-flight streaming ingest; reaps orphans via background TTL worker
+- Runs background workers: TTL expiry, staging reaper
 
 Charon does **not** own: SSE, WebSocket, auth, TLS, model routing, or `store: false` semantics.
 
@@ -61,23 +60,22 @@ Charon does **not** own: SSE, WebSocket, auth, TLS, model routing, or `store: fa
 
 ### Proxy–Charon interaction
 
-The proxy calls Charon differently depending on whether this is a new chain or a continuation:
+The proxy calls Charon differently depending on whether this is a new chain or a continuation.
 
 **New chain** (no `previous_response_id`):
 - No Charon resolve call. Proxy calls inference with `flat_context=[]` + `input[]`.
 - The inference server assigns the canonical response ID, returned in the first streaming chunk or response body.
 - Proxy emits `response.created` to the client using that inference-server-assigned ID.
-- If `store: true`: proxy calls `POST /responses/{canonical_id}` to store.
+- If `store: true`: proxy uses the buffered `POST /responses` path (or the streaming staging protocol) to commit the response.
 
-**Continuation** (has `previous_response_id`):
-1. **Before inference** — resolve: `GET /responses/{previous_response_id}/context`, receives `{reservation_id, flat_context[]}`. Charon returns assembled history and a short-lived reservation ID for write-intent correlation. No write-intent is created yet.
-2. **Start inference** — proxy appends the new `input[]` to `flat_context` and forwards to the inference server. The inference server's first streaming chunk carries the canonical response ID.
-3. **Client notification** — proxy emits `response.created` to the client using the inference-server-assigned canonical ID.
-4. **After inference** — store: `POST /responses/{canonical_id}` with `{reservation_id, previous_response_id, input[], output[], usage, status}`. Charon atomically creates the write-intent and commits the payload.
+**Continuation** (has `previous_response_id`) — streaming path:
+1. **Open staging**: `POST /staging?prev={previous_response_id}` — Charon resolves the prior chain, creates a staging record, returns `{staging_id, flat_context[]}`.
+2. **Inference**: proxy appends new `input[]` to `flat_context` and forwards to the inference server. The first streaming chunk carries the canonical response ID.
+3. **Client notification**: proxy emits `response.created` using the inference-server-assigned canonical ID.
+4. **Append chunks**: proxy delivers response bytes incrementally via `PUT /staging/{staging_id}/chunks/{k}`.
+5. **Complete**: `PUT /staging/{staging_id}/complete?response_id={canonical_id}&total={N}` — Charon seals the staging record and commits the node atomically.
 
-If inference fails before the canonical ID is known (no data returned at all), the proxy uses the `reservation_id` as the fallback response ID and calls `POST /responses/{reservation_id}` with `status: "failed"`. If the canonical ID was already received, the proxy uses it.
-
-If `store: false` is set, the proxy skips the store call entirely. No write-intent is ever created. The `store: false` flag is a proxy-level concern; Charon is unaware of it.
+If `store: false` is set, the proxy skips all Charon store calls. The `store: false` flag is a proxy-level concern; Charon is unaware of it.
 
 ---
 
@@ -151,58 +149,45 @@ Charon uses the checkpoint strategy. See [storage design](storage.md) for detail
 
 Charon exposes an internal HTTP API consumed only by the proxy. It is **not** required to conform to the OpenAI Responses API specification — it is designed for operational efficiency as an internal service.
 
-The two read endpoints reflect two distinct proxy needs:
+### Buffered store: `POST /responses`
 
-- **Resolve** (`GET /responses/{id}/context`): the proxy is about to call inference and needs the assembled chain as a flat context. Requires a full chain walk (up to K steps with checkpoints), multiple payload reads, and a new minted `reservation_id` for the upcoming response. Called before every continuation inference turn. The inference backend
-returns the real response ID that can be used in future requests.
-
-- **Retrieve** (`GET /responses/{id}`): the proxy is serving a client read request (`GET /responses/{id}` on the client-facing API). The client wants that specific turn's stored data — input items, output items, usage, status. No chain walk. No new ID. Only that one record. Using resolve here would walk the entire chain and mint a wasted ID.
-
-These are different operations with different cost and different response shapes. The sub-resource `/context` reflects this: the base path is the stored resource itself; `/context` is a derived view assembled from the chain.
-
-### Resolve: `GET /responses/{id}/context`
-
-Called by the proxy before inference, for continuation turns only. Walks the stored chain and assembles `flat_context`. Returns a `reservation_id` for write-intent correlation — this is not the canonical response ID visible to clients.
+The non-streaming path. The proxy sends a complete serialised request blob and response blob in one call. Charon resolves the previous chain, stages the request, and commits the response atomically.
 
 ```
-GET /responses/{previous_response_id}/context
-
-Response:
-  { "reservation_id": "rsrv_...", "flat_context": [...] }
-```
-
-`flat_context` is the assembled history (all prior input/output items). The proxy appends the new `input[]` before forwarding to the inference backend. The canonical response ID is assigned by the inference server in its first streaming chunk or response body — the proxy uses that ID in the `response.created` event to the client and in the subsequent store call.
-
-New chains skip this call — the proxy calls inference directly and uses the ID assigned by the inference server for the store call.
-
-### Store: `POST /responses/{id}`
-
-Called by the proxy after inference completes. The write-intent is created and resolved atomically within this call.
-
-```
-POST /responses/{canonical_response_id}
+POST /responses
 body: {
-  "reservation_id": "rsrv_...",        // from preceding resolve; omitted for new chains
-  "previous_response_id": "resp_...",  // null for new chains
-  "input": [...],
-  "output": [...],
-  "usage": {...},
-  "status": "completed" | "failed",
-  ...
+  "response_id": "resp_...",
+  "previous_response_id": "resp_..." | null,
+  "tenant_key": "",
+  "request_blob": "<base64>",
+  "response_blob": "<base64>"
 }
+Response: 201 Created
+  X-Depth: <chain depth>
+  { "staging_id": "..." }
 ```
 
-`canonical_response_id` in the path is the ID assigned by the inference server. `reservation_id` correlates this store call to the preceding resolve; Charon uses it for write-intent tracking and logging. On `status: "failed"`, Charon records the failure and skips payload write. Store calls are safe to retry: the payload key is derived from `canonical_response_id`, so a repeated PUT writes identical bytes to the same key.
+### Streaming path: staging protocol
+
+The streaming path separates resolve from store via a three-step staging protocol, allowing the proxy to begin inference immediately after resolve and deliver response chunks incrementally:
+
+1. **Open staging**: `POST /staging?prev={prevID}` — resolves the prior chain, creates a staging record, returns a `staging_id`. The `flat_context` assembled here is included in the response for the proxy to use when building the inference request.
+
+2. **Append chunks**: `PUT /staging/{id}/chunks/{k}` — delivers one batch of response bytes (0-based offset `k`). Returns next expected offset. Chunks may arrive out of order; Charon sorts at commit time.
+
+3. **Complete staging**: `PUT /staging/{id}/complete?response_id=...&total=...` — seals the staging record and commits the node into the chain store. `total` is the total chunk count.
+
+Additional staging endpoints:
+- `PUT /staging/{id}/abort` — marks the staging record as aborted; no node is committed.
+- `GET /staging/{id}` — returns staging status (in-progress, complete, or aborted).
 
 ### Retrieve: `GET /responses/{id}`
 
-Called by the proxy to serve client-facing read requests (`GET /responses/{id}`, list sub-resources, pagination). Returns the full stored record for that single response — input items, output items, usage, status, metadata. No chain walk.
-
-The proxy projects whatever fields or sub-resources the client requested from the returned record.
+Returns the full stored record for one response — request blob, response blob, depth. No chain walk.
 
 ### Delete: `DELETE /responses/{id}`
 
-Called by the proxy to serve `DELETE /responses/{id}` on the client-facing API. Point delete — no effect on other responses in the chain. Hard deletion may be deferred to the TTL worker.
+Point delete — removes the node and its blobs. No effect on other responses in the chain. Background TTL expiry handles bulk eviction.
 
 ---
 
@@ -210,97 +195,46 @@ Called by the proxy to serve `DELETE /responses/{id}` on the client-facing API. 
 
 Response IDs visible to clients are assigned by the inference server, not pre-minted by Charon or the proxy. This ensures the stored ID matches the ID the inference server used for its own logging, metrics, and internal correlation.
 
-**Canonical response ID**: The `id` field returned by the inference server (e.g. `resp_xyz` from a vLLM Responses API backend, or translated from `chatcmpl-xyz` for chat-completions backends). This is what clients see and what Charon stores as its primary key.
+**Canonical response ID**: The `id` field returned by the inference server (e.g. `resp_xyz` from a vLLM Responses API backend). This is what clients see and what Charon stores as its primary key. Charon treats all IDs as opaque strings.
 
-**Reservation ID**: A short-lived internal identifier minted by Charon at resolve time. It is never exposed to clients. It serves two purposes:
-- Write-intent correlation: the store call carries the `reservation_id` so Charon can match the resolve → store pair in logs and future write-intent pre-reservation.
-- Failure fallback: if inference fails before returning any data (no canonical ID yet known), the proxy reports the failure using the `reservation_id` as the path parameter.
+**Staging ID**: A 128-bit random UUID minted by Charon at `POST /staging` time and returned to the proxy. It is never exposed to clients. It ties the resolved chain context to the subsequent chunk writes and commit. The proxy binds the canonical response ID to the staging ID on the first chunk write (`PUT /staging/{id}/chunks/0?response_id=...`).
 
 **ID flow — continuation:**
 ```
-resolve → Charon returns reservation_id
-inference → server assigns canonical_id (in first streaming chunk)
-proxy sends response.created to client with canonical_id
-store → POST /responses/{canonical_id}  body carries reservation_id
+POST /staging?prev={prev_response_id}  → Charon returns staging_id + flat_context
+inference → server assigns canonical_id
+PUT /staging/{staging_id}/chunks/{k}?response_id={canonical_id}  (first chunk binds the ID)
+PUT /staging/{staging_id}/complete?response_id={canonical_id}&total={N}  → committed
 ```
 
-**ID flow — new chain:**
+**ID flow — new chain (via buffered path):**
 ```
-inference → server assigns canonical_id (in first streaming chunk)
-proxy sends response.created to client with canonical_id
-store → POST /responses/{canonical_id}  (no reservation_id)
+POST /responses  body: { response_id, previous_response_id=null, request_blob, response_blob }
+                 → 201 Created; node committed atomically
 ```
-
-**ID format**: The `resp_` prefix (`resp_<32-char hex>`) is the convention Charon expects for canonical IDs. When the inference backend returns IDs in a different format (e.g. `chatcmpl-` for OpenAI-style chat completions), the proxy translates them. Reservation IDs use a `rsrv_` prefix to distinguish them from canonical IDs in logs. Charon treats all IDs as opaque strings beyond their prefix convention.
 
 ---
 
-## Streaming Store Modes
+## Streaming Ingest
 
-The proxy delivers inference output to Charon along a spectrum from fully buffered to token-at-a-time. All modes target the same store endpoint; the difference is when and in what granularity the payload arrives.
-
-```
-Fully buffered ◄────────────────────────────────────► Token-at-a-time
-(single POST, peak memory = full output,    (many writes, peak memory = 1 token,
- no partial recovery)                        full partial recovery)
-```
-
-### Mode 1: Fully Buffered
-
-The proxy accumulates all inference output before calling store. A single `POST` carries the complete payload.
+The staging protocol separates chain resolution from blob commit. This allows the proxy to deliver inference output to Charon incrementally as tokens arrive, without holding all output in proxy memory.
 
 ```
-vLLM ──(stream tokens)──► Proxy  [buffers all]
-Proxy ──POST /responses/{id} { complete payload } ──► Charon
+POST /staging?prev={prevID}           → staging_id, flat_context (resolve + open staging)
+PUT /staging/{id}/chunks/{k}          → next_expected (repeated per batch; out-of-order OK)
+PUT /staging/{id}/complete?total={N}  → committed (seal and write node atomically)
 ```
 
-Write is atomic: the chainstore appends the node in a single Pebble batch. Peak proxy memory is proportional to total output length. If the proxy crashes before calling store, the response is lost with no partial recovery. This is the currently deployed mode — simplest write path, no streaming protocol needed.
-
-### Mode 2: Chunked (N tokens per chunk)
-
-The proxy forwards output to Charon in batches as tokens arrive from vLLM. Chunk size is configurable from 1 to N output items.
-
-Using separate calls per chunk:
-
-```
-vLLM ──(stream tokens)──► Proxy
-Proxy ──POST /responses/{id}                                ──► Charon  (open stream, create write-intent)
-Proxy ──PATCH /responses/{id} { items: [...] }              ──► Charon  (repeated per chunk)
-...
-Proxy ──PATCH /responses/{id} { items: [...], usage, status }──► Charon  (final chunk, close + commit)
-```
-
-Or equivalently, a single `POST` with `Transfer-Encoding: chunked` where each HTTP chunk is an ndjson line:
-
-```
-POST /responses/{id}
-Content-Type: application/x-ndjson
-Transfer-Encoding: chunked
-
-{"type":"chunk","items":[...]}
-{"type":"chunk","items":[...]}
-{"type":"final","items":[...],"usage":{...},"status":"completed"}
-```
-
-Write-intent phases for chunked mode: `stream_open` → (chunks accumulating) → `committed` | `failed`. The recovery worker identifies streams stale beyond the threshold and marks them `failed`, preserving any partially written chunks for debugging.
-
-**Seq field and ordering**: each `PATCH` chunk carries a `seq` integer (0-based). Charon stores chunks indexed by seq and sorts at commit time. This allows the proxy to dispatch chunk writes from concurrent goroutines without requiring arrival order — each goroutine is assigned a seq before being spawned. The proxy does not call commit until all chunk writes have returned successfully, so Charon always has a complete set of chunks by the time it assembles the payload. Gaps (a chunk seq with no corresponding PATCH) indicate a dropped request; the proxy must retry that chunk before committing.
+Chunks are stored by offset (0-based). The proxy may write chunks from concurrent goroutines in any order; Charon assembles them in order at commit time. If the proxy crashes after `POST /staging` but before `PUT .../complete`, the staging record is reaped by the staging TTL worker (background goroutine) and no orphaned node is left in the chain.
 
 **Chunk size trade-offs:**
 
 | Chunk size | Peak proxy memory | Charon write ops | Durability boundary |
 |------------|------------------|------------------|---------------------|
-| 1 token | Minimal | One per token | Per token |
-| N tokens | N tokens | One per N tokens | Per N tokens |
-| Full output | Full output | One (Mode 1) | On completion only |
+| 1 batch | Minimal | One per batch | Per batch |
+| Full output | Full output | One commit | On completion only |
 
-### Mode 3: Token-at-a-Time
-
-The extreme end of Mode 2 with chunk size = 1. Every output token is forwarded to Charon immediately. Maximum durability — Charon has all output up to the crash point if the proxy fails mid-stream. Practical use is limited to latency-insensitive workloads where recovery granularity matters more than write overhead.
-
-### Checkpoint Interaction
-
-Checkpoint writes (every K turns) occur at stream close regardless of streaming mode. The full assembled `flat_context` — needed to materialize the checkpoint blob — is only known once all output items for the turn have arrived. In chunked mode, Charon accumulates received chunks and writes the checkpoint atomically at stream commit.
+The buffered `POST /responses` path is equivalent to a single-chunk staging flow executed atomically.
 
 ---
 
@@ -340,34 +274,22 @@ Charon has no knowledge of `store: false`. Because write-intents are created onl
 
 ---
 
-## Scaling Path
+## Deployment Modes
 
-Proxy and Charon are always separate services in production — they run in separate processes, typically on separate hosts. Colocation in the same binary is provided only for testing purposes (conformance, compliance, and development iteration).
+Proxy and Charon are always separate services in production — they run in separate processes, typically on separate hosts. Colocation in the same binary is provided for testing purposes (conformance, compliance, and development iteration).
 
-**Memory only** (conformance and compliance testing)
-- IndexStore: in-memory
-- PayloadStore: in-memory
-- No persistence across restarts; suitable for running the openresponses.org compliance suite and integration tests
+The current storage backend is [Pebble](https://github.com/cockroachdb/pebble) — an embedded key-value store with no external process dependency. All data (chain metadata, payload blobs, LRU accounting) lives in a single Pebble database directory.
 
-**Single binary** (development and compliance testing)
-- IndexStore: embedded SQLite (no external process)
-- PayloadStore: local filesystem
-- Proxy and Charon in the same process on `:8080` (proxy) and `:8081` (Charon internal API)
-- Not intended for production; data survives restarts but there is no horizontal scaling
+**In-memory Pebble** (`storage.data_dir` empty — conformance and compliance testing)
+- All data is lost on restart
+- Suitable for running the openresponses.org compliance suite and integration tests
 
-**Production — single Charon instance**
-- Proxy and Charon run as separate services (separate hosts or containers)
-- IndexStore: PostgreSQL
-- PayloadStore: object store (MinIO/S3)
-- Multiple proxy instances share one Charon service; Charon is the single source of truth for chain state
+**On-disk Pebble** (`storage.data_dir` set — development and production)
+- Data survives restarts; Pebble uses WAL-based crash recovery
+- Single-node only: Pebble does not support multi-writer access from separate processes
+- Multiple proxy instances may share one Charon process; Charon is the single source of truth for chain state
 
-**Production — scaled Charon**
-- Same as above but Charon itself is horizontally scaled behind a load balancer
-- Requires distributed locking or sharding for write-intent safety across Charon instances
-- IndexStore: PostgreSQL with connection pooling (write-intent coordination via advisory locks or row-level locking)
-- PayloadStore: distributed object store (MinIO cluster or S3)
-
-The distinction between the last two levels is whether Charon is a single bottleneck or itself scaled. Most deployments start with a single Charon instance and scale it only when write throughput is measurably constrained.
+Multi-instance Charon scaling is not currently implemented.
 
 ---
 
@@ -379,4 +301,4 @@ The distinction between the last two levels is whether Charon is a single bottle
 
 - **DAG history (branching conversations)**: The spec allows `previous_response_id` to form a DAG (two responses can share the same parent). Charon's storage design accommodates this structurally — the `chain_root_id` + `position` denormalisation and checkpoint blobs are keyed per chain, and separate branches simply produce separate keys. However, retrieving context from a non-linear DAG path is not specially optimised: each branch is walked independently, and there is no shared-prefix cache across branches. If DAG usage becomes common, branch-aware checkpoint sharing and a prefix cache would reduce redundant reads.
 
-- **Chunked streaming store**: Implemented. The proxy delivers output to Charon in configurable-size batches via `PATCH /responses/{id}` as inference tokens arrive. See [Streaming Store Modes](#streaming-store-modes).
+- **Chunked streaming store**: Implemented via the staging protocol. See [Streaming Ingest](#streaming-ingest).
