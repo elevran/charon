@@ -13,20 +13,23 @@ const (
 	DefaultCacheTTL      time.Duration = 5 * time.Minute
 )
 
-// cacheEntry holds one resolved chain. key is the leaf NodeID; container/list
-// elements do not carry their own key, so we duplicate it for O(1) removal.
+// cacheEntry holds one resolved turn keyed by the node's NodeID.
+// Storing single turns (not full chains) keeps cache storage O(N) in chain
+// length: resolving a chain of depth N populates N independent entries rather
+// than one entry containing N-1 ancestor blobs.
 type cacheEntry struct {
 	key       NodeID
-	nodes     []Node
-	turns     []Turn
+	turn      Turn
 	bytes     int64
 	expiresAt time.Time
 }
 
-// chainCache is a bounded LRU cache of resolved chains keyed by leaf NodeID.
+// chainCache is a bounded LRU cache of resolved turns keyed by NodeID.
 //
-// On hit, walkAndTouch skips LoadChain, GetBlobs, and the touch/BucketMove
-// commit. On miss, walkAndTouch re-walks the chain and stores the result here.
+// On resolve, walkAndTouch checks each node's ID in the cache. A hit skips
+// the GetBlobs call for that node. A miss fetches blobs from Pebble and
+// stores the result. The cache is populated per-node, not per-chain, so
+// cache storage is O(distinct nodes) regardless of chain depth.
 //
 // Bounded by total blob bytes (chainCache.used); when an insert pushes used
 // over maxBytes the LRU tail is evicted. An entry whose size alone exceeds
@@ -35,11 +38,12 @@ type cacheEntry struct {
 //
 // TTL is enforced on read; expired entries are dropped on access. The TTL
 // bounds staleness from mutations that do not invalidate the cache
-// (e.g. Complete, which changes a turn's ResponseBlob in Pebble).
+// (e.g. Complete, which changes a node's ResponseBlob in Pebble without
+// deleting it).
 //
-// Eager invalidation: invalidateNodes drops any entry whose nodes slice
-// contains a deleted NodeID. Called from the Commit path when
-// Transaction.DeleteNodes is non-empty.
+// Eager invalidation: invalidateNodes drops entries for deleted NodeIDs.
+// Called from the Commit path when Transaction.DeleteNodes is non-empty.
+// O(len(deleted)) — direct map lookup, no scan required.
 type chainCache struct {
 	mu       sync.Mutex
 	maxBytes int64
@@ -56,57 +60,48 @@ type chainCache struct {
 	evictions int64
 }
 
-// get returns a defensive shallow copy of the cached chain for leaf if present
-// and not expired. The slices are freshly allocated so callers may mutate the
-// returned Node/Turn elements (e.g. extend a blob field) without corrupting
-// the cached entry. The NodeID and Turn blob fields are still aliases between
-// the returned slice and the cached entry; deep-copy those if you need to
-// mutate them.
-func (c *chainCache) get(leaf NodeID) ([]Node, []Turn, bool) {
+// get returns the cached Turn for nodeID if present and not expired.
+func (c *chainCache) get(nodeID NodeID) (Turn, bool) {
 	if c == nil {
-		return nil, nil, false
+		return Turn{}, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	el, ok := c.items[leaf]
+	el, ok := c.items[nodeID]
 	if !ok {
 		c.recordMiss()
-		return nil, nil, false
+		return Turn{}, false
 	}
 	entry := el.Value.(*cacheEntry)
 	if c.ttl > 0 && !c.now().Before(entry.expiresAt) {
 		c.removeElementLocked(el, entry)
 		c.recordMiss()
-		return nil, nil, false
+		return Turn{}, false
 	}
 	c.order.MoveToFront(el)
 	c.recordHit()
-	nodes := append([]Node(nil), entry.nodes...)
-	turns := append([]Turn(nil), entry.turns...)
-	return nodes, turns, true
+	return entry.turn, true
 }
 
-// put inserts or refreshes the cached chain for leaf; bytes is the entry's
-// blob-byte cost. Evicts LRU-tail entries when used would exceed maxBytes.
-func (c *chainCache) put(leaf NodeID, nodes []Node, turns []Turn, bytes int64) {
+// put inserts or refreshes the cached turn for nodeID; bytes is the blob-byte cost.
+// Evicts LRU-tail entries when used would exceed maxBytes.
+func (c *chainCache) put(nodeID NodeID, turn Turn, bytes int64) {
 	if c == nil || c.maxBytes <= 0 {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if el, ok := c.items[leaf]; ok {
+	if el, ok := c.items[nodeID]; ok {
 		entry := el.Value.(*cacheEntry)
 		c.used += bytes - entry.bytes
-		entry.nodes = nodes
-		entry.turns = turns
+		entry.turn = turn
 		entry.bytes = bytes
 		entry.expiresAt = c.now().Add(c.ttl)
 		c.order.MoveToFront(el)
 	} else {
-		c.items[leaf] = c.order.PushFront(&cacheEntry{
-			key:       leaf,
-			nodes:     nodes,
-			turns:     turns,
+		c.items[nodeID] = c.order.PushFront(&cacheEntry{
+			key:       nodeID,
+			turn:      turn,
 			bytes:     bytes,
 			expiresAt: c.now().Add(c.ttl),
 		})
@@ -120,7 +115,7 @@ func (c *chainCache) put(leaf NodeID, nodes []Node, turns []Turn, bytes int64) {
 
 func (c *chainCache) enforceBoundLocked() {
 	// Keep at least one entry even if it alone exceeds the bound; a single
-	// oversized cached chain is still better than no cache at all.
+	// oversized cached turn is still better than no cache at all.
 	for c.used > c.maxBytes && c.order.Len() > 1 {
 		oldest := c.order.Back()
 		if oldest == nil {
@@ -134,34 +129,23 @@ func (c *chainCache) enforceBoundLocked() {
 	}
 }
 
-// invalidateNodes removes any entry whose nodes slice contains one of deleted.
-// Called from the Commit path when Transaction.DeleteNodes is non-empty.
-// O(entries * avgDepth * len(deleted)): three nested loops (cache entries x
-// deleted slice x entry nodes). In practice most invalidations touch a single
-// deleted node and the inner linear scan avoids a per-call map allocation.
+// invalidateNodes removes cached entries for each deleted NodeID.
+// O(len(deleted)) — direct map lookup, no full-cache scan.
 func (c *chainCache) invalidateNodes(deleted []NodeID) {
 	if c == nil || len(deleted) == 0 {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var next *list.Element
-	for el := c.order.Front(); el != nil; el = next {
-		next = el.Next()
-		entry := el.Value.(*cacheEntry)
-		for _, d := range deleted {
-			for _, n := range entry.nodes {
-				if n.ID == d {
-					c.removeElementLocked(el, entry)
-					c.evictions++
-					if c.metrics != nil {
-						c.metrics.cacheEvictionsTotal.Inc()
-					}
-					goto nextEntry
-				}
+	for _, d := range deleted {
+		if el, ok := c.items[d]; ok {
+			entry := el.Value.(*cacheEntry)
+			c.removeElementLocked(el, entry)
+			c.evictions++
+			if c.metrics != nil {
+				c.metrics.cacheEvictionsTotal.Inc()
 			}
 		}
-	nextEntry:
 	}
 }
 

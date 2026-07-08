@@ -13,27 +13,16 @@ import (
 	"github.com/elevran/charon/internal/inference"
 )
 
-// StoreBufferUnbuffered is a sentinel for storeBufferBytes meaning "no buffering".
-const StoreBufferUnbuffered = -1
-
 // Handler is the client-facing Responses API proxy handler.
 type Handler struct {
-	charon           *charon.Client
-	inf              *inference.Client
-	log              *slog.Logger
-	storeBufferBytes int // 0 = default(64K); StoreBufferUnbuffered = no buffering; N>0 = N byte threshold
+	charon charon.Backend
+	inf    inference.Backend
+	log    *slog.Logger
 }
 
 // NewHandler creates a Handler.
-// storeBufferBytes controls when the proxy flushes buffered output items to Charon:
-//   - 0  → use default (65536 = 64 KB)
-//   - StoreBufferUnbuffered (-1) → no buffering: flush every output item immediately
-//   - N>0 → flush when accumulated item JSON reaches N bytes
-func NewHandler(ch *charon.Client, inf *inference.Client, log *slog.Logger, storeBufferBytes int) *Handler {
-	if storeBufferBytes == 0 {
-		storeBufferBytes = 65536
-	}
-	return &Handler{charon: ch, inf: inf, log: log, storeBufferBytes: storeBufferBytes}
+func NewHandler(ch charon.Backend, inf inference.Backend, log *slog.Logger) *Handler {
+	return &Handler{charon: ch, inf: inf, log: log}
 }
 
 // RegisterHandlers mounts Responses API routes on mux.

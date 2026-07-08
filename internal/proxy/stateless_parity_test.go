@@ -120,7 +120,7 @@ func startParityStack(t *testing.T) (*httptest.Server, *capturingInfServer) {
 
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)
 	infClient := inference.New(infSrv.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log, 0)
+	proxyH := proxy.NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
 	proxy.RegisterHandlers(proxyMux, proxyH)
 	proxySrv := httptest.NewServer(proxyMux)

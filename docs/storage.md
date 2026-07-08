@@ -152,7 +152,7 @@ See [architecture docs](architecture.md#streaming-store-modes) for the full stre
 
 ## What This Design Does Not Solve
 
-- **Multi-instance deployments**: Pebble is single-process. Horizontal scaling of Charon requires a distributed backend (PostgreSQL + object store). This is not yet implemented.
+- **Multi-instance deployments**: Pebble is single-process. Horizontal scaling of Charon requires a distributed backend. This is not yet implemented.
 
 - **Durable KV cache across restarts**: The inference backend's KV cache is out of scope.
 

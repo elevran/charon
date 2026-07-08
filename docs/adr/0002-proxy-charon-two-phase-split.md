@@ -14,16 +14,17 @@ Alternative architectures considered:
 
 ## Decision
 
-Charon is an internal storage/resolution service (separate repository from the proxy). The proxy owns all client-facing concerns. They interact via a two-phase protocol over an internal HTTP API:
+Charon is an internal storage/resolution service (separate repository from the proxy). The proxy owns all client-facing concerns. They interact via a staging protocol over an internal HTTP API:
 
 **Continuation turns** (has `previous_response_id`):
-1. **Before inference** — `GET /responses/{previous_response_id}/context`: proxy receives `{reservation_id, flat_context[]}`. Charon assembles the history and mints a `reservation_id` for write-intent correlation. No write-intent is created yet.
+1. **Open staging** — `POST /staging?prev={previous_response_id}`: proxy receives `{staging_id, flat_context[]}`. Charon assembles history and creates a staging record.
 2. **Inference** — proxy forwards to the inference server, which assigns the canonical response ID in its first streaming chunk.
-3. **After inference** — `POST /responses/{canonical_id}`: proxy sends `{reservation_id, previous_response_id, input[], output[], status}`; Charon atomically creates the write-intent and commits to durable storage.
+3. **Append chunks** — proxy delivers response bytes incrementally via `PUT /staging/{staging_id}/chunks/{k}`.
+4. **Complete** — `PUT /staging/{staging_id}/complete?response_id={canonical_id}&total={N}`: Charon commits the node atomically.
 
 **New chains** (no `previous_response_id`):
-- No resolve call. Inference server assigns the canonical response ID.
-- After inference: `POST /responses/{canonical_id}` (no `reservation_id`) as above (or skipped if `store: false`).
+- No staging call needed. Inference server assigns the canonical response ID.
+- After inference: buffered `POST /responses` (or staging protocol as above; skipped if `store: false`).
 
 ## Reasons
 
@@ -39,8 +40,8 @@ Charon is an internal storage/resolution service (separate repository from the p
 
 **Two network hops per request** (proxy → Charon resolve, proxy → inference, proxy → Charon store). In the single-binary deployment, these are in-process calls with no real network cost. In multi-instance deployment, the resolve call adds latency proportional to chain-walk time, not raw network RTT.
 
-**Canonical IDs owned by the inference server.** The inference server (vLLM, etc.) assigns the canonical response ID returned in its first streaming chunk. The proxy uses this ID in `response.created` to the client and in the store call to Charon. Charon mints only a short-lived `reservation_id` at resolve time for write-intent correlation — this is never client-visible. When the inference backend returns a non-`resp_` format ID (e.g. `chatcmpl-`), the proxy translates it before forwarding. The `resp_` format convention is defined by Charon and followed by all parties.
+**Canonical IDs owned by the inference server.** The inference server (vLLM, etc.) assigns the canonical response ID returned in its first streaming chunk. The proxy uses this ID in `response.created` to the client and in the store call to Charon. Charon mints only a short-lived `staging_id` at resolve time for ingest correlation — this is never client-visible. When the inference backend returns a non-`resp_` format ID (e.g. `chatcmpl-`), the proxy translates it before forwarding.
 
-**No write-intent cleanup needed for `store: false`.** Because write-intents are created only at store time (not at resolve time), a `reservation_id` minted at resolve that the proxy never stores leaves no orphaned state in Charon.
+**No staging cleanup needed for `store: false`.** Because staging records are created only at `POST /staging` time (for continuations), a `staging_id` minted at resolve that the proxy never commits leaves no orphaned chain node — the staging reaper cleans up the record TTL.
 
-**Chunked streaming store is deferred.** In Phase 1, the proxy buffers the full inference output before the store call. Delivering output to Charon in chunks (from N-token batches to single tokens) would reduce peak proxy memory and improve recovery granularity if the proxy crashes mid-stream, but requires a streaming ingest protocol in Charon and additional write-intent phases (`stream_open`). Deferred to post-Phase-1; the design is specified in [Streaming Store Modes](../architecture.md#streaming-store-modes).
+**Chunked streaming store is implemented.** The proxy delivers output to Charon in chunks via the staging protocol (`PUT /staging/{id}/chunks/{k}` + `PUT /staging/{id}/complete`). See [Streaming Ingest](../architecture.md#streaming-ingest).

@@ -25,10 +25,9 @@ type fileProxyConfig struct {
 }
 
 type fileInferenceConfig struct {
-	BaseURL          string `json:"base_url"`
-	APIKey           string `json:"api_key"`
-	TimeoutSeconds   int    `json:"timeout_seconds"`
-	StoreBufferBytes int    `json:"store_buffer_bytes"`
+	BaseURL        string `json:"base_url"`
+	APIKey         string `json:"api_key"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
 }
 
 type fileCharonConfig struct {
@@ -70,9 +69,6 @@ func applyFileDefaults(fc *fileConfig) {
 	}
 	if fc.Proxy.Inference.TimeoutSeconds <= 0 {
 		fc.Proxy.Inference.TimeoutSeconds = 120
-	}
-	if fc.Proxy.Inference.StoreBufferBytes == 0 {
-		fc.Proxy.Inference.StoreBufferBytes = 65536
 	}
 	if fc.Charon.Listen == "" {
 		fc.Charon.Listen = ":8081"
@@ -124,8 +120,7 @@ type ServerOptions struct {
 	ProxyCharonURL string
 
 	// Inference sub-settings (config-file only — deep tuning knobs).
-	InferenceTimeoutSeconds   int
-	InferenceStoreBufferBytes int
+	InferenceTimeoutSeconds int
 
 	// Charon internal API.
 	CharonListen string
@@ -157,14 +152,13 @@ type TelemetryOptions struct {
 // NewServerOptions returns a ServerOptions pre-filled with built-in defaults.
 func NewServerOptions() *ServerOptions {
 	return &ServerOptions{
-		ProxyListen:               ":8080",
-		ProxyBackend:              "http://localhost:11434",
-		InferenceTimeoutSeconds:   120,
-		InferenceStoreBufferBytes: 65536,
-		CharonListen:              ":8081",
-		DataDir:                   "./data",
-		TTLDays:                   30,
-		WorkerTTLInterval:         time.Hour,
+		ProxyListen:             ":8080",
+		ProxyBackend:            "http://localhost:11434",
+		InferenceTimeoutSeconds: 120,
+		CharonListen:            ":8081",
+		DataDir:                 "./data",
+		TTLDays:                 30,
+		WorkerTTLInterval:       time.Hour,
 		Telemetry: TelemetryOptions{
 			CharonService: "charon",
 			ProxyService:  "charon-proxy",
@@ -219,7 +213,6 @@ func (o *ServerOptions) Complete(fs *flag.FlagSet) error {
 	o.ProxyAPIKey = fc.Proxy.Inference.APIKey
 	// Deep inference knobs are config-file-only.
 	o.InferenceTimeoutSeconds = fc.Proxy.Inference.TimeoutSeconds
-	o.InferenceStoreBufferBytes = fc.Proxy.Inference.StoreBufferBytes
 
 	if !setFlags["listen"] {
 		o.CharonListen = fc.Charon.Listen

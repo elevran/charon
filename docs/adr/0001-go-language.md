@@ -4,7 +4,7 @@
 
 ## Context
 
-The workload is I/O-bound: SQLite writes, filesystem reads, HTTP handling, zstd compression. The primary deployment target is on-premises infrastructure for AI teams running self-hosted inference backends. Charon is an internal service (separate repo from the client-facing proxy).
+The workload is I/O-bound: embedded KV writes (Pebble), HTTP handling, zstd compression. The primary deployment target is on-premises infrastructure for AI teams running self-hosted inference backends. Charon is an internal service (separate repo from the client-facing proxy).
 
 The core alternatives were Go and Rust.
 
@@ -16,9 +16,9 @@ Go.
 
 **No measurable performance gap for this workload.** Rust's advantages — zero-cost abstractions, deterministic allocation, fine-grained memory control — pay dividends on CPU-bound code. For I/O-bound work that blocks on disk or network syscalls, Go and Rust produce programs with effectively identical runtime characteristics.
 
-**`modernc.org/sqlite` is pure Go with no CGo.** It cross-compiles to any target with `GOOS`/`GOARCH` and produces a fully static binary with `CGO_ENABLED=0`. In Rust, `rusqlite` with the `bundled` feature requires a C compiler at build time; cross-compiling to a different target requires a configured C cross-toolchain. This friction simply does not exist in Go and is the single most important practical difference for the single-binary deployment goal.
+**Pure-Go storage stack with no CGo.** The storage layer uses [Pebble](https://github.com/cockroachdb/pebble), a pure-Go embedded KV engine. It cross-compiles to any target with `GOOS`/`GOARCH` and produces a fully static binary with `CGO_ENABLED=0`. The Rust equivalent would require C toolchain dependencies for embedded storage. This friction simply does not exist in Go and is the single most important practical difference for the single-binary deployment goal.
 
-**Goroutines fit the concurrency model naturally.** Background write-intent recovery, TTL expiry, and per-request chain-walk goroutines are all naturally expressed as goroutines communicating over channels with `context.Context` for cancellation. The Rust equivalent — `tokio` tasks, `Arc<Mutex<State>>`, `await` across lock boundaries — is correct but adds ceremony to sequential background bookkeeping.
+**Goroutines fit the concurrency model naturally.** Background staging reaper, TTL expiry, and per-request chain-walk goroutines are all naturally expressed as goroutines communicating over channels with `context.Context` for cancellation. The Rust equivalent — `tokio` tasks, `Arc<Mutex<State>>`, `await` across lock boundaries — is correct but adds ceremony to sequential background bookkeeping.
 
 **The repository is already Go.** Minimizes contributor ramp-up.
 

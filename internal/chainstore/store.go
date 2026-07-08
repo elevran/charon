@@ -44,11 +44,12 @@ type Config struct {
 	// Set to 0 to disable staging reaping. Default when non-zero: 1h.
 	StagingTTL time.Duration
 
-	// In-memory LRU cache for resolved chains (Option B: full-context cache).
-	// On Resolve / ResolveAndStage the cache is consulted before LoadChain +
-	// GetBlobs; a hit eliminates all Pebble I/O for that call. Eager
-	// invalidation runs on the Commit path when Transaction.DeleteNodes is
-	// non-empty (capacity eviction, TTL reap, or Delete).
+	// In-memory LRU cache of per-node blobs.
+	// Each entry holds the blob for one chain node. On Resolve / ResolveAndStage,
+	// LoadChain still runs (walking the linked list and touching LastAccessUnix /
+	// BucketID in Pebble for every node), but blob fetches for cached nodes skip
+	// GetBlobs. Eager invalidation runs on the Commit path when
+	// Transaction.DeleteNodes is non-empty (capacity eviction, TTL reap, Delete).
 	//
 	// CacheMaxBytes <= 0 disables the cache entirely (zero-value Config
 	// preserves the original "no caching" behaviour). When > 0, the default
@@ -57,15 +58,14 @@ type Config struct {
 	//
 	// CacheTTL <= 0 falls back to DefaultCacheTTL (5 min). Set to 0 explicitly
 	// only if CacheMaxBytes is also 0 (cache disabled). The TTL bounds
-	// staleness from mutations that do not invalidate the cache (Complete,
-	// for example, mutates a turn's ResponseBlob in Pebble but does not
-	// invalidate cached entries for the same leaf).
+	// staleness from mutations that bypass cache invalidation (Complete, for
+	// example, mutates a node's ResponseBlob in Pebble but does not invalidate
+	// that node's cache entry).
 	//
-	// CacheTTL must be strictly less than TTL (when TTL > 0): a cache hit
-	// skips the LRU touch/BucketMove commit, so LastAccessUnix is not refreshed
-	// in Pebble for nodes served from the cache. If CacheTTL >= TTL, the
-	// background ttlReap would delete those Pebble nodes while the cache still
-	// serves them. New rejects that configuration with an error.
+	// CacheTTL must be strictly less than TTL (when TTL > 0): the chain walk
+	// on every resolve still touches LastAccessUnix in Pebble, but if CacheTTL
+	// >= TTL the background ttlReap could delete Pebble nodes that the cache
+	// still serves. New rejects that configuration with an error.
 	CacheMaxBytes int64
 	CacheTTL      time.Duration
 }
@@ -493,16 +493,11 @@ func (s *Store) Resolve(ctx context.Context, responseID, tenantKey string) (turn
 // returns (nodes leaf-first, turns root-first). Both callers — Resolve and
 // ResolveAndStage — need the leaf node's Depth, so nodes is returned alongside turns.
 //
-// Cache integration: a hit on the resolved-chain cache (s.cache) short-circuits
-// LoadChain, GetBlobs, and the touch/BucketMove commit that follows. The cache
-// has its own TTL (Config.CacheTTL) and is eagerly invalidated from the Commit
-// path when DeleteNodes is non-empty, so a hit is a safe O(1) read of the cached
-// nodes/turns slices.
+// Cache integration: for each node in the chain, s.cache is checked by NodeID.
+// A hit skips GetBlobs for that node; a miss fetches blobs from Pebble and
+// stores the result. Storing per-node turns (not per-chain) keeps cache storage
+// O(distinct nodes) regardless of chain depth — no ancestor blobs are duplicated.
 func (s *Store) walkAndTouch(ctx context.Context, leaf NodeID) (nodes []Node, turns []Turn, err error) {
-	if cachedNodes, cachedTurns, ok := s.cache.get(leaf); ok {
-		return cachedNodes, cachedTurns, nil
-	}
-
 	nodes, err = s.backend.LoadChain(ctx, leaf)
 	if err != nil {
 		return nil, nil, err
@@ -513,23 +508,25 @@ func (s *Store) walkAndTouch(ctx context.Context, leaf NodeID) (nodes []Node, tu
 	currentBucket := s.cfg.BucketFor(now)
 
 	turns = make([]Turn, len(nodes))
-	updatedNodes := make([]Node, len(nodes))
+	updatedNodes := make([]Node, 0, len(nodes))
 	bucketMoves := make([]BucketMove, 0, len(nodes))
-	var entryBytes int64
 
 	for i, node := range nodes {
-		var reqBlob, respBlob []byte
-		reqBlob, respBlob, err = s.backend.GetBlobs(ctx, node)
-		if err != nil {
-			return nil, nil, err
+		t, cached := s.cache.get(node.ID)
+		if !cached {
+			var reqBlob, respBlob []byte
+			reqBlob, respBlob, err = s.backend.GetBlobs(ctx, node)
+			if err != nil {
+				return nil, nil, err
+			}
+			t = Turn{
+				ResponseID:   node.ResponseID,
+				RequestBlob:  reqBlob,
+				ResponseBlob: respBlob,
+			}
 		}
 		// nodes is leaf-first; turns must be root-first.
-		turns[len(nodes)-1-i] = Turn{
-			ResponseID:   node.ResponseID,
-			RequestBlob:  reqBlob,
-			ResponseBlob: respBlob,
-		}
-		entryBytes += int64(len(reqBlob)) + int64(len(respBlob))
+		turns[len(nodes)-1-i] = t
 
 		updated := node
 		updated.LastAccessUnix = nowUnix
@@ -541,20 +538,30 @@ func (s *Store) walkAndTouch(ctx context.Context, leaf NodeID) (nodes []Node, tu
 			})
 			updated.BucketID = currentBucket
 		}
-		updatedNodes[i] = updated
+		// Only include nodes that need a metadata update (LRU touch).
+		if updated != node {
+			updatedNodes = append(updatedNodes, updated)
+		}
 	}
 
-	if err := s.backend.Commit(ctx, Transaction{
-		PutNodes:    updatedNodes,
-		BucketMoves: bucketMoves,
-	}); err != nil {
-		return nil, nil, err
+	if len(updatedNodes) > 0 || len(bucketMoves) > 0 {
+		if err := s.backend.Commit(ctx, Transaction{
+			PutNodes:    updatedNodes,
+			BucketMoves: bucketMoves,
+		}); err != nil {
+			return nil, nil, err
+		}
 	}
 
-	// Populate the cache after a successful commit. Caching before commit
-	// would risk a Pebble write failure leaving the cache out of sync with
-	// the store. Complete does not invalidate; TTL bounds that staleness.
-	s.cache.put(leaf, nodes, turns, entryBytes)
+	// Populate the per-node cache after a successful commit (or when no commit
+	// was needed). Caching before commit risks a Pebble failure leaving the
+	// cache out of sync; Complete does not invalidate, TTL bounds that staleness.
+	for i, node := range nodes {
+		// turns is root-first, nodes is leaf-first.
+		t := turns[len(nodes)-1-i]
+		bytes := int64(len(t.RequestBlob)) + int64(len(t.ResponseBlob))
+		s.cache.put(node.ID, t, bytes)
+	}
 	return nodes, turns, nil
 }
 
@@ -604,7 +611,7 @@ func (s *Store) ResolveAndStage(ctx context.Context, previousResponseID, tenantK
 		RequestBlobSize: uint32(len(requestBlob)),
 		// Phase 6: ResponseBlobID is pre-allocated so PUT-chunk batches can use
 		// it directly as a chunk namespace.  It is only persisted in the
-		// final Node when StreamStore.Commit (or StoreWithStaging) runs.
+		// final Node when CompleteStreaming runs.
 		ResponseBlobID: respBlobID,
 		CreatedAt:      now.Unix(),
 		LastAccessUnix: now.Unix(),

@@ -4,7 +4,7 @@ Charon is an internal context-store service for the [OpenAI Responses API](https
 
 - Resolves `previous_response_id` chains into the flat context an inference backend needs
 - Persists response payloads (input items, output items) to durable storage
-- Manages write-intent safety and background TTL/recovery workers
+- Manages background TTL expiry and staging record reaping
 
 Charon is **not** the client-facing API layer. A proxy sits in front of Charon, owns the Responses API surface (REST, SSE, WebSocket), and calls Charon to resolve context before inference and to store results after.
 
@@ -29,13 +29,7 @@ The proxy included in this repository is provided for testing and to demonstrate
 ./charon --config config.yaml
 ```
 
-Without a config file, Charon starts with all defaults: in-memory storage, Charon internal API on `:8081`, proxy layer **disabled**.
-
-### Subcommands
-
-```
-./charon reconcile --config config.yaml   # one-shot write-intent recovery sweep
-```
+Without a config file, Charon starts with all defaults: on-disk Pebble storage in `./data`, Charon internal API on `:8081`, proxy layer **disabled**.
 
 ---
 
@@ -76,7 +70,7 @@ proxy:
     base_url: "http://localhost:11434"
     api_key: ""
     timeout_seconds: 120
-    store_buffer_bytes: 65536 # 0 -> 64 KB default; -1 -> flush every item
+    timeout_seconds: 120
 ```
 
 ---
@@ -114,7 +108,6 @@ proxy:
 | `inference.base_url` | `http://localhost:11434` | Stateless Responses API inference backend |
 | `inference.api_key` | `` | Bearer token for the inference backend (empty = no auth) |
 | `inference.timeout_seconds` | `120` | Inference request timeout |
-| `inference.store_buffer_bytes` | `65536` | Proxy-to-Charon chunk buffer size. `0` -> 64 KB default; `-1` -> flush every output item immediately |
 
 ---
 
