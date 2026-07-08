@@ -53,7 +53,7 @@ func startStack(t *testing.T) *stack {
 	// Proxy
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)
 	infClient := inference.New(mockInf.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log, 0)
+	proxyH := proxy.NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
 	proxy.RegisterHandlers(proxyMux, proxyH)
 	proxySrv := httptest.NewServer(proxyMux)

@@ -29,9 +29,9 @@ func chunkData(idx int, size int) []byte {
 	return out
 }
 
-// TestStreamStore_SmallSingleChunk verifies the small-stream happy path:
+// TestCompleteStreaming_SmallSingleChunk verifies the small-stream happy path:
 // one batch (one chunk) → manifest → Retrieve returns identical bytes.
-func TestStreamStore_SmallSingleChunk(t *testing.T) {
+func TestCompleteStreaming_SmallSingleChunk(t *testing.T) {
 	s := openMemStore(t, chainstore.Config{})
 	ctx := context.Background()
 
@@ -41,7 +41,8 @@ func TestStreamStore_SmallSingleChunk(t *testing.T) {
 
 	_, err = s.AppendChunk(ctx, stagingID, 0, one)
 	require.NoError(t, err)
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_small", "", 1, uint32(len(one))))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_small", "", uint32(len(one)))
+	require.NoError(t, err)
 
 	node, turn, err := s.Retrieve(ctx, "r_small", "")
 	require.NoError(t, err)
@@ -113,9 +114,9 @@ func TestAppendChunk_PartialLastChunk(t *testing.T) {
 	assert.Equal(t, append(c0, c1...), turn.ResponseBlob)
 }
 
-// TestStreamStore_CrashBeforeManifest simulates a proxy crash by writing chunks
+// TestCompleteStreaming_CrashBeforeManifest simulates a proxy crash by writing chunks
 // but never committing; the staging TTL reaper must then clean them up.
-func TestStreamStore_CrashBeforeManifest(t *testing.T) {
+func TestCompleteStreaming_CrashBeforeManifest(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
 	const stagingTTL = time.Hour
 	s, b := openMemStoreAndBackend(t, chainstore.Config{Clock: clk, StagingTTL: stagingTTL})
@@ -152,9 +153,9 @@ func TestStreamStore_CrashBeforeManifest(t *testing.T) {
 	assert.True(t, errors.Is(err, chainstore.ErrUnknownStaging), "staging record must be gone")
 }
 
-// TestStreamStore_MixedSingleAndChunked verifies that a chain containing both
+// TestCompleteStreaming_MixedSingleAndChunked verifies that a chain containing both
 // single-blob and chunked nodes resolves correctly via Retrieve/Resolve.
-func TestStreamStore_MixedSingleAndChunked(t *testing.T) {
+func TestCompleteStreaming_MixedSingleAndChunked(t *testing.T) {
 	s := openMemStore(t, chainstore.Config{})
 	ctx := context.Background()
 
@@ -170,7 +171,8 @@ func TestStreamStore_MixedSingleAndChunked(t *testing.T) {
 	_, err = s.AppendChunk(ctx, stagingID, 1, []byte("chunk1-b"))
 	require.NoError(t, err)
 	const sz = uint32(len("chunk1-a") + len("chunk1-b"))
-	require.NoError(t, s.StreamStore(ctx, stagingID, "t1", "", 2, sz))
+	_, err = s.CompleteStreaming(ctx, stagingID, "t1", "", sz)
+	require.NoError(t, err)
 
 	// Turn 2: single-blob again.
 	require.NoError(t, s.Store(ctx, "t2", "t1", "", []byte("req2")))
@@ -184,9 +186,9 @@ func TestStreamStore_MixedSingleAndChunked(t *testing.T) {
 	assert.Equal(t, []byte("resp2"), turns[2].ResponseBlob, "single-blob turn 2")
 }
 
-// TestStreamStore_DeleteChunkedNode verifies that deleting a chunked node
+// TestCompleteStreaming_DeleteChunkedNode verifies that deleting a chunked node
 // removes its chunks (and manifest) — no stranded blobs left behind.
-func TestStreamStore_DeleteChunkedNode(t *testing.T) {
+func TestCompleteStreaming_DeleteChunkedNode(t *testing.T) {
 	s, b := openMemStoreAndBackend(t, chainstore.Config{})
 	ctx := context.Background()
 
@@ -196,7 +198,8 @@ func TestStreamStore_DeleteChunkedNode(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.AppendChunk(ctx, stagingID, 1, chunkData(1, 4096))
 	require.NoError(t, err)
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_del", "", 2, 8192))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_del", "", 8192)
+	require.NoError(t, err)
 
 	node, err := b.GetNode(ctx, chainstore.NodeIDFor("", "r_del"))
 	require.NoError(t, err)
@@ -247,12 +250,12 @@ func TestAppendChunk_IdempotentReplay(t *testing.T) {
 	assert.Equal(t, first, turn.ResponseBlob, "replay is a no-op; first write's data wins")
 }
 
-// TestStreamStore_PeakHeapBenchmark streams a 50MB blob in 2MB chunks and
+// TestCompleteStreaming_PeakHeapBenchmark streams a 50MB blob in 2MB chunks and
 // asserts that the steady-state heap usage (after GC) is bounded.
 // Plan target: peak RAM ≈ one chunk buffer (2MB), NOT one response blob (50MB).
 // We measure before-and-after committed heap delta; the test fails if the
 // steady-state heap grows without bound across chunks.
-func TestStreamStore_PeakHeapBenchmark(t *testing.T) {
+func TestCompleteStreaming_PeakHeapBenchmark(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping peak-heap benchmark under -short")
 	}
@@ -285,7 +288,8 @@ func TestStreamStore_PeakHeapBenchmark(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_bench", "", uint32(numChunks), uint32(totalSize)))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_bench", "", uint32(totalSize))
+	require.NoError(t, err)
 
 	runtime.GC()
 	var final runtime.MemStats
@@ -303,15 +307,15 @@ func TestStreamStore_PeakHeapBenchmark(t *testing.T) {
 		"steady-state heap growth must stay below 40MB (got %d bytes)", delta)
 }
 
-// TestStreamStore_CommitUnknownStagingReturnsErrUnknownStaging: committing a
+// TestCompleteStreaming_CommitUnknownStagingReturnsErrUnknownStaging: committing a
 // bogus stagingID must propagate ErrUnknownStaging so callers can distinguish
 // retry-able conditions from real errors.
-func TestStreamStore_CommitUnknownStagingReturnsErrUnknownStaging(t *testing.T) {
+func TestCompleteStreaming_CommitUnknownStagingReturnsErrUnknownStaging(t *testing.T) {
 	s := openMemStore(t, chainstore.Config{})
 	ctx := context.Background()
 
 	bogus := uuid.New().String()
-	err := s.StreamStore(ctx, bogus, "r1", "", 1, 4)
+	_, err := s.CompleteStreaming(ctx, bogus, "r1", "", 4)
 	assert.True(t, errors.Is(err, chainstore.ErrUnknownStaging))
 }
 
@@ -350,8 +354,8 @@ func TestAppendChunkAndCommit_ThreeChunks(t *testing.T) {
 	assert.Equal(t, expected, turn.ResponseBlob, "chunks must reassemble in offset order")
 }
 
-// TestStreamStoreCommit_UnknownStaging: bogus stagingID returns ErrUnknownStaging.
-func TestStreamStoreCommit_UnknownStaging(t *testing.T) {
+// TestCompleteStreaming_UnknownStaging: bogus stagingID returns ErrUnknownStaging.
+func TestCompleteStreaming_UnknownStaging(t *testing.T) {
 	s := openMemStore(t, chainstore.Config{})
 	ctx := context.Background()
 
@@ -404,8 +408,7 @@ func resolveStagingBlobID(t *testing.T, b *chainstorepebble.Backend, stagingID s
 }
 
 // TestAppendChunk_InternalSplitting: a 1 MB HTTP body is stored as four
-// 256 KB Pebble chunks. We commit the chunks via StreamStore to also verify
-// that read-back reassembles them correctly via the chunked read path.
+// 256 KB Pebble chunks. Read-back must reassemble them correctly via the chunked read path.
 func TestAppendChunk_InternalSplitting(t *testing.T) {
 	s, b := openMemStoreAndBackend(t, chainstore.Config{})
 	ctx := context.Background()
@@ -433,7 +436,8 @@ func TestAppendChunk_InternalSplitting(t *testing.T) {
 	}
 
 	// Commit so the retrieve path can reassemble.
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_split1mb", "", 4, uint32(bodySize)))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_split1mb", "", uint32(bodySize))
+	require.NoError(t, err)
 	node, turn, err := s.Retrieve(ctx, "r_split1mb", "")
 	require.NoError(t, err)
 	assert.Equal(t, body, turn.ResponseBlob, "1 MB reassembled from 4 chunks")

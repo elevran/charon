@@ -8,45 +8,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// PeekStreamingState inspects a staging record and reports whether it carries
-// pre-existing chunks. When chunks are present, the caller commits via
-// StreamStore; otherwise via StoreWithStaging. A staging record has chunks
-// iff ListChunks returns a non-empty slice under the staging node's
-// ResponseBlobID (the chunk namespace is pre-allocated when the staging
-// node is created by ResolveAndStage).
-//
-// A missing staging record (ErrUnknownStaging) is treated as "no chunks" —
-// callers fall through to the legacy single-blob path. Other errors
-// propagate.
-func (s *Store) PeekStreamingState(ctx context.Context, stagingID string) (hasChunks bool, chunkCount uint32, totalSize uint32, err error) {
-	sid, err := parseStagingIDBlobID(stagingID)
-	if err != nil {
-		return false, 0, 0, fmt.Errorf("chainstore.PeekStreamingState: %w", err)
-	}
-	staged, err := s.backend.GetStagingNode(ctx, sid)
-	if err != nil {
-		if errors.Is(err, ErrUnknownStaging) {
-			return false, 0, 0, nil
-		}
-		return false, 0, 0, fmt.Errorf("chainstore.PeekStreamingState: %w", err)
-	}
-	if staged.ResponseBlobID == (BlobID{}) {
-		return false, 0, 0, nil
-	}
-	chunks, err := s.backend.ListChunks(ctx, staged.ResponseBlobID)
-	if err != nil {
-		return false, 0, 0, fmt.Errorf("chainstore.PeekStreamingState: %w", err)
-	}
-	if len(chunks) == 0 {
-		return false, 0, 0, nil
-	}
-	var total uint32
-	for _, c := range chunks {
-		total += uint32(len(c.Data))
-	}
-	return true, uint32(len(chunks)), total, nil
-}
-
 // internalChunkSize is the maximum size of a single Pebble chunk. HTTP
 // bodies (up to 1 MB default / 4 MB max) are split into chunks of at most
 // this many bytes. The read path streams chunks directly from the Pebble
@@ -96,8 +57,8 @@ func splitChunks(blobID BlobID, firstOffset uint32, data []byte) []ChunkEntry {
 // (ErrChunkOutOfRange) — the proxy must re-send the missing chunks
 // before the gap can be filled.
 //
-// The body is invisible to reads until the manifest is written (Complete
-// or StreamStoreCommit) — GetManifest returns ErrNotFound before that.
+// The body is invisible to reads until the manifest is written by CompleteStreaming —
+// GetManifest returns ErrNotFound before that.
 //
 // Replays at the same k are safe: the Pebble Set is last-write-wins on
 // the chunk key, but the server-level dedup skips rewriting identical
@@ -263,76 +224,6 @@ func (s *Store) AbortStaging(ctx context.Context, stagingID string) error {
 	if err := s.backend.Commit(ctx, tx); err != nil {
 		return fmt.Errorf("chainstore.AbortStaging: commit: %w", err)
 	}
-	return nil
-}
-
-// StreamStore commits a chunked blob (legacy caller-supplied count path).
-// Writes the manifest and the final Node (BlobType=Chunked) in one atomic
-// transaction and deletes the staging record. The caller passes the
-// assembled chunk count and total byte size — the manifest is the source
-// of truth, NOT a re-scan of the chunks (which would be an unbounded
-// O(N) read). Prefer CompleteStreaming for new callers (it derives the
-// chunk count from the server-tracked pfxStagingNext and requires the
-// responseID).
-//
-// tenantKey binds the new node into the parent chain.
-//
-// Crash safety:
-//   - Crash before any chunk lands: orphaned staging record (no chunks).
-//   - Crash after some chunks, before manifest: orphan chunks under the
-//     staging ID's ResponseBlobID — reaped by the staging TTL reaper.
-//   - Crash after manifest: chunked blob is fully visible; staging reaper
-//     finds and deletes the (now-stale) staging record on next run.
-func (s *Store) StreamStore(ctx context.Context, stagingID, responseID, tenantKey string, chunkCount uint32, totalSize uint32) error {
-	if len(responseID) > responseIDMaxLen {
-		return fmt.Errorf("chainstore.StreamStore: responseID exceeds %d bytes (len=%d)", responseIDMaxLen, len(responseID))
-	}
-	sid, err := parseStagingIDBlobID(stagingID)
-	if err != nil {
-		return fmt.Errorf("chainstore.StreamStore: %w", err)
-	}
-	staged, err := s.backend.GetStagingNode(ctx, sid)
-	if err != nil {
-		return fmt.Errorf("chainstore.StreamStore: staging lookup: %w", err)
-	}
-
-	id := nodeID(tenantKey, responseID)
-	respBlobID := staged.ResponseBlobID
-	if respBlobID == (BlobID{}) {
-		return errors.New("chainstore.StreamStore: staging node missing ResponseBlobID namespace")
-	}
-
-	node := staged
-	node.ID = id
-	node.ResponseID = responseID
-	node.ResponseBlobID = respBlobID
-	node.ResponseBlobSize = totalSize
-	node.Status = NodeStatusCompleted
-	node.BlobType = BlobTypeChunked
-
-	tx := Transaction{
-		PutNodes: []Node{node},
-		PutManifests: []ManifestEntry{{
-			BlobID:     respBlobID,
-			ChunkCount: chunkCount,
-			TotalSize:  totalSize,
-		}},
-		DeleteStagingNodes: []BlobID{sid},
-		StatsDelta: StatsDelta{
-			EntryDelta: 1,
-			BytesDelta: int64(totalSize) + int64(staged.RequestBlobSize),
-		},
-	}
-
-	if node.ParentID != (NodeID{}) {
-		tx.PutChildren = []ChildEntry{{Parent: node.ParentID, Child: id}}
-	}
-
-	if err := s.backend.Commit(ctx, tx); err != nil {
-		return fmt.Errorf("chainstore.StreamStore: commit: %w", err)
-	}
-
-	s.applyStatsAndMaybeNotify(tx.StatsDelta)
 	return nil
 }
 

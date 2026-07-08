@@ -46,11 +46,18 @@ func run() error {
 		return err
 	}
 
+	reg := prometheus.NewRegistry()
+	if err := metrics.Register(reg, ""); err != nil {
+		log.Error("register metrics", "err", err)
+		return err
+	}
+
 	cfg := chainstore.Config{
 		MaxEntries:  opts.MaxResponses,
 		MaxBytes:    int64(opts.MaxPayload),
 		TTL:         time.Duration(opts.TTLDays) * 24 * time.Hour,
 		TTLInterval: opts.WorkerTTLInterval,
+		Registerer:  reg,
 		Log:         log,
 	}
 
@@ -91,12 +98,6 @@ func run() error {
 		}
 	}
 
-	reg := prometheus.NewRegistry()
-	if err := metrics.Register(reg, ""); err != nil {
-		log.Error("register metrics", "err", err)
-		return err
-	}
-
 	// ── Charon internal API server (always starts) ─────────────────────────
 	charonH := api.NewHandler(svc, log).WithMaxBodyBytes(int64(opts.MaxPayload))
 	charonSrv := api.NewServerWithRegistry(opts.CharonListen, charonH, log, reg, charonTP)
@@ -107,7 +108,7 @@ func run() error {
 		timeout := time.Duration(opts.InferenceTimeoutSeconds) * time.Second
 		infClient := inference.New(opts.ProxyBackend, opts.ProxyAPIKey, timeout)
 		charonClient := charonpkg.New(opts.ProxyCharonURL, timeout)
-		proxyH := proxy.NewHandler(charonClient, infClient, log, opts.InferenceStoreBufferBytes)
+		proxyH := proxy.NewHandler(charonClient, infClient, log)
 		proxyMux := http.NewServeMux()
 		proxy.RegisterHandlers(proxyMux, proxyH)
 		proxySrv = api.NewServerFromMux(opts.ProxyListen, proxyMux, log, proxyTP)
