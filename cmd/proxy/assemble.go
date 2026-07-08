@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/elevran/charon/internal/inference"
+	"github.com/elevran/charon/cmd/proxy/inference"
 )
 
 // marshalStoredResponse serialises an inference response and request metadata

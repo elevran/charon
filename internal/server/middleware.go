@@ -9,8 +9,6 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
-
-	"github.com/elevran/charon/internal/metrics"
 )
 
 // Middleware is a function that wraps an http.Handler.
@@ -76,8 +74,8 @@ func RequestLogger(log *slog.Logger) Middleware {
 				"duration_ms", dur.Milliseconds(),
 			)
 			endpoint := r.Method + " " + r.Pattern
-			metrics.HTTPRequestsTotal.WithLabelValues(endpoint, strconv.Itoa(status)).Inc()
-			metrics.HTTPRequestDuration.WithLabelValues(endpoint).Observe(dur.Seconds())
+			requestsTotal.WithLabelValues(endpoint, strconv.Itoa(status)).Inc()
+			requestDuration.WithLabelValues(endpoint).Observe(dur.Seconds())
 		})
 	}
 }

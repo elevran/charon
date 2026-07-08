@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/elevran/charon/internal/inference"
+	"github.com/elevran/charon/cmd/proxy/inference"
 )
 
 var ctx = context.Background()
