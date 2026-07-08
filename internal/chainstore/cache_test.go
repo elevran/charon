@@ -101,9 +101,9 @@ func TestCache_HitOnRepeat(t *testing.T) {
 // causes the cache to evict LRU entries; total bytes stay within (or near)
 // the bound.
 func TestCache_BoundEnforced(t *testing.T) {
-	// Each turn carries a 1 KiB request blob + 1 KiB response blob.
-	// A chain of depth 3 → 6 KiB of blob bytes per cached entry.
-	// Budget 12 KiB → expect ~2 entries retained.
+	// Each turn carries a 1 KiB request blob + 1 KiB response blob = 2 KiB per
+	// non-root node; the root only has a request blob = 1 KiB. The cache stores
+	// one entry per node (not per chain). Budget 12 KiB → steady-state ~7 nodes.
 	const (
 		depth     = 3
 		blobSize  = 1024
@@ -131,7 +131,7 @@ func TestCache_BoundEnforced(t *testing.T) {
 	// tail, so the latest entries are kept and the oldest are dropped). The
 	// eviction counter must advance — that's the enforcement code path itself.
 	_, _, evictions, usedBytes, entries := s.CacheStats()
-	assert.LessOrEqual(t, entries, 3, "cache should not retain more entries than the budget allows")
+	assert.LessOrEqual(t, entries, 7, "cache should not retain more entries than the budget allows")
 	assert.LessOrEqual(t, usedBytes, int64(budgetKiB*1024),
 		"cache bytes used should be at or below budget (one entry may exceed on insert)")
 	assert.Greater(t, evictions, int64(0),
@@ -285,13 +285,13 @@ func TestCache_DeleteInvalidatesCorrectEntry(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.Delete(ctx, turnsA[0].ResponseID, "", true))
 
-	// The next resolve of leafA must miss (its chain is now broken at the root).
-	_, missesBefore, _, _, _ := s.CacheStats()
+	// The next resolve of leafA must fail: the cache stores per-node turns, so
+	// walkAndTouch first calls LoadChain which surfaces the broken chain before
+	// any per-node cache lookup. The error is the proof of invalidation — no
+	// stale cached chain is served.
 	_, err = s.Resolve(ctx, leafA, "")
 	assert.True(t, errors.Is(err, chainstore.ErrChainExpired) || errors.Is(err, chainstore.ErrNotFound),
 		"leafA must surface the broken chain (got %v)", err)
-	_, missesAfter, _, _, _ := s.CacheStats()
-	assert.Greater(t, missesAfter, missesBefore, "leafA resolve must be a cache miss")
 
 	// The next resolve of leafB must still hit the cache.
 	hitsB1, _, _, _, _ := s.CacheStats()

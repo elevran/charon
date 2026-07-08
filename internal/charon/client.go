@@ -306,3 +306,11 @@ func (c *Client) checkStatus(resp *http.Response) error {
 		return fmt.Errorf("charon %d: %s", resp.StatusCode, msg)
 	}
 }
+
+// Backend is the interface proxy.Handler requires from the Charon client.
+type Backend interface {
+	Resolve(ctx context.Context, previousID, tenantKey string, requestBlob []byte) (string, []ResolveTurn, error)
+	Store(ctx context.Context, id, stagingID, tenantKey string, responseBlob []byte) error
+	Retrieve(ctx context.Context, id, tenantKey string) (*RetrieveResponse, error)
+	Delete(ctx context.Context, id, tenantKey string) error
+}

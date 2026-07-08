@@ -39,12 +39,6 @@ type testStack struct {
 }
 
 func startStack(t testing.TB) *testStack {
-	return startStackWithBuffer(t, 0)
-}
-
-// startStackWithBuffer creates a test stack with a specific proxy store buffer size.
-// bufferBytes: 0 = use default (64K), -1 = no buffering (flush every item), N>0 = N byte threshold.
-func startStackWithBuffer(t testing.TB, bufferBytes int) *testStack {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -63,7 +57,7 @@ func startStackWithBuffer(t testing.TB, bufferBytes int) *testStack {
 
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)
 	infClient := inference.New(mockInf.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log, bufferBytes)
+	proxyH := proxy.NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
 	proxy.RegisterHandlers(proxyMux, proxyH)
 	proxySrv := httptest.NewServer(proxyMux)
@@ -484,56 +478,14 @@ func TestCompactMissingModel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Streaming store tests — buffer=default (64K) and buffer=-1 (no buffering)
-// ---------------------------------------------------------------------------
-
-// TestStreamingResponse_NoBuffer verifies SSE streaming with immediate per-item
-// Charon flushes (storeBufferBytes=-1) produces the same result as buffered mode.
-func TestStreamingResponse_NoBuffer(t *testing.T) {
-	s := startStackWithBuffer(t, -1)
-	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxySrv.URL+"/responses",
-		strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	sse := readSSE(t, resp)
-	require.NotNil(t, sse.FinalResponse)
-	assert.Equal(t, "completed", sse.FinalResponse.Status)
-	assert.NotEmpty(t, sse.FinalResponse.Output)
-
-	// Verify the stored response is retrievable (chunked store committed correctly).
-	getResp, err := http.Get(s.proxySrv.URL + "/responses/" + sse.FinalResponse.ID)
-	require.NoError(t, err)
-	defer getResp.Body.Close()
-	require.Equal(t, http.StatusOK, getResp.StatusCode)
-	var retrieved proxy.ResponseResource
-	require.NoError(t, json.NewDecoder(getResp.Body).Decode(&retrieved))
-	assert.Equal(t, sse.FinalResponse.ID, retrieved.ID)
-	assert.NotEmpty(t, retrieved.Output)
-}
-
-// TestStreamingResponse_SmallBuffer verifies a buffer smaller than the output
-// triggers at least one mid-stream flush to Charon.
-func TestStreamingResponse_SmallBuffer(t *testing.T) {
-	// 1-byte buffer forces a flush after every item.
-	s := startStackWithBuffer(t, 1)
-	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxySrv.URL+"/responses",
-		strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	sse := readSSE(t, resp)
-	require.NotNil(t, sse.FinalResponse)
-	assert.Equal(t, "completed", sse.FinalResponse.Status)
-}
+// Streaming store tests
+// ---------------------
 
 // TestStreamStore_StripsSSEFraming verifies stored output items contain only
 // item-type fields (e.g. "type":"message") and NOT SSE envelope fields
 // ("sequence_number", "output_index").
 func TestStreamStore_StripsSSEFraming(t *testing.T) {
-	s := startStackWithBuffer(t, -1)
+	s := startStack(t)
 	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxySrv.URL+"/responses",
 		strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -559,10 +511,9 @@ func TestStreamStore_StripsSSEFraming(t *testing.T) {
 	}
 }
 
-// TestWSContinuation_NoBuffer verifies WebSocket continuation works with
-// no-buffering mode.
+// TestWSContinuation verifies WebSocket continuation persists across turns.
 func TestWSContinuation_NoBuffer(t *testing.T) {
-	s := startStackWithBuffer(t, -1)
+	s := startStack(t)
 	ws := dialWS(t, s.proxySrv.URL)
 
 	storeFalse := false

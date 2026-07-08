@@ -140,7 +140,7 @@ func startRealStack(t *testing.T) string {
 
 	charonClient := charon.New(charonURL, 15*time.Second)
 	infClient := inference.New(mockInf.URL, "", 15*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log, 0)
+	proxyH := proxy.NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
 	proxy.RegisterHandlers(proxyMux, proxyH)
 

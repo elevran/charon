@@ -118,3 +118,9 @@ func (c *Client) setHeaders(r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 }
+
+// Backend is the interface proxy.Handler requires from the inference client.
+type Backend interface {
+	Complete(ctx context.Context, req map[string]json.RawMessage) (*Response, error)
+	Stream(ctx context.Context, req map[string]json.RawMessage) (<-chan SSEEvent, error)
+}

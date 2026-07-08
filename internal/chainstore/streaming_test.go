@@ -41,7 +41,8 @@ func TestStreamStore_SmallSingleChunk(t *testing.T) {
 
 	_, err = s.AppendChunk(ctx, stagingID, 0, one)
 	require.NoError(t, err)
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_small", "", 1, uint32(len(one))))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_small", "", uint32(len(one)))
+	require.NoError(t, err)
 
 	node, turn, err := s.Retrieve(ctx, "r_small", "")
 	require.NoError(t, err)
@@ -170,7 +171,8 @@ func TestStreamStore_MixedSingleAndChunked(t *testing.T) {
 	_, err = s.AppendChunk(ctx, stagingID, 1, []byte("chunk1-b"))
 	require.NoError(t, err)
 	const sz = uint32(len("chunk1-a") + len("chunk1-b"))
-	require.NoError(t, s.StreamStore(ctx, stagingID, "t1", "", 2, sz))
+	_, err = s.CompleteStreaming(ctx, stagingID, "t1", "", sz)
+	require.NoError(t, err)
 
 	// Turn 2: single-blob again.
 	require.NoError(t, s.Store(ctx, "t2", "t1", "", []byte("req2")))
@@ -196,7 +198,8 @@ func TestStreamStore_DeleteChunkedNode(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.AppendChunk(ctx, stagingID, 1, chunkData(1, 4096))
 	require.NoError(t, err)
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_del", "", 2, 8192))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_del", "", 8192)
+	require.NoError(t, err)
 
 	node, err := b.GetNode(ctx, chainstore.NodeIDFor("", "r_del"))
 	require.NoError(t, err)
@@ -285,7 +288,8 @@ func TestStreamStore_PeakHeapBenchmark(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_bench", "", uint32(numChunks), uint32(totalSize)))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_bench", "", uint32(totalSize))
+	require.NoError(t, err)
 
 	runtime.GC()
 	var final runtime.MemStats
@@ -311,7 +315,7 @@ func TestStreamStore_CommitUnknownStagingReturnsErrUnknownStaging(t *testing.T) 
 	ctx := context.Background()
 
 	bogus := uuid.New().String()
-	err := s.StreamStore(ctx, bogus, "r1", "", 1, 4)
+	_, err := s.CompleteStreaming(ctx, bogus, "r1", "", 4)
 	assert.True(t, errors.Is(err, chainstore.ErrUnknownStaging))
 }
 
@@ -404,8 +408,7 @@ func resolveStagingBlobID(t *testing.T, b *chainstorepebble.Backend, stagingID s
 }
 
 // TestAppendChunk_InternalSplitting: a 1 MB HTTP body is stored as four
-// 256 KB Pebble chunks. We commit the chunks via StreamStore to also verify
-// that read-back reassembles them correctly via the chunked read path.
+// 256 KB Pebble chunks. Read-back must reassemble them correctly via the chunked read path.
 func TestAppendChunk_InternalSplitting(t *testing.T) {
 	s, b := openMemStoreAndBackend(t, chainstore.Config{})
 	ctx := context.Background()
@@ -433,7 +436,8 @@ func TestAppendChunk_InternalSplitting(t *testing.T) {
 	}
 
 	// Commit so the retrieve path can reassemble.
-	require.NoError(t, s.StreamStore(ctx, stagingID, "r_split1mb", "", 4, uint32(bodySize)))
+	_, err = s.CompleteStreaming(ctx, stagingID, "r_split1mb", "", uint32(bodySize))
+	require.NoError(t, err)
 	node, turn, err := s.Retrieve(ctx, "r_split1mb", "")
 	require.NoError(t, err)
 	assert.Equal(t, body, turn.ResponseBlob, "1 MB reassembled from 4 chunks")
