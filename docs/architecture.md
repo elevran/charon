@@ -293,6 +293,57 @@ Multi-instance Charon scaling is not currently implemented.
 
 ---
 
+## Performance and Scale
+
+### Access patterns
+
+Charon's workload is append-only point-lookup and sequential parent-pointer walk — no joins, no predicate scans over payload content. These patterns fit an embedded key-value store far better than a relational database. See [ADR 0004](adr/0004-kv-over-sql.md) for the full access-pattern analysis and the rationale for choosing Pebble over SQL and object-store alternatives.
+
+### Single-server throughput expectations
+
+These are order-of-magnitude estimates for a single Charon instance on commodity server hardware (8–32 cores, NVMe SSD). They are not benchmarks; actual numbers depend on blob size, chain depth, and hardware.
+
+**Write throughput — new response (`POST /responses` buffered path or `PUT /staging/{id}/complete`):**
+Dominated by the Pebble write batch (WAL append + memtable insert). A single atomic commit writes one node record and one or two blob values. With Pebble's default write options, expect low thousands of commits per second at blob sizes of 10–100 KB. The staging flush path (`ResolveAndStage` + `StoreWithStaging`) issues two Pebble commits per turn — one for the staging node, one for the final node — which roughly halves peak write throughput versus the buffered path.
+
+**Read throughput — `GET /responses/{id}`:**
+`Retrieve` issues a single `GetNode` and `GetBlobs` call. No chain walk, no LRU touch. On a warm block cache, expect sub-millisecond p50 latency and tens of thousands of reads per second for typical blob sizes.
+
+**Chain resolution latency — `POST /staging?prev=...` or `Resolve`:**
+`walkAndTouch` calls `backend.LoadChain` (N sequential `GetNode` reads from leaf to root) followed by up to N `GetBlobs` calls for nodes not in the in-memory cache. Latency scales approximately linearly with chain depth N:
+
+- Cache-cold path: ~N Pebble key reads + ~N blob fetches. At 100 µs per Pebble read, a depth-10 chain resolves in roughly 2–5 ms; depth-100 in 20–50 ms.
+- Cache-warm path: `LoadChain` still runs (N `GetNode` reads to walk the linked list and touch `LastAccessUnix`), but blob fetches for cached nodes are skipped. A fully cached depth-10 chain resolves in ~1–2 ms; depth-100 in ~10–20 ms.
+
+After resolution, `walkAndTouch` issues one additional `backend.Commit` to update `LastAccessUnix` and any `BucketID` promotions for nodes that have crossed an LRU bucket boundary.
+
+**Cache hit rate:**
+The in-memory LRU cache (`chainCache`) stores per-node turns keyed by `NodeID`. Cache capacity is bounded by total blob bytes (`Config.CacheMaxBytes`, default `DefaultCacheMaxBytes` = 64 MiB). The cache TTL defaults to `DefaultCacheTTL` = 5 minutes.
+
+Agentic workloads are append-heavy: each new turn appends one node to an existing chain and then immediately resolves the updated chain. Because cache entries are per-node (not per-chain), ancestor blobs are retained across turns. For short-to-medium chains (depth ≤ 50) where the working set fits in 64 MiB, nearly every blob fetch after the first resolve is a cache hit. Cache misses occur on cold start, after cache eviction due to byte pressure, or when `CacheTTL` expires (default 5 min of inactivity).
+
+### Scaling limits
+
+Pebble is a single-process embedded store. Charon inherits this constraint: a single Charon instance is the sole writer to its data directory. Multiple Charon instances cannot share one Pebble directory.
+
+**Vertical scaling** (larger machine, more memory for Pebble's block cache and Charon's in-memory LRU) improves throughput and cache hit rate within a single server. This is the recommended path for most deployments.
+
+**Horizontal scaling** is not currently implemented. When a single server is insufficient, the workload can be sharded by response ID prefix or tenant key — each shard runs an independent Charon instance with its own Pebble directory. A sharding proxy layer in front of Charon instances routes requests by key prefix. This is a deployment-level concern; Charon's API and storage format do not need to change.
+
+A distributed KV backend (DynamoDB is the most likely candidate, though not yet implemented) is an alternative path to horizontal scale. The `Backend` interface in `internal/chainstore/backend.go` decouples the store logic from the Pebble implementation, so a distributed backend can be wired in without changing the chain-walk or staging logic.
+
+The current architecture intentionally targets single-server deployments.
+
+### Compression and TTL
+
+**TTL-based reaping** (`Config.TTL`, `Config.StagingTTL`): The background `ttlLoop` goroutine scans LRU bucket keys periodically (`Config.TTLInterval`, default 5 min) and deletes chain nodes older than `Config.TTL`. `Config.StagingTTL` (default 1 h when non-zero) governs reaping of orphaned staging records left by proxy crashes. Both fields default to zero (disabled) and must be set explicitly for production deployments.
+
+**Payload compression** (issue #37): Not yet implemented. When added, compressed blob sizes will directly reduce both Pebble SSTable footprint and the byte pressure on the in-memory LRU cache — a smaller `CacheMaxBytes` would cache the same number of turns. The `Config.CacheMaxBytes` field already tracks blob bytes so the accounting will remain correct after compression is introduced.
+
+**Capacity eviction** (`Config.MaxEntries`, `Config.MaxBytes`): The background `evictionLoop` goroutine evicts the oldest LRU-bucket entries when the store exceeds either bound. Combined with `Config.TTL`, this keeps steady-state disk usage bounded without requiring manual intervention.
+
+---
+
 ## What This Design Does Not Solve
 
 - **Durable KV cache across restarts**: The inference backend's KV cache is out of scope. This is an infrastructure-level concern orthogonal to Charon's design.
