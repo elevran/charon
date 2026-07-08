@@ -52,7 +52,7 @@ func TestMidStreamInferenceFailureLeavesNoTrace(t *testing.T) {
 	partialSrv := inference.NewPartialMockServer()
 	t.Cleanup(partialSrv.Close)
 
-	s := newTestStack(t, withInferenceURL(partialSrv.Server.URL))
+	s := newTestStack(t, withInferenceURL(partialSrv.URL))
 
 	body, _ := json.Marshal(map[string]any{
 		"model":  "mock",

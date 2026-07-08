@@ -112,44 +112,34 @@ func newTestStack(t testing.TB, opts ...stackOption) *testStack {
 		infURL = mockInf.URL
 	}
 
-	// Proxy handler
-	charonClient := charon.New("", cfg.timeout) // URL filled in below
 	infClient := inference.New(infURL, "", cfg.timeout)
-	proxyH := NewHandler(charonClient, infClient, log)
-	proxyMux := http.NewServeMux()
-	RegisterHandlers(proxyMux, proxyH)
-
 	s := &testStack{mockInf: mockInf}
+
+	buildProxy := func(charonURL string) http.Handler {
+		proxyH := NewHandler(charon.New(charonURL, cfg.timeout), infClient, log)
+		mux := http.NewServeMux()
+		RegisterHandlers(mux, proxyH)
+		return mux
+	}
 
 	if cfg.realListeners {
 		charonLn := mustListen(t)
 		charonSrv := &http.Server{Handler: charonHandler}
 		go charonSrv.Serve(charonLn) //nolint:errcheck
-		charonURL := fmt.Sprintf("http://127.0.0.1:%d", charonLn.Addr().(*net.TCPAddr).Port)
 		t.Cleanup(func() { charonSrv.Close() })
-
-		// Re-create the charon client now that we know the URL.
-		proxyH = NewHandler(charon.New(charonURL, cfg.timeout), infClient, log)
-		proxyMux = http.NewServeMux()
-		RegisterHandlers(proxyMux, proxyH)
+		charonURL := fmt.Sprintf("http://127.0.0.1:%d", charonLn.Addr().(*net.TCPAddr).Port)
 
 		proxyLn := mustListen(t)
-		proxySrv := &http.Server{Handler: proxyMux}
+		proxySrv := &http.Server{Handler: buildProxy(charonURL)}
 		go proxySrv.Serve(proxyLn) //nolint:errcheck
 		t.Cleanup(func() { proxySrv.Close() })
-
 		s.proxyURL = fmt.Sprintf("http://127.0.0.1:%d", proxyLn.Addr().(*net.TCPAddr).Port)
 	} else {
 		charonSrv := httptest.NewServer(charonHandler)
 		t.Cleanup(charonSrv.Close)
 		s.charonSrv = charonSrv
 
-		// Re-create the charon client with the actual URL.
-		proxyH = NewHandler(charon.New(charonSrv.URL, cfg.timeout), infClient, log)
-		proxyMux = http.NewServeMux()
-		RegisterHandlers(proxyMux, proxyH)
-
-		proxySrv := httptest.NewServer(proxyMux)
+		proxySrv := httptest.NewServer(buildProxy(charonSrv.URL))
 		t.Cleanup(proxySrv.Close)
 		s.proxySrv = proxySrv
 		s.proxyURL = proxySrv.URL
@@ -267,17 +257,13 @@ func (r sseResult) createdID() string {
 					ID string `json:"id"`
 				} `json:"response"`
 			}
-			if json.Unmarshal(mustMarshal(evt), &container) == nil {
+			b, _ := json.Marshal(evt)
+			if json.Unmarshal(b, &container) == nil {
 				return container.Response.ID
 			}
 		}
 	}
 	return ""
-}
-
-func mustMarshal(v any) []byte {
-	b, _ := json.Marshal(v)
-	return b
 }
 
 // ---------------------------------------------------------------------------

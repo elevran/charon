@@ -28,6 +28,8 @@ func run() error {
 
 	opts := config.NewServerOptions()
 	fs := flag.NewFlagSet("proxy", flag.ExitOnError)
+	// TODO: split config.ServerOptions into CharonOptions + ProxyOptions so this
+	// binary doesn't silently accept (and ignore) Charon storage/TTL flags.
 	opts.AddFlags(fs)
 	_ = fs.Parse(os.Args[1:])
 	if err := opts.Complete(fs); err != nil {
