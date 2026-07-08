@@ -1,4 +1,4 @@
-package config
+package charonconfig
 
 import (
 	"encoding/json"
@@ -7,9 +7,8 @@ import (
 	"strings"
 )
 
-// ByteSize is an int64 that unmarshals from either a plain integer (bytes) or
-// a string with an optional unit suffix: B, KB, MB, GB. K=1024.
-type ByteSize int64
+// byteSizeType is the concrete type; ByteSize aliases it so tests can reference it.
+type byteSizeType int64
 
 var unitMultipliers = map[string]int64{
 	"b":  1,
@@ -18,15 +17,13 @@ var unitMultipliers = map[string]int64{
 	"gb": 1024 * 1024 * 1024,
 }
 
-func (b *ByteSize) UnmarshalJSON(data []byte) error {
-	// Try plain number first.
+func (b *byteSizeType) UnmarshalJSON(data []byte) error {
 	var n int64
 	if err := json.Unmarshal(data, &n); err == nil {
-		*b = ByteSize(n)
+		*b = byteSizeType(n)
 		return nil
 	}
 
-	// Try quoted string.
 	var s string
 	if err := json.Unmarshal(data, &s); err != nil {
 		return fmt.Errorf("bytesize: expected number or string, got %s", data)
@@ -35,7 +32,6 @@ func (b *ByteSize) UnmarshalJSON(data []byte) error {
 	s = strings.TrimSpace(s)
 	lower := strings.ToLower(s)
 
-	// Find where the digits end.
 	i := 0
 	for i < len(s) && (s[i] == '-' || s[i] == '+' || (s[i] >= '0' && s[i] <= '9')) {
 		i++
@@ -63,6 +59,6 @@ func (b *ByteSize) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("bytesize: negative size %q", s)
 	}
 
-	*b = ByteSize(n * mult)
+	*b = byteSizeType(n * mult)
 	return nil
 }

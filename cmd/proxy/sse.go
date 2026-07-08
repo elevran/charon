@@ -7,8 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/elevran/charon/internal/httputil"
-	"github.com/elevran/charon/internal/inference"
+	"github.com/elevran/charon/cmd/proxy/inference"
 	"github.com/elevran/charon/pkg/charon"
 )
 
@@ -64,7 +63,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 
 	inputItems, err := inputToItems(req.Input)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "invalid input")
+		writeError(w, http.StatusBadRequest, "invalid input")
 		return
 	}
 
@@ -90,7 +89,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 	ch, err := h.inf.Stream(ctx, infMap)
 	if err != nil {
 		h.log.Error("inference stream", "err", err)
-		httputil.WriteError(w, http.StatusBadGateway, "inference error")
+		writeError(w, http.StatusBadGateway, "inference error")
 		return
 	}
 

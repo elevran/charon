@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/elevran/charon/internal/chainstore"
-	"github.com/elevran/charon/internal/httputil"
 )
 
 // maxChunkBytes is the hard upper bound on a streaming-chunk PUT body.
@@ -52,7 +51,7 @@ func (h *Handler) writeErr(w http.ResponseWriter, op, id string, err error) {
 	if status == http.StatusInternalServerError {
 		h.log.Error(op, "id", id, "err", err)
 	}
-	httputil.WriteError(w, status, msg)
+	writeError(w, status, msg)
 }
 
 // blobToRaw converts a raw-bytes blob to json.RawMessage for the wire format.
@@ -128,7 +127,7 @@ func (h *Handler) HandleBufferedStore(w http.ResponseWriter, r *http.Request) {
 	}
 	var req bufferedStoreRequest
 	if err := json.Unmarshal(b, &req); err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 
@@ -157,7 +156,7 @@ func (h *Handler) HandleBufferedStore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Location", "/responses/"+responseID)
-	httputil.WriteJSON(w, http.StatusCreated, bufferedStoreResponse{
+	writeJSON(w, http.StatusCreated, bufferedStoreResponse{
 		ResponseID: responseID,
 		Turns:      respTurns,
 	})
@@ -178,7 +177,7 @@ func (h *Handler) HandleOpenStaging(w http.ResponseWriter, r *http.Request) {
 	}
 	requestBlob, err := io.ReadAll(r.Body)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "failed to read request body")
+		writeError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
 	_ = r.Body.Close()
@@ -199,7 +198,7 @@ func (h *Handler) HandleOpenStaging(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", "/staging/"+stagingID)
 	w.Header().Set("X-Staging-ID", stagingID)
-	httputil.WriteJSON(w, http.StatusCreated, resolveResponse{
+	writeJSON(w, http.StatusCreated, resolveResponse{
 		StagingID: stagingID,
 		Turns:     respTurns,
 	})
@@ -214,7 +213,7 @@ func (h *Handler) HandleOpenStaging(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HandleStagingStatus(w http.ResponseWriter, r *http.Request) {
 	stagingID := r.PathValue("id")
 	if len(stagingID) > 64 {
-		httputil.WriteError(w, http.StatusBadRequest, "invalid staging id")
+		writeError(w, http.StatusBadRequest, "invalid staging id")
 		return
 	}
 	ctx := r.Context()
@@ -265,7 +264,7 @@ func (h *Handler) readBodyOr400(w http.ResponseWriter, r *http.Request) (b []byt
 	b, err = io.ReadAll(r.Body)
 	_ = r.Body.Close()
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "failed to read request body")
+		writeError(w, http.StatusBadRequest, "failed to read request body")
 		return nil, false
 	}
 	return b, true
@@ -297,16 +296,16 @@ func (h *Handler) HandleAppendChunk(w http.ResponseWriter, r *http.Request) {
 	responseID := r.URL.Query().Get("response_id")
 
 	if len(stagingID) > 64 {
-		httputil.WriteError(w, http.StatusBadRequest, "invalid staging id")
+		writeError(w, http.StatusBadRequest, "invalid staging id")
 		return
 	}
 	if responseID != "" && len(responseID) > 255 {
-		httputil.WriteError(w, http.StatusBadRequest, "response_id exceeds 255 bytes")
+		writeError(w, http.StatusBadRequest, "response_id exceeds 255 bytes")
 		return
 	}
 	k64, err := strconv.ParseUint(kStr, 10, 32)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "invalid chunk number")
+		writeError(w, http.StatusBadRequest, "invalid chunk number")
 		return
 	}
 	k := uint32(k64)
@@ -316,12 +315,12 @@ func (h *Handler) HandleAppendChunk(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, defaultMaxChunkBytes)
 	chunkBody, err := io.ReadAll(r.Body)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "failed to read chunk body")
+		writeError(w, http.StatusBadRequest, "failed to read chunk body")
 		return
 	}
 	_ = r.Body.Close()
 	if len(chunkBody) == 0 {
-		httputil.WriteError(w, http.StatusBadRequest, "empty chunk body")
+		writeError(w, http.StatusBadRequest, "empty chunk body")
 		return
 	}
 
@@ -347,7 +346,7 @@ func (h *Handler) HandleAppendChunk(w http.ResponseWriter, r *http.Request) {
 	if k < nextExpected {
 		status = http.StatusOK
 	}
-	httputil.WriteJSON(w, status, map[string]uint32{
+	writeJSON(w, status, map[string]uint32{
 		"received":      k,
 		"expected_next": nextExpected,
 	})
@@ -365,20 +364,20 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	tenantKey := r.Header.Get("X-Tenant-Key")
 
 	if len(stagingID) > 64 {
-		httputil.WriteError(w, http.StatusBadRequest, "invalid staging id")
+		writeError(w, http.StatusBadRequest, "invalid staging id")
 		return
 	}
 	if totalStr == "" {
-		httputil.WriteError(w, http.StatusBadRequest, "missing total")
+		writeError(w, http.StatusBadRequest, "missing total")
 		return
 	}
 	total, err := strconv.ParseUint(totalStr, 10, 32)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "invalid total")
+		writeError(w, http.StatusBadRequest, "invalid total")
 		return
 	}
 	if responseID != "" && len(responseID) > 255 {
-		httputil.WriteError(w, http.StatusBadRequest, "response_id exceeds 255 bytes")
+		writeError(w, http.StatusBadRequest, "response_id exceeds 255 bytes")
 		return
 	}
 
@@ -388,7 +387,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Location", "/responses/"+finalID)
-	httputil.WriteJSON(w, http.StatusCreated, map[string]string{"response_id": finalID})
+	writeJSON(w, http.StatusCreated, map[string]string{"response_id": finalID})
 }
 
 // HandleAbort handles PUT /staging/<stagingID>/abort.
@@ -397,7 +396,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HandleAbort(w http.ResponseWriter, r *http.Request) {
 	stagingID := r.PathValue("id")
 	if len(stagingID) > 64 {
-		httputil.WriteError(w, http.StatusBadRequest, "invalid staging id")
+		writeError(w, http.StatusBadRequest, "invalid staging id")
 		return
 	}
 	if err := h.svc.AbortStaging(r.Context(), stagingID); err != nil {
@@ -445,7 +444,7 @@ func (h *Handler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 
 // HandleHealthz handles GET /healthz (liveness probe).
 func (h *Handler) HandleHealthz(w http.ResponseWriter, _ *http.Request) {
-	httputil.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // HandleReadyz handles GET /readyz (readiness probe).
@@ -453,8 +452,8 @@ func (h *Handler) HandleHealthz(w http.ResponseWriter, _ *http.Request) {
 func (h *Handler) HandleReadyz(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.Ping(r.Context()); err != nil {
 		h.log.Error("readyz: storage ping failed", "err", err)
-		httputil.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "storage unavailable"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "storage unavailable"})
 		return
 	}
-	httputil.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

@@ -23,7 +23,6 @@ import (
 
 	"github.com/elevran/charon/internal/chainstore"
 	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	"github.com/elevran/charon/internal/metrics"
 	api "github.com/elevran/charon/internal/server"
 )
 
@@ -39,7 +38,7 @@ func newFixture(t *testing.T) *fixture {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	reg := prometheus.NewRegistry()
-	require.NoError(t, metrics.Register(reg, ""))
+	require.NoError(t, api.RegisterMetrics(reg, ""))
 
 	opts := &crdbpebble.Options{FS: vfs.NewMem()}
 	// Pass reg so chainstore metrics (chainstore_entries_total, etc.) are exported.

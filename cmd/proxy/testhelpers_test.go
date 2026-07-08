@@ -21,9 +21,9 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 
+	"github.com/elevran/charon/cmd/proxy/inference"
 	"github.com/elevran/charon/internal/chainstore"
 	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	"github.com/elevran/charon/internal/inference"
 	"github.com/elevran/charon/internal/server"
 	"github.com/elevran/charon/pkg/charon"
 )
