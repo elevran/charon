@@ -10,9 +10,8 @@ import (
 )
 
 func TestConfigDefaults(t *testing.T) {
-	opts := config.NewServerOptions()
-	require.False(t, opts.ProxyEnabled)
-	require.Equal(t, ":8080", opts.ProxyListen)
+	opts := config.NewCharonOptions()
+	require.Equal(t, ":8081", opts.Listen)
 	require.Equal(t, 30, opts.TTLDays)
 }
 

@@ -12,53 +12,64 @@ import (
 )
 
 func TestLoadDefaults(t *testing.T) {
-	opts := config.NewServerOptions()
+	charon := config.NewCharonOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	opts.AddFlags(fs)
+	charon.AddFlags(fs)
 	require.NoError(t, fs.Parse(nil))
-	require.NoError(t, opts.Complete(fs))
+	require.NoError(t, charon.Complete(fs))
 
-	// Proxy defaults
-	assert.False(t, opts.ProxyEnabled, "proxy must be off by default")
-	assert.Equal(t, ":8080", opts.ProxyListen)
-	assert.Equal(t, "http://127.0.0.1:8081", opts.ProxyCharonURL)
-	assert.Equal(t, "http://localhost:11434", opts.ProxyBackend)
-	assert.Equal(t, 120, opts.InferenceTimeoutSeconds)
-	// Charon defaults
-	assert.Equal(t, ":8081", opts.CharonListen)
-	assert.Equal(t, "./data", opts.DataDir)
-	assert.Equal(t, 30, opts.TTLDays)
-	assert.Equal(t, time.Hour, opts.WorkerTTLInterval)
+	assert.Equal(t, ":8081", charon.Listen)
+	assert.Equal(t, "./data", charon.DataDir)
+	assert.Equal(t, 30, charon.TTLDays)
+	assert.Equal(t, time.Hour, charon.WorkerTTLInterval)
+	assert.Equal(t, "charon", charon.Telemetry.ServiceName)
+
+	proxy := config.NewProxyOptions()
+	fs2 := flag.NewFlagSet("test", flag.ContinueOnError)
+	proxy.AddFlags(fs2)
+	require.NoError(t, fs2.Parse(nil))
+	require.NoError(t, proxy.Complete(fs2))
+
+	assert.Equal(t, ":8080", proxy.Listen)
+	assert.Equal(t, "http://localhost:11434", proxy.Backend)
+	assert.Equal(t, "http://127.0.0.1:8081", proxy.CharonURL)
+	assert.Equal(t, 120, proxy.TimeoutSeconds)
+	assert.Equal(t, "charon-proxy", proxy.Telemetry.ServiceName)
 }
 
 func TestCharonURLDerivedFromListen(t *testing.T) {
 	// When charon.listen is set in the file and proxy.charon_url is not,
-	// ProxyCharonURL is auto-derived from the file's charon.listen.
-	opts := config.NewServerOptions()
+	// CharonURL is auto-derived from the file's charon.listen.
+	proxy := config.NewProxyOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	opts.AddFlags(fs)
+	proxy.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/config.yaml"}))
-	require.NoError(t, opts.Complete(fs))
-	assert.Equal(t, "http://127.0.0.1:9090", opts.ProxyCharonURL)
+	require.NoError(t, proxy.Complete(fs))
+	assert.Equal(t, "http://127.0.0.1:9090", proxy.CharonURL)
 }
 
 func TestLoadFromFile(t *testing.T) {
-	opts := config.NewServerOptions()
+	proxy := config.NewProxyOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	opts.AddFlags(fs)
+	proxy.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/config.yaml"}))
-	require.NoError(t, opts.Complete(fs))
+	require.NoError(t, proxy.Complete(fs))
+	assert.Equal(t, ":0", proxy.Listen)
 
-	assert.Equal(t, ":0", opts.ProxyListen)
-	assert.Equal(t, 30, opts.TTLDays)
+	charon := config.NewCharonOptions()
+	fs2 := flag.NewFlagSet("test", flag.ContinueOnError)
+	charon.AddFlags(fs2)
+	require.NoError(t, fs2.Parse([]string{"--config", "testdata/config.yaml"}))
+	require.NoError(t, charon.Complete(fs2))
+	assert.Equal(t, 30, charon.TTLDays)
 }
 
 func TestLoadStrictRejectsUnknownFields(t *testing.T) {
-	opts := config.NewServerOptions()
+	charon := config.NewCharonOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	opts.AddFlags(fs)
+	charon.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/invalid.yaml"}))
-	err := opts.Complete(fs)
+	err := charon.Complete(fs)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parse config")
 }

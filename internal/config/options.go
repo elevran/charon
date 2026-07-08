@@ -18,7 +18,6 @@ type fileConfig struct {
 }
 
 type fileProxyConfig struct {
-	Enabled   bool                `json:"enabled"`
 	Listen    string              `json:"listen"`
 	CharonURL string              `json:"charon_url"`
 	Inference fileInferenceConfig `json:"inference"`
@@ -107,25 +106,41 @@ func loadFileConfig(path string) (fileConfig, error) {
 	return fc, nil
 }
 
-// ServerOptions holds the full configuration for the charon server command.
-type ServerOptions struct {
+// ---------------------------------------------------------------------------
+// TelemetryOptions (shared)
+// ---------------------------------------------------------------------------
+
+// TelemetryOptions holds OpenTelemetry settings.
+type TelemetryOptions struct {
+	ExporterURL string // OTLP HTTP endpoint; empty = disabled
+	ServiceName string // identifies this binary in traces
+}
+
+// AddFlags registers the --telemetry-exporter-url flag on fs.
+func (o *TelemetryOptions) AddFlags(fs *flag.FlagSet) {
+	fs.StringVar(&o.ExporterURL, "telemetry-exporter-url", o.ExporterURL, "OTLP HTTP exporter URL (e.g. http://localhost:4318); empty disables tracing")
+}
+
+// visitedFlags returns a set of flag names that were explicitly set on fs.
+func visitedFlags(fs *flag.FlagSet) map[string]bool {
+	m := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { m[f.Name] = true })
+	return m
+}
+
+// ---------------------------------------------------------------------------
+// CharonOptions
+// ---------------------------------------------------------------------------
+
+// CharonOptions holds configuration for the Charon response-storage server.
+type CharonOptions struct {
 	// Config file path — set by --config flag.
 	ConfigFile string
 
-	// Proxy settings.
-	ProxyEnabled   bool
-	ProxyListen    string
-	ProxyBackend   string // inference base URL
-	ProxyAPIKey    string
-	ProxyCharonURL string
+	// Listen address for the Charon internal API.
+	Listen string
 
-	// Inference sub-settings (config-file only — deep tuning knobs).
-	InferenceTimeoutSeconds int
-
-	// Charon internal API.
-	CharonListen string
-
-	// Storage.
+	// Storage settings.
 	DataDir string
 	// TTLDays is the maximum age of a stored response. Maps to chainstore.Config.TTL.
 	TTLDays         int
@@ -135,58 +150,34 @@ type ServerOptions struct {
 	MaxContextBytes ByteSize
 
 	// WorkerTTLInterval is how often the background TTL reaper runs (not the TTL itself).
-	// Maps to chainstore.Config.TTLInterval.
 	WorkerTTLInterval time.Duration
 
-	// Telemetry settings.
 	Telemetry TelemetryOptions
 }
 
-// TelemetryOptions holds OpenTelemetry settings for the server.
-type TelemetryOptions struct {
-	ExporterURL   string // OTLP HTTP endpoint; empty = disabled
-	CharonService string // default "charon"
-	ProxyService  string // default "charon-proxy"
-}
-
-// NewServerOptions returns a ServerOptions pre-filled with built-in defaults.
-func NewServerOptions() *ServerOptions {
-	return &ServerOptions{
-		ProxyListen:             ":8080",
-		ProxyBackend:            "http://localhost:11434",
-		InferenceTimeoutSeconds: 120,
-		CharonListen:            ":8081",
-		DataDir:                 "./data",
-		TTLDays:                 30,
-		WorkerTTLInterval:       time.Hour,
-		Telemetry: TelemetryOptions{
-			CharonService: "charon",
-			ProxyService:  "charon-proxy",
-		},
+// NewCharonOptions returns a CharonOptions pre-filled with built-in defaults.
+func NewCharonOptions() *CharonOptions {
+	return &CharonOptions{
+		Listen:            ":8081",
+		DataDir:           "./data",
+		TTLDays:           30,
+		WorkerTTLInterval: time.Hour,
+		Telemetry:         TelemetryOptions{ServiceName: "charon"},
 	}
 }
 
-// AddFlags registers CLI flags on fs. Only commonly-overridden options are
-// exposed as flags; deep tuning knobs remain config-file-only.
-func (o *ServerOptions) AddFlags(fs *flag.FlagSet) {
+// AddFlags registers CLI flags on fs for the Charon server.
+func (o *CharonOptions) AddFlags(fs *flag.FlagSet) {
 	fs.StringVar(&o.ConfigFile, "config", "", "path to config file")
-	fs.StringVar(&o.CharonListen, "listen", o.CharonListen, "charon internal API listen address")
-	fs.StringVar(&o.ProxyListen, "proxy-listen", o.ProxyListen, "proxy server listen address")
-	fs.BoolVar(&o.ProxyEnabled, "proxy", o.ProxyEnabled, "enable the proxy layer")
-	fs.StringVar(&o.ProxyBackend, "backend", o.ProxyBackend, "inference backend base URL")
+	fs.StringVar(&o.Listen, "listen", o.Listen, "charon internal API listen address")
 	fs.StringVar(&o.DataDir, "storage-data-dir", o.DataDir, "data directory for Pebble storage")
-	fs.StringVar(&o.Telemetry.ExporterURL, "telemetry-exporter-url", o.Telemetry.ExporterURL, "OTLP HTTP exporter URL (e.g. http://localhost:4318); empty disables tracing")
+	o.Telemetry.AddFlags(fs)
 }
 
 // Complete loads the config file (if --config was set) and merges file values
 // into the options struct. CLI flags take precedence over config-file values.
-// Complete also resolves derived values such as ProxyCharonURL.
-func (o *ServerOptions) Complete(fs *flag.FlagSet) error {
+func (o *CharonOptions) Complete(fs *flag.FlagSet) error {
 	if o.ConfigFile == "" {
-		// No config file — derive ProxyCharonURL from built-in defaults and return.
-		if o.ProxyCharonURL == "" {
-			o.ProxyCharonURL = deriveCharonURL(o.CharonListen)
-		}
 		return nil
 	}
 
@@ -195,33 +186,16 @@ func (o *ServerOptions) Complete(fs *flag.FlagSet) error {
 		return err
 	}
 
-	// Collect which flags were explicitly set on the command line.
-	setFlags := make(map[string]bool)
-	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
-
-	// Merge file values into options, skipping fields covered by explicit flags.
-	if !setFlags["proxy"] {
-		o.ProxyEnabled = fc.Proxy.Enabled
-	}
-	if !setFlags["proxy-listen"] {
-		o.ProxyListen = fc.Proxy.Listen
-	}
-	if !setFlags["backend"] {
-		o.ProxyBackend = fc.Proxy.Inference.BaseURL
-	}
-	// Always take API key from file (not a CLI flag).
-	o.ProxyAPIKey = fc.Proxy.Inference.APIKey
-	// Deep inference knobs are config-file-only.
-	o.InferenceTimeoutSeconds = fc.Proxy.Inference.TimeoutSeconds
+	setFlags := visitedFlags(fs)
 
 	if !setFlags["listen"] {
-		o.CharonListen = fc.Charon.Listen
+		o.Listen = fc.Charon.Listen
 	}
 	if !setFlags["storage-data-dir"] {
 		o.DataDir = fc.Charon.Storage.DataDir
 	}
 
-	// All remaining storage fields are config-file-only.
+	// Storage fields are config-file-only.
 	o.TTLDays = fc.Charon.Storage.TTLDays
 	o.MaxResponses = fc.Charon.Storage.MaxResponses
 	o.MaxPayload = fc.Charon.Storage.MaxPayload
@@ -231,27 +205,110 @@ func (o *ServerOptions) Complete(fs *flag.FlagSet) error {
 	// Worker settings are config-file-only.
 	o.WorkerTTLInterval = fc.Charon.Workers.TTLInterval
 
-	// Derive ProxyCharonURL: file value takes precedence, then auto-derive.
-	if fc.Proxy.CharonURL != "" {
-		o.ProxyCharonURL = fc.Proxy.CharonURL
-	} else {
-		o.ProxyCharonURL = deriveCharonURL(o.CharonListen)
-	}
-
-	// Telemetry settings are config-file-only except exporter URL which has a flag.
 	if !setFlags["telemetry-exporter-url"] {
 		o.Telemetry.ExporterURL = fc.Telemetry.ExporterURL
 	}
-	o.Telemetry.CharonService = fc.Telemetry.CharonService
-	o.Telemetry.ProxyService = fc.Telemetry.ProxyService
+	o.Telemetry.ServiceName = fc.Telemetry.CharonService
 
 	return nil
 }
 
-// Validate checks ServerOptions for invalid combinations. It performs no I/O.
-func (o *ServerOptions) Validate() error {
-	if o.ProxyEnabled && o.ProxyBackend == "" {
-		return fmt.Errorf("proxy enabled but proxy backend (inference base URL) is empty")
+// Validate checks CharonOptions for invalid combinations. It performs no I/O.
+func (o *CharonOptions) Validate() error {
+	if o.DataDir == "" {
+		return fmt.Errorf("charon storage data-dir is empty")
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// ProxyOptions
+// ---------------------------------------------------------------------------
+
+// ProxyOptions holds configuration for the proxy server.
+type ProxyOptions struct {
+	// Config file path — set by --config flag.
+	ConfigFile string
+
+	// Listen address for the proxy HTTP server.
+	Listen string
+
+	// Inference backend settings.
+	Backend        string // base URL
+	APIKey         string
+	TimeoutSeconds int
+
+	// CharonURL is the Charon internal API endpoint the proxy calls.
+	// Auto-derived from config file proxy.charon_url or Charon's listen address.
+	CharonURL string
+
+	Telemetry TelemetryOptions
+}
+
+// NewProxyOptions returns a ProxyOptions pre-filled with built-in defaults.
+func NewProxyOptions() *ProxyOptions {
+	return &ProxyOptions{
+		Listen:         ":8080",
+		Backend:        "http://localhost:11434",
+		TimeoutSeconds: 120,
+		CharonURL:      "http://127.0.0.1:8081",
+		Telemetry:      TelemetryOptions{ServiceName: "charon-proxy"},
+	}
+}
+
+// AddFlags registers CLI flags on fs for the proxy server.
+func (o *ProxyOptions) AddFlags(fs *flag.FlagSet) {
+	fs.StringVar(&o.ConfigFile, "config", "", "path to config file")
+	fs.StringVar(&o.Listen, "listen", o.Listen, "proxy server listen address")
+	fs.StringVar(&o.Backend, "backend", o.Backend, "inference backend base URL")
+	fs.StringVar(&o.CharonURL, "charon-url", o.CharonURL, "charon internal API base URL")
+	o.Telemetry.AddFlags(fs)
+}
+
+// Complete loads the config file (if --config was set) and merges file values
+// into the options struct. CLI flags take precedence over config-file values.
+func (o *ProxyOptions) Complete(fs *flag.FlagSet) error {
+	if o.ConfigFile == "" {
+		return nil
+	}
+
+	fc, err := loadFileConfig(o.ConfigFile)
+	if err != nil {
+		return err
+	}
+
+	setFlags := visitedFlags(fs)
+
+	if !setFlags["listen"] {
+		o.Listen = fc.Proxy.Listen
+	}
+	if !setFlags["backend"] {
+		o.Backend = fc.Proxy.Inference.BaseURL
+	}
+	// API key and timeout are config-file-only.
+	o.APIKey = fc.Proxy.Inference.APIKey
+	o.TimeoutSeconds = fc.Proxy.Inference.TimeoutSeconds
+
+	if !setFlags["charon-url"] {
+		if fc.Proxy.CharonURL != "" {
+			o.CharonURL = fc.Proxy.CharonURL
+		} else {
+			o.CharonURL = deriveCharonURL(fc.Charon.Listen)
+		}
+	}
+
+	if !setFlags["telemetry-exporter-url"] {
+		o.Telemetry.ExporterURL = fc.Telemetry.ExporterURL
+	}
+	o.Telemetry.ServiceName = fc.Telemetry.ProxyService
+
+	return nil
+}
+
+// Validate checks ProxyOptions for invalid combinations. It performs no I/O.
+func (o *ProxyOptions) Validate() error {
+	if o.Backend == "" {
+		return fmt.Errorf("proxy backend (inference base URL) is empty")
 	}
 	return nil
 }

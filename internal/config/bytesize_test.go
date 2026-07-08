@@ -79,7 +79,7 @@ func TestByteSizeUnmarshalErrors(t *testing.T) {
 }
 
 func TestByteSizeInConfig(t *testing.T) {
-	opts := config.NewServerOptions()
+	opts := config.NewCharonOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
 	require.NoError(t, fs.Parse([]string{"--config", "testdata/bytesize.yaml"}))
