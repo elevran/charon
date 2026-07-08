@@ -35,8 +35,11 @@ func RegisterHandlers(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("POST /responses/compact", h.HandleCompact)
 	mux.HandleFunc("GET /responses", h.HandleListOrWS) // WebSocket upgrade added in Phase 7
 
-	// Catch-all: forward everything else to the inference backend.
-	mux.Handle("/", newPassthroughProxy(h.inf.BaseURL()))
+	// Catch-all: forward everything not matched above (e.g. GET /models,
+	// GET /model/info) to the inference backend verbatim.
+	// Any future proxy-owned paths (e.g. /healthz) must be registered
+	// before this line so the more-specific pattern wins.
+	mux.Handle("/", newPassthroughProxy(h.inf.BaseURL(), h.log))
 }
 
 // HandleCreate handles POST /responses.
