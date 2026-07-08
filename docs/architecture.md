@@ -295,19 +295,9 @@ Multi-instance Charon scaling is not currently implemented.
 
 ## Performance and Scale
 
-### Access patterns — why KV beats SQL here
+### Access patterns
 
-Charon's storage access pattern fits an embedded key-value store far better than a relational database.
-
-**Writes are append-only, keyed by response ID.** A new response produces one node write and one or two blob writes (request blob at staging open, response blob at commit). There are no in-place mutations of existing rows, no foreign-key checks, and no index maintenance beyond the parent-pointer chain linkage.
-
-**Reads are point lookups or sequential parent-pointer walks.** `GET /responses/{id}` is a single key fetch. Chain resolution (`POST /staging?prev=...`) walks the parent-pointer list one node at a time from leaf to root — each step is a point lookup by `NodeID`. No joins are required; the full chain is assembled by following a linked list of keys.
-
-**Payloads are large, opaque blobs.** Request and response blobs are serialised conversation items — potentially tens of kilobytes each. SQL page sizes (typically 8–16 KB) split large blobs across multiple B-tree pages, adding read amplification and fragmentation. Pebble's LSM layout writes blobs as contiguous SSTable values; a single-key read recovers the entire blob in one I/O.
-
-**No ad-hoc queries.** Charon never runs `SELECT … WHERE …` predicates over payload content. The only scan patterns are: chain walk (sequential parent-pointer hops), LRU bucket scan (prefix scan over `pfxBucket`), and TTL reap (prefix scan over time-bucketed keys). All of these are sequential prefix scans — the operation an LSM is designed for.
-
-The result: Pebble delivers the required access patterns with less operational overhead (no external process, no schema migrations, no query planner), cross-compiles with `CGO_ENABLED=0`, and avoids the page-size friction that SQL engines impose on large blob storage.
+Charon's workload is append-only point-lookup and sequential parent-pointer walk — no joins, no predicate scans over payload content. These patterns fit an embedded key-value store far better than a relational database. See [ADR 0004](adr/0004-kv-over-sql.md) for the full access-pattern analysis and the rationale for choosing Pebble over SQL and object-store alternatives.
 
 ### Single-server throughput expectations
 
@@ -340,7 +330,7 @@ Pebble is a single-process embedded store. Charon inherits this constraint: a si
 
 **Horizontal scaling** is not currently implemented. When a single server is insufficient, the workload can be sharded by response ID prefix or tenant key — each shard runs an independent Charon instance with its own Pebble directory. A sharding proxy layer in front of Charon instances routes requests by key prefix. This is a deployment-level concern; Charon's API and storage format do not need to change.
 
-A distributed KV backend (e.g. DynamoDB — the `Backend` interface is already abstracted) is an alternative path to horizontal scale. The `Backend` interface in `internal/chainstore/store.go` decouples the store logic from the Pebble implementation, so a distributed backend can be wired in without changing the chain-walk or staging logic.
+A distributed KV backend (DynamoDB is the most likely candidate, though not yet implemented) is an alternative path to horizontal scale. The `Backend` interface in `internal/chainstore/backend.go` decouples the store logic from the Pebble implementation, so a distributed backend can be wired in without changing the chain-walk or staging logic.
 
 The current architecture intentionally targets single-server deployments.
 

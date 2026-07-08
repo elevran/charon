@@ -33,7 +33,7 @@ Use [Pebble](https://github.com/cockroachdb/pebble), an embedded key-value store
 
 **Pure-Go, no CGo.** Pebble cross-compiles with `CGO_ENABLED=0` to any `GOOS`/`GOARCH` target without requiring a C toolchain. SQLite requires CGo; a pure-Go SQLite binding adds significant latency overhead for the write path due to the CGo call cost per transaction.
 
-**The `Backend` interface abstracts the storage layer.** `chainstore.Backend` (in `internal/chainstore/store.go`) defines `GetNode`, `GetBlobs`, `LoadChain`, `Commit`, and `Stats`. The Pebble implementation lives in `internal/chainstore/pebble/`. A DynamoDB backend already exists for distributed deployments. Switching storage implementations does not require changing chain-walk or staging logic.
+**The `Backend` interface abstracts the storage layer.** `chainstore.Backend` (in `internal/chainstore/backend.go`) defines `GetNode`, `GetBlobs`, `LoadChain`, `Commit`, and `Stats`. The Pebble implementation lives in `internal/chainstore/pebble/`. A DynamoDB backend is planned but not yet implemented; it would enable distributed deployments without changing chain-walk or staging logic. Switching storage implementations does not require changing chain-walk or staging logic.
 
 ## Trade-offs Accepted
 
