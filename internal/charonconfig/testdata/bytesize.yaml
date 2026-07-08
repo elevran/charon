@@ -1,3 +1,0 @@
-charon:
-  storage:
-    max_payload: "10MB"

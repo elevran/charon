@@ -11,13 +11,6 @@ import (
 	"github.com/elevran/charon/internal/charonconfig"
 )
 
-func unmarshalByteSize(t *testing.T, input string) charonconfig.ByteSize {
-	t.Helper()
-	var b charonconfig.ByteSize
-	require.NoError(t, json.Unmarshal([]byte(input), &b))
-	return b
-}
-
 func TestByteSizeUnmarshal(t *testing.T) {
 	tests := []struct {
 		input string
@@ -43,8 +36,9 @@ func TestByteSizeUnmarshal(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
-			got := unmarshalByteSize(t, tc.input)
-			assert.Equal(t, charonconfig.ByteSize(tc.want), got)
+			var b charonconfig.ByteSize
+			require.NoError(t, json.Unmarshal([]byte(tc.input), &b))
+			assert.Equal(t, charonconfig.ByteSize(tc.want), b)
 		})
 	}
 }
@@ -72,10 +66,12 @@ func TestByteSizeUnmarshalErrors(t *testing.T) {
 }
 
 func TestByteSizeInConfig(t *testing.T) {
+	yaml := []byte("charon:\n  storage:\n    max_payload: \"10MB\"\n")
+	cfg := configFromBytes(t, yaml)
 	opts := charonconfig.NewOptions()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	opts.AddFlags(fs)
-	require.NoError(t, fs.Parse([]string{"--config", "testdata/bytesize.yaml"}))
+	require.NoError(t, fs.Parse([]string{"--config", cfg}))
 	require.NoError(t, opts.Complete(fs))
 	assert.Equal(t, charonconfig.ByteSize(10*1024*1024), opts.MaxPayload)
 }
