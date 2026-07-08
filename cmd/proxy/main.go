@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/elevran/charon/internal/config"
-	"github.com/elevran/charon/internal/inference"
+	"github.com/elevran/charon/cmd/proxy/inference"
+	"github.com/elevran/charon/internal/proxyconfig"
 	"github.com/elevran/charon/internal/server"
 	"github.com/elevran/charon/internal/telemetry"
 	"github.com/elevran/charon/pkg/charon"
@@ -26,7 +26,7 @@ func main() {
 func run() error {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	opts := config.NewProxyOptions()
+	opts := proxyconfig.NewOptions()
 	fs := flag.NewFlagSet("proxy", flag.ExitOnError)
 	opts.AddFlags(fs)
 	_ = fs.Parse(os.Args[1:])

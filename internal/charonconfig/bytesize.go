@@ -1,4 +1,4 @@
-package config
+package charonconfig
 
 import (
 	"encoding/json"
@@ -19,14 +19,12 @@ var unitMultipliers = map[string]int64{
 }
 
 func (b *ByteSize) UnmarshalJSON(data []byte) error {
-	// Try plain number first.
 	var n int64
 	if err := json.Unmarshal(data, &n); err == nil {
 		*b = ByteSize(n)
 		return nil
 	}
 
-	// Try quoted string.
 	var s string
 	if err := json.Unmarshal(data, &s); err != nil {
 		return fmt.Errorf("bytesize: expected number or string, got %s", data)
@@ -35,7 +33,6 @@ func (b *ByteSize) UnmarshalJSON(data []byte) error {
 	s = strings.TrimSpace(s)
 	lower := strings.ToLower(s)
 
-	// Find where the digits end.
 	i := 0
 	for i < len(s) && (s[i] == '-' || s[i] == '+' || (s[i] >= '0' && s[i] <= '9')) {
 		i++

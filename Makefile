@@ -1,13 +1,6 @@
-BINARY     := charon
-CMD        := ./cmd/charon
-BUILD_DIR  := ./build
+BIN_DIR    := ./bin
 IMAGE_NAME ?= charon
 IMAGE_TAG  ?= latest
-
-GOOS   ?= $(shell go env GOOS)
-GOARCH ?= $(shell go env GOARCH)
-
-OUT := $(BUILD_DIR)/$(GOOS)/$(GOARCH)/$(BINARY)
 
 OPENRESPONSES_DIR ?= ../openresponses
 
@@ -86,11 +79,12 @@ update:
 # ── Build & package ───────────────────────────────────────────────────────────
 
 build:
-	mkdir -p $(BUILD_DIR)/$(GOOS)/$(GOARCH)
-	go build -o $(OUT) $(CMD)
+	mkdir -p $(BIN_DIR)
+	go build -o $(BIN_DIR)/charon ./cmd/charon
+	go build -o $(BIN_DIR)/proxy ./cmd/proxy
 
 image:
 	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BIN_DIR)

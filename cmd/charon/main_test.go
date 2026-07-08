@@ -6,11 +6,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/elevran/charon/internal/config"
+	"github.com/elevran/charon/internal/charonconfig"
 )
 
 func TestConfigDefaults(t *testing.T) {
-	opts := config.NewCharonOptions()
+	opts := charonconfig.NewOptions()
 	require.Equal(t, ":8081", opts.Listen)
 	require.Equal(t, 30, opts.TTLDays)
 }

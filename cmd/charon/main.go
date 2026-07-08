@@ -14,8 +14,7 @@ import (
 
 	"github.com/elevran/charon/internal/chainstore"
 	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	"github.com/elevran/charon/internal/config"
-	"github.com/elevran/charon/internal/metrics"
+	"github.com/elevran/charon/internal/charonconfig"
 	"github.com/elevran/charon/internal/server"
 	"github.com/elevran/charon/internal/telemetry"
 )
@@ -29,7 +28,7 @@ func main() {
 func run() error {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	opts := config.NewCharonOptions()
+	opts := charonconfig.NewOptions()
 	fs := flag.NewFlagSet("charon", flag.ExitOnError)
 	opts.AddFlags(fs)
 	_ = fs.Parse(os.Args[1:])
@@ -43,7 +42,7 @@ func run() error {
 	}
 
 	reg := prometheus.NewRegistry()
-	if err := metrics.Register(reg, ""); err != nil {
+	if err := server.RegisterMetrics(reg, ""); err != nil {
 		log.Error("register metrics", "err", err)
 		return err
 	}

@@ -1,4 +1,4 @@
-package metrics
+package server
 
 import (
 	"errors"
@@ -7,20 +7,20 @@ import (
 )
 
 var (
-	HTTPRequestsTotal = prometheus.NewCounterVec(
+	requestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "http_requests_total"},
 		[]string{"endpoint", "status"},
 	)
-	HTTPRequestDuration = prometheus.NewHistogramVec(
+	requestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{Name: "http_request_duration_seconds"},
 		[]string{"endpoint"},
 	)
 )
 
-// Register registers all metrics into reg under the given namespace prefix.
+// RegisterMetrics registers HTTP metrics into reg under the given namespace prefix.
 // reg nil uses prometheus.DefaultRegisterer; empty namespace defaults to "responses".
 // Returns an error if registration fails for any reason other than already-registered.
-func Register(reg prometheus.Registerer, namespace string) error {
+func RegisterMetrics(reg prometheus.Registerer, namespace string) error {
 	if reg == nil {
 		reg = prometheus.DefaultRegisterer
 	}
@@ -29,8 +29,8 @@ func Register(reg prometheus.Registerer, namespace string) error {
 	}
 	wrapped := prometheus.WrapRegistererWithPrefix(namespace+"_", reg)
 	for _, c := range []prometheus.Collector{
-		HTTPRequestsTotal,
-		HTTPRequestDuration,
+		requestsTotal,
+		requestDuration,
 	} {
 		if err := wrapped.Register(c); err != nil {
 			var are prometheus.AlreadyRegisteredError

@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/elevran/charon/internal/inference"
+	"github.com/elevran/charon/cmd/proxy/inference"
 )
 
 // failingCharonMux returns an http.Handler that returns 507 for all PUT

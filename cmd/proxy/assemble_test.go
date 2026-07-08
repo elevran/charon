@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/elevran/charon/internal/inference"
+	"github.com/elevran/charon/cmd/proxy/inference"
 )
 
 // helper: decode json.RawMessage value for a key from map.

@@ -1,7 +1,6 @@
 # Build output
-/build/
+/bin/
 
 # Local development
 .claude/
 agent/
-charon
