@@ -60,23 +60,22 @@ Charon does **not** own: SSE, WebSocket, auth, TLS, model routing, or `store: fa
 
 ### Proxy–Charon interaction
 
-The proxy calls Charon differently depending on whether this is a new chain or a continuation:
+The proxy calls Charon differently depending on whether this is a new chain or a continuation.
 
 **New chain** (no `previous_response_id`):
 - No Charon resolve call. Proxy calls inference with `flat_context=[]` + `input[]`.
 - The inference server assigns the canonical response ID, returned in the first streaming chunk or response body.
 - Proxy emits `response.created` to the client using that inference-server-assigned ID.
-- If `store: true`: proxy calls `POST /responses/{canonical_id}` to store.
+- If `store: true`: proxy uses the buffered `POST /responses` path (or the streaming staging protocol) to commit the response.
 
-**Continuation** (has `previous_response_id`):
-1. **Before inference** — resolve: `GET /responses/{previous_response_id}/context`, receives `{reservation_id, flat_context[]}`. Charon returns assembled history and a short-lived reservation ID for write-intent correlation. No write-intent is created yet.
-2. **Start inference** — proxy appends the new `input[]` to `flat_context` and forwards to the inference server. The inference server's first streaming chunk carries the canonical response ID.
-3. **Client notification** — proxy emits `response.created` to the client using the inference-server-assigned canonical ID.
-4. **After inference** — store: `POST /responses/{canonical_id}` with `{reservation_id, previous_response_id, input[], output[], usage, status}`. Charon atomically creates the write-intent and commits the payload.
+**Continuation** (has `previous_response_id`) — streaming path:
+1. **Open staging**: `POST /staging?prev={previous_response_id}` — Charon resolves the prior chain, creates a staging record, returns `{staging_id, flat_context[]}`.
+2. **Inference**: proxy appends new `input[]` to `flat_context` and forwards to the inference server. The first streaming chunk carries the canonical response ID.
+3. **Client notification**: proxy emits `response.created` using the inference-server-assigned canonical ID.
+4. **Append chunks**: proxy delivers response bytes incrementally via `PUT /staging/{staging_id}/chunks/{k}`.
+5. **Complete**: `PUT /staging/{staging_id}/complete?response_id={canonical_id}&total={N}` — Charon seals the staging record and commits the node atomically.
 
-If inference fails before the canonical ID is known (no data returned at all), the proxy uses the `reservation_id` as the fallback response ID and calls `POST /responses/{reservation_id}` with `status: "failed"`. If the canonical ID was already received, the proxy uses it.
-
-If `store: false` is set, the proxy skips the store call entirely. No write-intent is ever created. The `store: false` flag is a proxy-level concern; Charon is unaware of it.
+If `store: false` is set, the proxy skips all Charon store calls. The `store: false` flag is a proxy-level concern; Charon is unaware of it.
 
 ---
 

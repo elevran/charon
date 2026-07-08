@@ -14,16 +14,17 @@ Alternative architectures considered:
 
 ## Decision
 
-Charon is an internal storage/resolution service (separate repository from the proxy). The proxy owns all client-facing concerns. They interact via a two-phase protocol over an internal HTTP API:
+Charon is an internal storage/resolution service (separate repository from the proxy). The proxy owns all client-facing concerns. They interact via a staging protocol over an internal HTTP API:
 
 **Continuation turns** (has `previous_response_id`):
-1. **Before inference** — `GET /responses/{previous_response_id}/context`: proxy receives `{reservation_id, flat_context[]}`. Charon assembles the history and mints a `reservation_id` for write-intent correlation. No write-intent is created yet.
+1. **Open staging** — `POST /staging?prev={previous_response_id}`: proxy receives `{staging_id, flat_context[]}`. Charon assembles history and creates a staging record.
 2. **Inference** — proxy forwards to the inference server, which assigns the canonical response ID in its first streaming chunk.
-3. **After inference** — `POST /responses/{canonical_id}`: proxy sends `{reservation_id, previous_response_id, input[], output[], status}`; Charon atomically creates the write-intent and commits to durable storage.
+3. **Append chunks** — proxy delivers response bytes incrementally via `PUT /staging/{staging_id}/chunks/{k}`.
+4. **Complete** — `PUT /staging/{staging_id}/complete?response_id={canonical_id}&total={N}`: Charon commits the node atomically.
 
 **New chains** (no `previous_response_id`):
-- No resolve call. Inference server assigns the canonical response ID.
-- After inference: `POST /responses/{canonical_id}` (no `reservation_id`) as above (or skipped if `store: false`).
+- No staging call needed. Inference server assigns the canonical response ID.
+- After inference: buffered `POST /responses` (or staging protocol as above; skipped if `store: false`).
 
 ## Reasons
 

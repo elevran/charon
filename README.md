@@ -4,7 +4,7 @@ Charon is an internal context-store service for the [OpenAI Responses API](https
 
 - Resolves `previous_response_id` chains into the flat context an inference backend needs
 - Persists response payloads (input items, output items) to durable storage
-- Manages write-intent safety and background TTL/recovery workers
+- Manages background TTL expiry and staging record reaping
 
 Charon is **not** the client-facing API layer. A proxy sits in front of Charon, owns the Responses API surface (REST, SSE, WebSocket), and calls Charon to resolve context before inference and to store results after.
 
@@ -30,12 +30,6 @@ The proxy included in this repository is provided for testing and to demonstrate
 ```
 
 Without a config file, Charon starts with all defaults: on-disk Pebble storage in `./data`, Charon internal API on `:8081`, proxy layer **disabled**.
-
-### Subcommands
-
-```
-./charon reconcile --config config.yaml   # one-shot write-intent recovery sweep
-```
 
 ---
 

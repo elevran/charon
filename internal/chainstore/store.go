@@ -44,11 +44,12 @@ type Config struct {
 	// Set to 0 to disable staging reaping. Default when non-zero: 1h.
 	StagingTTL time.Duration
 
-	// In-memory LRU cache for resolved chains (Option B: full-context cache).
-	// On Resolve / ResolveAndStage the cache is consulted before LoadChain +
-	// GetBlobs; a hit eliminates all Pebble I/O for that call. Eager
-	// invalidation runs on the Commit path when Transaction.DeleteNodes is
-	// non-empty (capacity eviction, TTL reap, or Delete).
+	// In-memory LRU cache of per-node blobs.
+	// Each entry holds the blob for one chain node. On Resolve / ResolveAndStage,
+	// LoadChain still runs (walking the linked list and touching LastAccessUnix /
+	// BucketID in Pebble for every node), but blob fetches for cached nodes skip
+	// GetBlobs. Eager invalidation runs on the Commit path when
+	// Transaction.DeleteNodes is non-empty (capacity eviction, TTL reap, Delete).
 	//
 	// CacheMaxBytes <= 0 disables the cache entirely (zero-value Config
 	// preserves the original "no caching" behaviour). When > 0, the default
@@ -57,15 +58,14 @@ type Config struct {
 	//
 	// CacheTTL <= 0 falls back to DefaultCacheTTL (5 min). Set to 0 explicitly
 	// only if CacheMaxBytes is also 0 (cache disabled). The TTL bounds
-	// staleness from mutations that do not invalidate the cache (Complete,
-	// for example, mutates a turn's ResponseBlob in Pebble but does not
-	// invalidate cached entries for the same leaf).
+	// staleness from mutations that bypass cache invalidation (Complete, for
+	// example, mutates a node's ResponseBlob in Pebble but does not invalidate
+	// that node's cache entry).
 	//
-	// CacheTTL must be strictly less than TTL (when TTL > 0): a cache hit
-	// skips the LRU touch/BucketMove commit, so LastAccessUnix is not refreshed
-	// in Pebble for nodes served from the cache. If CacheTTL >= TTL, the
-	// background ttlReap would delete those Pebble nodes while the cache still
-	// serves them. New rejects that configuration with an error.
+	// CacheTTL must be strictly less than TTL (when TTL > 0): the chain walk
+	// on every resolve still touches LastAccessUnix in Pebble, but if CacheTTL
+	// >= TTL the background ttlReap could delete Pebble nodes that the cache
+	// still serves. New rejects that configuration with an error.
 	CacheMaxBytes int64
 	CacheTTL      time.Duration
 }

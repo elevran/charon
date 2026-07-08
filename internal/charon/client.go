@@ -314,3 +314,5 @@ type Backend interface {
 	Retrieve(ctx context.Context, id, tenantKey string) (*RetrieveResponse, error)
 	Delete(ctx context.Context, id, tenantKey string) error
 }
+
+var _ Backend = (*Client)(nil)

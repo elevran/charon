@@ -124,3 +124,5 @@ type Backend interface {
 	Complete(ctx context.Context, req map[string]json.RawMessage) (*Response, error)
 	Stream(ctx context.Context, req map[string]json.RawMessage) (<-chan SSEEvent, error)
 }
+
+var _ Backend = (*Client)(nil)

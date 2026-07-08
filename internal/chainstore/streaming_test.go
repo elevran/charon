@@ -29,9 +29,9 @@ func chunkData(idx int, size int) []byte {
 	return out
 }
 
-// TestStreamStore_SmallSingleChunk verifies the small-stream happy path:
+// TestCompleteStreaming_SmallSingleChunk verifies the small-stream happy path:
 // one batch (one chunk) → manifest → Retrieve returns identical bytes.
-func TestStreamStore_SmallSingleChunk(t *testing.T) {
+func TestCompleteStreaming_SmallSingleChunk(t *testing.T) {
 	s := openMemStore(t, chainstore.Config{})
 	ctx := context.Background()
 
@@ -114,9 +114,9 @@ func TestAppendChunk_PartialLastChunk(t *testing.T) {
 	assert.Equal(t, append(c0, c1...), turn.ResponseBlob)
 }
 
-// TestStreamStore_CrashBeforeManifest simulates a proxy crash by writing chunks
+// TestCompleteStreaming_CrashBeforeManifest simulates a proxy crash by writing chunks
 // but never committing; the staging TTL reaper must then clean them up.
-func TestStreamStore_CrashBeforeManifest(t *testing.T) {
+func TestCompleteStreaming_CrashBeforeManifest(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
 	const stagingTTL = time.Hour
 	s, b := openMemStoreAndBackend(t, chainstore.Config{Clock: clk, StagingTTL: stagingTTL})
@@ -153,9 +153,9 @@ func TestStreamStore_CrashBeforeManifest(t *testing.T) {
 	assert.True(t, errors.Is(err, chainstore.ErrUnknownStaging), "staging record must be gone")
 }
 
-// TestStreamStore_MixedSingleAndChunked verifies that a chain containing both
+// TestCompleteStreaming_MixedSingleAndChunked verifies that a chain containing both
 // single-blob and chunked nodes resolves correctly via Retrieve/Resolve.
-func TestStreamStore_MixedSingleAndChunked(t *testing.T) {
+func TestCompleteStreaming_MixedSingleAndChunked(t *testing.T) {
 	s := openMemStore(t, chainstore.Config{})
 	ctx := context.Background()
 
@@ -186,9 +186,9 @@ func TestStreamStore_MixedSingleAndChunked(t *testing.T) {
 	assert.Equal(t, []byte("resp2"), turns[2].ResponseBlob, "single-blob turn 2")
 }
 
-// TestStreamStore_DeleteChunkedNode verifies that deleting a chunked node
+// TestCompleteStreaming_DeleteChunkedNode verifies that deleting a chunked node
 // removes its chunks (and manifest) — no stranded blobs left behind.
-func TestStreamStore_DeleteChunkedNode(t *testing.T) {
+func TestCompleteStreaming_DeleteChunkedNode(t *testing.T) {
 	s, b := openMemStoreAndBackend(t, chainstore.Config{})
 	ctx := context.Background()
 
@@ -250,12 +250,12 @@ func TestAppendChunk_IdempotentReplay(t *testing.T) {
 	assert.Equal(t, first, turn.ResponseBlob, "replay is a no-op; first write's data wins")
 }
 
-// TestStreamStore_PeakHeapBenchmark streams a 50MB blob in 2MB chunks and
+// TestCompleteStreaming_PeakHeapBenchmark streams a 50MB blob in 2MB chunks and
 // asserts that the steady-state heap usage (after GC) is bounded.
 // Plan target: peak RAM ≈ one chunk buffer (2MB), NOT one response blob (50MB).
 // We measure before-and-after committed heap delta; the test fails if the
 // steady-state heap grows without bound across chunks.
-func TestStreamStore_PeakHeapBenchmark(t *testing.T) {
+func TestCompleteStreaming_PeakHeapBenchmark(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping peak-heap benchmark under -short")
 	}
@@ -307,10 +307,10 @@ func TestStreamStore_PeakHeapBenchmark(t *testing.T) {
 		"steady-state heap growth must stay below 40MB (got %d bytes)", delta)
 }
 
-// TestStreamStore_CommitUnknownStagingReturnsErrUnknownStaging: committing a
+// TestCompleteStreaming_CommitUnknownStagingReturnsErrUnknownStaging: committing a
 // bogus stagingID must propagate ErrUnknownStaging so callers can distinguish
 // retry-able conditions from real errors.
-func TestStreamStore_CommitUnknownStagingReturnsErrUnknownStaging(t *testing.T) {
+func TestCompleteStreaming_CommitUnknownStagingReturnsErrUnknownStaging(t *testing.T) {
 	s := openMemStore(t, chainstore.Config{})
 	ctx := context.Background()
 
@@ -354,8 +354,8 @@ func TestAppendChunkAndCommit_ThreeChunks(t *testing.T) {
 	assert.Equal(t, expected, turn.ResponseBlob, "chunks must reassemble in offset order")
 }
 
-// TestStreamStoreCommit_UnknownStaging: bogus stagingID returns ErrUnknownStaging.
-func TestStreamStoreCommit_UnknownStaging(t *testing.T) {
+// TestCompleteStreaming_UnknownStaging: bogus stagingID returns ErrUnknownStaging.
+func TestCompleteStreaming_UnknownStaging(t *testing.T) {
 	s := openMemStore(t, chainstore.Config{})
 	ctx := context.Background()
 

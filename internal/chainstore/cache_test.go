@@ -135,7 +135,7 @@ func TestCache_BoundEnforced(t *testing.T) {
 	assert.LessOrEqual(t, usedBytes, int64(budgetKiB*1024),
 		"cache bytes used should be at or below budget (one entry may exceed on insert)")
 	assert.Greater(t, evictions, int64(0),
-		"evictions must fire when 8x6KiB entries overflow a 12KiB budget")
+		"evictions must fire when 8 chains (up to 3 nodes each, ~2KiB/node) overflow a 12KiB budget")
 }
 
 // TestCache_TTLExpiry: advancing the clock past the TTL causes a subsequent
