@@ -1,4 +1,4 @@
-package compliance_test
+package main
 
 import (
 	"bufio"
@@ -20,12 +20,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	apihandler "github.com/elevran/charon/internal/api"
 	"github.com/elevran/charon/internal/chainstore"
 	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/inference"
-	"github.com/elevran/charon/internal/proxy"
+	"github.com/elevran/charon/internal/server"
+	"github.com/elevran/charon/pkg/charon"
 )
 
 // ---------------------------------------------------------------------------
@@ -46,9 +45,9 @@ func startStack(t testing.TB) *testStack {
 	svc, err := pebblebe.Open(context.Background(), "", opts, chainstore.Config{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = svc.Close() })
-	charonH := apihandler.NewHandler(svc, log)
+	charonH := server.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
-	apihandler.RegisterHandlers(charonMux, charonH)
+	server.RegisterHandlers(charonMux, charonH)
 	charonSrv := httptest.NewServer(charonMux)
 	t.Cleanup(charonSrv.Close)
 
@@ -57,9 +56,9 @@ func startStack(t testing.TB) *testStack {
 
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)
 	infClient := inference.New(mockInf.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log)
+	proxyH := NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
-	proxy.RegisterHandlers(proxyMux, proxyH)
+	RegisterHandlers(proxyMux, proxyH)
 	proxySrv := httptest.NewServer(proxyMux)
 	t.Cleanup(proxySrv.Close)
 
@@ -90,7 +89,7 @@ func decodeJSON[T any](t *testing.T, resp *http.Response) T {
 
 type sseResult struct {
 	Events        []map[string]json.RawMessage
-	FinalResponse *proxy.ResponseResource
+	FinalResponse *ResponseResource
 	ErrorCode     string
 }
 
@@ -115,7 +114,7 @@ func readSSE(t *testing.T, resp *http.Response) sseResult {
 		_ = json.Unmarshal(evt["type"], &typeStr)
 		if typeStr == "response.completed" {
 			var container struct {
-				Response proxy.ResponseResource `json:"response"`
+				Response ResponseResource `json:"response"`
 			}
 			_ = json.Unmarshal([]byte(data), &container)
 			res := container.Response
@@ -150,7 +149,7 @@ func (w *wsSession) send(msg interface{}) {
 	require.NoError(w.t, w.conn.WriteMessage(websocket.TextMessage, b))
 }
 
-func (w *wsSession) readUntil(timeout time.Duration) (resp proxy.ResponseResource, errCode string) {
+func (w *wsSession) readUntil(timeout time.Duration) (resp ResponseResource, errCode string) {
 	w.conn.SetReadDeadline(time.Now().Add(timeout))
 	for {
 		_, msgBytes, err := w.conn.ReadMessage()
@@ -158,8 +157,8 @@ func (w *wsSession) readUntil(timeout time.Duration) (resp proxy.ResponseResourc
 			return
 		}
 		var evt struct {
-			Type     string                  `json:"type"`
-			Response *proxy.ResponseResource `json:"response,omitempty"`
+			Type     string            `json:"type"`
+			Response *ResponseResource `json:"response,omitempty"`
 			Error    *struct {
 				Code string `json:"code"`
 			} `json:"error,omitempty"`
@@ -194,7 +193,7 @@ func TestBasicResponse(t *testing.T) {
 		"input": []map[string]interface{}{{"type": "message", "role": "user", "content": "Say hello in exactly 3 words."}},
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	r := decodeJSON[proxy.ResponseResource](t, resp)
+	r := decodeJSON[ResponseResource](t, resp)
 	assert.Equal(t, "completed", r.Status)
 	assert.NotEmpty(t, r.Output)
 }
@@ -243,7 +242,7 @@ func TestSystemPrompt(t *testing.T) {
 		},
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	r := decodeJSON[proxy.ResponseResource](t, resp)
+	r := decodeJSON[ResponseResource](t, resp)
 	assert.Equal(t, "completed", r.Status)
 	assert.NotEmpty(t, r.Output)
 }
@@ -260,7 +259,7 @@ func TestMultiTurn(t *testing.T) {
 		},
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	r := decodeJSON[proxy.ResponseResource](t, resp)
+	r := decodeJSON[ResponseResource](t, resp)
 	assert.Equal(t, "completed", r.Status)
 	assert.NotEmpty(t, r.Output)
 }
@@ -436,7 +435,7 @@ func TestResponseOutputPhaseSchema(t *testing.T) {
 	commentary := json.RawMessage(`{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Thinking..."}],"phase":"commentary"}`)
 	finalAnswer := json.RawMessage(`{"type":"message","id":"msg_2","role":"assistant","status":"completed","content":[{"type":"output_text","text":"The answer is 42."}],"phase":"final_answer"}`)
 
-	resource := proxy.ResponseResource{
+	resource := ResponseResource{
 		ID:        "resp_phase_test",
 		Object:    "response",
 		CreatedAt: time.Now().Unix(),
@@ -450,7 +449,7 @@ func TestResponseOutputPhaseSchema(t *testing.T) {
 	b, err := json.Marshal(resource)
 	require.NoError(t, err)
 
-	var decoded proxy.ResponseResource
+	var decoded ResponseResource
 	require.NoError(t, json.Unmarshal(b, &decoded))
 	require.Len(t, decoded.Output, 2)
 
@@ -498,7 +497,7 @@ func TestStreamStore_StripsSSEFraming(t *testing.T) {
 	getResp, err := http.Get(s.proxySrv.URL + "/responses/" + sse.FinalResponse.ID)
 	require.NoError(t, err)
 	defer getResp.Body.Close()
-	var retrieved proxy.ResponseResource
+	var retrieved ResponseResource
 	require.NoError(t, json.NewDecoder(getResp.Body).Decode(&retrieved))
 	require.NotEmpty(t, retrieved.Output)
 

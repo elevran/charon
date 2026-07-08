@@ -1,6 +1,6 @@
 //go:build openresponses_bun_compliance
 
-package compliance_test
+package main
 
 import (
 	"context"
@@ -19,12 +19,11 @@ import (
 	crdbpebble "github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 
-	apihandler "github.com/elevran/charon/internal/api"
 	"github.com/elevran/charon/internal/chainstore"
 	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/inference"
-	"github.com/elevran/charon/internal/proxy"
+	"github.com/elevran/charon/internal/server"
+	"github.com/elevran/charon/pkg/charon"
 )
 
 // The 11 non-GPU tests that can be validated with a deterministic mock.
@@ -125,9 +124,9 @@ func startRealStack(t *testing.T) string {
 		t.Fatalf("open pebble: %v", err)
 	}
 	t.Cleanup(func() { _ = svc.Close() })
-	charonH := apihandler.NewHandler(svc, log)
+	charonH := server.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
-	apihandler.RegisterHandlers(charonMux, charonH)
+	server.RegisterHandlers(charonMux, charonH)
 
 	charonLn := mustListen(t)
 	charonSrv := &http.Server{Handler: charonMux}
@@ -140,9 +139,9 @@ func startRealStack(t *testing.T) string {
 
 	charonClient := charon.New(charonURL, 15*time.Second)
 	infClient := inference.New(mockInf.URL, "", 15*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log)
+	proxyH := NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
-	proxy.RegisterHandlers(proxyMux, proxyH)
+	RegisterHandlers(proxyMux, proxyH)
 
 	proxyLn := mustListen(t)
 	proxySrv := &http.Server{Handler: proxyMux}

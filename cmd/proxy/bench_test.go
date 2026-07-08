@@ -1,4 +1,4 @@
-package compliance_test
+package main
 
 import (
 	"bytes"

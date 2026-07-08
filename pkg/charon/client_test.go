@@ -15,10 +15,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/elevran/charon/internal/api"
 	"github.com/elevran/charon/internal/chainstore"
 	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	"github.com/elevran/charon/internal/charon"
+	api "github.com/elevran/charon/internal/server"
+	"github.com/elevran/charon/pkg/charon"
 )
 
 var ctx = context.Background()

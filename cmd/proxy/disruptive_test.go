@@ -1,4 +1,4 @@
-package disruptive_test
+package main
 
 // Disruptive end-to-end tests exercise failure paths that span the full
 // proxy → Charon → storage stack:
@@ -36,11 +36,10 @@ import (
 
 	"github.com/elevran/charon/internal/chainstore"
 	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/inference"
-	"github.com/elevran/charon/internal/proxy"
+	"github.com/elevran/charon/pkg/charon"
 
-	apihandler "github.com/elevran/charon/internal/api"
+	"github.com/elevran/charon/internal/server"
 )
 
 // fullStack holds the servers needed for end-to-end tests.
@@ -59,17 +58,17 @@ func startNormalStack(t *testing.T, infSrv *httptest.Server) *fullStack {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = svc.Close() })
 
-	charonH := apihandler.NewHandler(svc, log)
+	charonH := server.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
-	apihandler.RegisterHandlers(charonMux, charonH)
+	server.RegisterHandlers(charonMux, charonH)
 	charonSrv := httptest.NewServer(charonMux)
 	t.Cleanup(charonSrv.Close)
 
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)
 	infClient := inference.New(infSrv.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log)
+	proxyH := NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
-	proxy.RegisterHandlers(proxyMux, proxyH)
+	RegisterHandlers(proxyMux, proxyH)
 	proxySrv := httptest.NewServer(proxyMux)
 	t.Cleanup(proxySrv.Close)
 
@@ -99,17 +98,17 @@ func startFailingStoreStack(t *testing.T, infSrv *httptest.Server) *fullStack {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = svc.Close() })
 
-	charonH := apihandler.NewHandler(svc, log)
+	charonH := server.NewHandler(svc, log)
 	realMux := http.NewServeMux()
-	apihandler.RegisterHandlers(realMux, charonH)
+	server.RegisterHandlers(realMux, charonH)
 	charonSrv := httptest.NewServer(failingCharonMux(realMux))
 	t.Cleanup(charonSrv.Close)
 
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)
 	infClient := inference.New(infSrv.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log)
+	proxyH := NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
-	proxy.RegisterHandlers(proxyMux, proxyH)
+	RegisterHandlers(proxyMux, proxyH)
 	proxySrv := httptest.NewServer(proxyMux)
 	t.Cleanup(proxySrv.Close)
 

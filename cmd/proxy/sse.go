@@ -1,4 +1,4 @@
-package proxy
+package main
 
 import (
 	"encoding/json"
@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/httputil"
 	"github.com/elevran/charon/internal/inference"
+	"github.com/elevran/charon/pkg/charon"
 )
 
 // sseEvent is the wire format of a single SSE event.

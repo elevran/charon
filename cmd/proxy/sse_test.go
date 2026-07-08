@@ -1,4 +1,4 @@
-package proxy_test
+package main
 
 import (
 	"bufio"
@@ -10,13 +10,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/elevran/charon/internal/proxy"
 )
 
 type parsedSSE struct {
 	events        []map[string]json.RawMessage
-	finalResponse *proxy.ResponseResource
+	finalResponse *ResponseResource
 }
 
 func parseSSE(t *testing.T, resp *http.Response) parsedSSE {
@@ -38,7 +36,7 @@ func parseSSE(t *testing.T, resp *http.Response) parsedSSE {
 		_ = json.Unmarshal(evt["type"], &typeStr)
 		if typeStr == "response.completed" {
 			var full struct {
-				Response proxy.ResponseResource `json:"response"`
+				Response ResponseResource `json:"response"`
 			}
 			_ = json.Unmarshal([]byte(data), &full)
 			r := full.Response

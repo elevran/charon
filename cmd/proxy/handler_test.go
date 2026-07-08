@@ -1,4 +1,4 @@
-package proxy_test
+package main
 
 import (
 	"bytes"
@@ -17,12 +17,11 @@ import (
 	crdbpebble "github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 
-	apihandler "github.com/elevran/charon/internal/api"
 	"github.com/elevran/charon/internal/chainstore"
 	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/inference"
-	"github.com/elevran/charon/internal/proxy"
+	"github.com/elevran/charon/internal/server"
+	"github.com/elevran/charon/pkg/charon"
 )
 
 // stack holds the full test infrastructure.
@@ -32,7 +31,7 @@ type stack struct {
 	proxySrv  *httptest.Server
 }
 
-func startStack(t *testing.T) *stack {
+func startHandlerStack(t *testing.T) *stack {
 	t.Helper()
 	// Charon internal API
 	opts := &crdbpebble.Options{FS: vfs.NewMem()}
@@ -40,9 +39,9 @@ func startStack(t *testing.T) *stack {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = svc.Close() })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	charonH := apihandler.NewHandler(svc, log)
+	charonH := server.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
-	apihandler.RegisterHandlers(charonMux, charonH)
+	server.RegisterHandlers(charonMux, charonH)
 	charonSrv := httptest.NewServer(charonMux)
 	t.Cleanup(charonSrv.Close)
 
@@ -53,9 +52,9 @@ func startStack(t *testing.T) *stack {
 	// Proxy
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)
 	infClient := inference.New(mockInf.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log)
+	proxyH := NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
-	proxy.RegisterHandlers(proxyMux, proxyH)
+	RegisterHandlers(proxyMux, proxyH)
 	proxySrv := httptest.NewServer(proxyMux)
 	t.Cleanup(proxySrv.Close)
 
@@ -89,13 +88,13 @@ func decodeBody[T any](t *testing.T, resp *http.Response) T {
 // --- Tests ---
 
 func TestCreateNewChain(t *testing.T) {
-	s := startStack(t)
+	s := startHandlerStack(t)
 	body := map[string]interface{}{"model": "test", "input": "hello"}
 	resp := doRequest(t, s.proxySrv.URL, "POST", "/responses", body)
 	defer resp.Body.Close()
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var r proxy.ResponseResource
+	var r ResponseResource
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&r))
 	assert.True(t, len(r.ID) > 0, "id must be non-empty")
 	assert.Equal(t, "completed", r.Status)
@@ -103,7 +102,7 @@ func TestCreateNewChain(t *testing.T) {
 }
 
 func TestCreateMissingModel(t *testing.T) {
-	s := startStack(t)
+	s := startHandlerStack(t)
 	body := map[string]interface{}{"input": "hello"}
 	resp := doRequest(t, s.proxySrv.URL, "POST", "/responses", body)
 	defer resp.Body.Close()
@@ -111,7 +110,7 @@ func TestCreateMissingModel(t *testing.T) {
 }
 
 func TestCreatePreviousNotFound(t *testing.T) {
-	s := startStack(t)
+	s := startHandlerStack(t)
 	prevID := "resp_unknown"
 	body := map[string]interface{}{
 		"model":                "test",
@@ -127,12 +126,12 @@ func TestCreatePreviousNotFound(t *testing.T) {
 }
 
 func TestCreateContinuation(t *testing.T) {
-	s := startStack(t)
+	s := startHandlerStack(t)
 
 	// Turn 0
 	r0 := doRequest(t, s.proxySrv.URL, "POST", "/responses",
 		map[string]interface{}{"model": "test", "input": "hello"})
-	resource0 := decodeBody[proxy.ResponseResource](t, r0)
+	resource0 := decodeBody[ResponseResource](t, r0)
 	require.Equal(t, "completed", resource0.Status)
 
 	// Turn 1 continuing from turn 0
@@ -142,38 +141,38 @@ func TestCreateContinuation(t *testing.T) {
 			"input":                "follow up",
 			"previous_response_id": resource0.ID,
 		})
-	resource1 := decodeBody[proxy.ResponseResource](t, r1)
+	resource1 := decodeBody[ResponseResource](t, r1)
 	require.Equal(t, http.StatusOK, r1.StatusCode)
 	assert.Equal(t, "completed", resource1.Status)
 	assert.NotEmpty(t, resource1.ID)
 }
 
 func TestRetrieve(t *testing.T) {
-	s := startStack(t)
+	s := startHandlerStack(t)
 
 	r0 := doRequest(t, s.proxySrv.URL, "POST", "/responses",
 		map[string]interface{}{"model": "test", "input": "hello"})
-	resource0 := decodeBody[proxy.ResponseResource](t, r0)
+	resource0 := decodeBody[ResponseResource](t, r0)
 
 	r1 := doRequest(t, s.proxySrv.URL, "GET", "/responses/"+resource0.ID, nil)
-	resource1 := decodeBody[proxy.ResponseResource](t, r1)
+	resource1 := decodeBody[ResponseResource](t, r1)
 	assert.Equal(t, http.StatusOK, r1.StatusCode)
 	assert.Equal(t, resource0.ID, resource1.ID)
 }
 
 func TestRetrieveNotFound(t *testing.T) {
-	s := startStack(t)
+	s := startHandlerStack(t)
 	resp := doRequest(t, s.proxySrv.URL, "GET", "/responses/resp_missing", nil)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
 func TestDelete(t *testing.T) {
-	s := startStack(t)
+	s := startHandlerStack(t)
 
 	r0 := doRequest(t, s.proxySrv.URL, "POST", "/responses",
 		map[string]interface{}{"model": "test", "input": "hello"})
-	resource0 := decodeBody[proxy.ResponseResource](t, r0)
+	resource0 := decodeBody[ResponseResource](t, r0)
 
 	delResp := doRequest(t, s.proxySrv.URL, "DELETE", "/responses/"+resource0.ID, nil)
 	defer delResp.Body.Close()
@@ -184,17 +183,8 @@ func TestDelete(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, getResp.StatusCode)
 }
 
-func TestCompactMissingModel(t *testing.T) {
-	s := startStack(t)
-	resp := doRequest(t, s.proxySrv.URL, "POST", "/responses/compact",
-		map[string]interface{}{"input": []interface{}{}})
-	defer resp.Body.Close()
-	assert.True(t, resp.StatusCode == 400 || resp.StatusCode == 422,
-		"expected 400 or 422, got %d", resp.StatusCode)
-}
-
 func TestBackgroundFlagRoundtrip(t *testing.T) {
-	s := startStack(t)
+	s := startHandlerStack(t)
 
 	// POST with background:true — immediate response must echo the flag.
 	body := map[string]interface{}{
@@ -203,19 +193,19 @@ func TestBackgroundFlagRoundtrip(t *testing.T) {
 		"background": true,
 	}
 	r0 := doRequest(t, s.proxySrv.URL, "POST", "/responses", body)
-	resource0 := decodeBody[proxy.ResponseResource](t, r0)
+	resource0 := decodeBody[ResponseResource](t, r0)
 	require.Equal(t, http.StatusOK, r0.StatusCode)
 	assert.True(t, resource0.Background, "immediate POST response must echo background:true")
 
 	// GET must also return background:true (persisted in Charon).
 	r1 := doRequest(t, s.proxySrv.URL, "GET", "/responses/"+resource0.ID, nil)
-	resource1 := decodeBody[proxy.ResponseResource](t, r1)
+	resource1 := decodeBody[ResponseResource](t, r1)
 	require.Equal(t, http.StatusOK, r1.StatusCode)
 	assert.True(t, resource1.Background, "GET /responses/{id} must return background:true")
 }
 
 func TestStoreEquality(t *testing.T) {
-	s := startStack(t)
+	s := startHandlerStack(t)
 
 	// store:false — should NOT be retrievable from Charon
 	storeFalse := false
@@ -225,7 +215,7 @@ func TestStoreEquality(t *testing.T) {
 		"store": storeFalse,
 	}
 	r0 := doRequest(t, s.proxySrv.URL, "POST", "/responses", body)
-	resource0 := decodeBody[proxy.ResponseResource](t, r0)
+	resource0 := decodeBody[ResponseResource](t, r0)
 	require.Equal(t, http.StatusOK, r0.StatusCode)
 	assert.False(t, resource0.Store)
 

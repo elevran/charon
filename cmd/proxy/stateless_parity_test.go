@@ -1,4 +1,4 @@
-package proxy_test
+package main
 
 // TestStatelessStatefulParity demonstrates that the inference backend always
 // receives the complete conversation context (a stateless view), even though
@@ -34,12 +34,11 @@ import (
 	crdbpebble "github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 
-	apihandler "github.com/elevran/charon/internal/api"
 	"github.com/elevran/charon/internal/chainstore"
 	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	"github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/inference"
-	"github.com/elevran/charon/internal/proxy"
+	"github.com/elevran/charon/internal/server"
+	"github.com/elevran/charon/pkg/charon"
 )
 
 // capturedInfReq records a single request body received by the inference server.
@@ -110,9 +109,9 @@ func startParityStack(t *testing.T) (*httptest.Server, *capturingInfServer) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = svc.Close() })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	charonH := apihandler.NewHandler(svc, log)
+	charonH := server.NewHandler(svc, log)
 	charonMux := http.NewServeMux()
-	apihandler.RegisterHandlers(charonMux, charonH)
+	server.RegisterHandlers(charonMux, charonH)
 	charonSrv := httptest.NewServer(charonMux)
 	t.Cleanup(charonSrv.Close)
 
@@ -120,9 +119,9 @@ func startParityStack(t *testing.T) (*httptest.Server, *capturingInfServer) {
 
 	charonClient := charon.New(charonSrv.URL, 5*time.Second)
 	infClient := inference.New(infSrv.URL, "", 5*time.Second)
-	proxyH := proxy.NewHandler(charonClient, infClient, log)
+	proxyH := NewHandler(charonClient, infClient, log)
 	proxyMux := http.NewServeMux()
-	proxy.RegisterHandlers(proxyMux, proxyH)
+	RegisterHandlers(proxyMux, proxyH)
 	proxySrv := httptest.NewServer(proxyMux)
 	t.Cleanup(proxySrv.Close)
 
@@ -130,14 +129,14 @@ func startParityStack(t *testing.T) (*httptest.Server, *capturingInfServer) {
 }
 
 // postResponse sends POST /responses to the proxy and returns the decoded resource.
-func postResponse(t *testing.T, client *http.Client, baseURL string, body map[string]any) proxy.ResponseResource {
+func postResponse(t *testing.T, client *http.Client, baseURL string, body map[string]any) ResponseResource {
 	t.Helper()
 	b, _ := json.Marshal(body)
 	resp, err := client.Post(baseURL+"/responses", "application/json", bytes.NewReader(b))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var r proxy.ResponseResource
+	var r ResponseResource
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&r))
 	return r
 }
@@ -173,7 +172,7 @@ func assertItemsJSONEqual(t *testing.T, want, got []json.RawMessage) {
 func TestStatelessStatefulParity(t *testing.T) {
 	proxySrv, infSrv := startParityStack(t)
 	client := proxySrv.Client()
-	post := func(body map[string]any) proxy.ResponseResource {
+	post := func(body map[string]any) ResponseResource {
 		return postResponse(t, client, proxySrv.URL, body)
 	}
 
