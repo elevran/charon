@@ -112,6 +112,36 @@ func TestProxyOptionsCLIOverridesFile(t *testing.T) {
 	assert.Equal(t, ":5555", opts.Listen, "CLI flag must take precedence over config file")
 }
 
+func TestProxyOptionsBackendCLIOverridesFile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "cfg.yaml")
+	err := os.WriteFile(cfgPath, []byte("proxy:\n  inference:\n    base_url: http://file-backend:11434\n"), 0600)
+	require.NoError(t, err)
+
+	opts := config.NewProxyOptions()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--config", cfgPath, "--backend", "http://cli-backend:11434"}))
+	require.NoError(t, opts.Complete(fs))
+
+	assert.Equal(t, "http://cli-backend:11434", opts.Backend, "CLI --backend must take precedence over config file")
+}
+
+func TestProxyOptionsCharonURLCLIOverridesFile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "cfg.yaml")
+	err := os.WriteFile(cfgPath, []byte("proxy:\n  charon_url: http://file-charon:8081\n"), 0600)
+	require.NoError(t, err)
+
+	opts := config.NewProxyOptions()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--config", cfgPath, "--charon-url", "http://cli-charon:9999"}))
+	require.NoError(t, opts.Complete(fs))
+
+	assert.Equal(t, "http://cli-charon:9999", opts.CharonURL, "CLI --charon-url must take precedence over config file")
+}
+
 func TestProxyOptionsValidateOK(t *testing.T) {
 	opts := config.NewProxyOptions()
 	require.NoError(t, opts.Validate())

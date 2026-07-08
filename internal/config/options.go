@@ -18,7 +18,6 @@ type fileConfig struct {
 }
 
 type fileProxyConfig struct {
-	Enabled   bool                `json:"enabled"`
 	Listen    string              `json:"listen"`
 	CharonURL string              `json:"charon_url"`
 	Inference fileInferenceConfig `json:"inference"`
@@ -117,6 +116,18 @@ type TelemetryOptions struct {
 	ServiceName string // identifies this binary in traces
 }
 
+// AddFlags registers the --telemetry-exporter-url flag on fs.
+func (o *TelemetryOptions) AddFlags(fs *flag.FlagSet) {
+	fs.StringVar(&o.ExporterURL, "telemetry-exporter-url", o.ExporterURL, "OTLP HTTP exporter URL (e.g. http://localhost:4318); empty disables tracing")
+}
+
+// visitedFlags returns a set of flag names that were explicitly set on fs.
+func visitedFlags(fs *flag.FlagSet) map[string]bool {
+	m := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { m[f.Name] = true })
+	return m
+}
+
 // ---------------------------------------------------------------------------
 // CharonOptions
 // ---------------------------------------------------------------------------
@@ -160,7 +171,7 @@ func (o *CharonOptions) AddFlags(fs *flag.FlagSet) {
 	fs.StringVar(&o.ConfigFile, "config", "", "path to config file")
 	fs.StringVar(&o.Listen, "listen", o.Listen, "charon internal API listen address")
 	fs.StringVar(&o.DataDir, "storage-data-dir", o.DataDir, "data directory for Pebble storage")
-	fs.StringVar(&o.Telemetry.ExporterURL, "telemetry-exporter-url", o.Telemetry.ExporterURL, "OTLP HTTP exporter URL (e.g. http://localhost:4318); empty disables tracing")
+	o.Telemetry.AddFlags(fs)
 }
 
 // Complete loads the config file (if --config was set) and merges file values
@@ -175,8 +186,7 @@ func (o *CharonOptions) Complete(fs *flag.FlagSet) error {
 		return err
 	}
 
-	setFlags := make(map[string]bool)
-	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+	setFlags := visitedFlags(fs)
 
 	if !setFlags["listen"] {
 		o.Listen = fc.Charon.Listen
@@ -205,6 +215,9 @@ func (o *CharonOptions) Complete(fs *flag.FlagSet) error {
 
 // Validate checks CharonOptions for invalid combinations. It performs no I/O.
 func (o *CharonOptions) Validate() error {
+	if o.DataDir == "" {
+		return fmt.Errorf("charon storage data-dir is empty")
+	}
 	return nil
 }
 
@@ -249,7 +262,7 @@ func (o *ProxyOptions) AddFlags(fs *flag.FlagSet) {
 	fs.StringVar(&o.Listen, "listen", o.Listen, "proxy server listen address")
 	fs.StringVar(&o.Backend, "backend", o.Backend, "inference backend base URL")
 	fs.StringVar(&o.CharonURL, "charon-url", o.CharonURL, "charon internal API base URL")
-	fs.StringVar(&o.Telemetry.ExporterURL, "telemetry-exporter-url", o.Telemetry.ExporterURL, "OTLP HTTP exporter URL (e.g. http://localhost:4318); empty disables tracing")
+	o.Telemetry.AddFlags(fs)
 }
 
 // Complete loads the config file (if --config was set) and merges file values
@@ -264,8 +277,7 @@ func (o *ProxyOptions) Complete(fs *flag.FlagSet) error {
 		return err
 	}
 
-	setFlags := make(map[string]bool)
-	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+	setFlags := visitedFlags(fs)
 
 	if !setFlags["listen"] {
 		o.Listen = fc.Proxy.Listen
