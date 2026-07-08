@@ -11,16 +11,12 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/elevran/charon/internal/api"
 	"github.com/elevran/charon/internal/chainstore"
 	pebblebe "github.com/elevran/charon/internal/chainstore/pebble"
-	charonpkg "github.com/elevran/charon/internal/charon"
 	"github.com/elevran/charon/internal/config"
-	"github.com/elevran/charon/internal/inference"
 	"github.com/elevran/charon/internal/metrics"
-	"github.com/elevran/charon/internal/proxy"
+	"github.com/elevran/charon/internal/server"
 	"github.com/elevran/charon/internal/telemetry"
 )
 
@@ -68,68 +64,28 @@ func run() error {
 	}
 	defer func() { _ = svc.Close() }()
 
-	// Initialise OTel tracing (no-op when ExporterURL is empty).
-	charonTP, err := telemetry.Init(context.Background(), opts.Telemetry.CharonService, opts.Telemetry.ExporterURL)
+	tp, err := telemetry.Init(context.Background(), opts.Telemetry.CharonService, opts.Telemetry.ExporterURL)
 	if err != nil {
-		log.Error("init charon tracer", "err", err)
+		log.Error("init tracer", "err", err)
 		return err
 	}
-	if charonTP != nil {
+	if tp != nil {
 		defer func() {
 			shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
 			defer c()
-			_ = charonTP.Shutdown(shutdownCtx)
+			_ = tp.Shutdown(shutdownCtx)
 		}()
 	}
 
-	var proxyTP *sdktrace.TracerProvider
-	if opts.ProxyEnabled {
-		proxyTP, err = telemetry.Init(context.Background(), opts.Telemetry.ProxyService, opts.Telemetry.ExporterURL)
-		if err != nil {
-			log.Error("init proxy tracer", "err", err)
-			return err
-		}
-		if proxyTP != nil {
-			defer func() {
-				shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
-				defer c()
-				_ = proxyTP.Shutdown(shutdownCtx)
-			}()
-		}
-	}
-
-	// ── Charon internal API server (always starts) ─────────────────────────
-	charonH := api.NewHandler(svc, log).WithMaxBodyBytes(int64(opts.MaxPayload))
-	charonSrv := api.NewServerWithRegistry(opts.CharonListen, charonH, log, reg, charonTP)
-
-	// ── Proxy server (starts only when --proxy / proxy.enabled: true) ──────
-	var proxySrv *api.Server
-	if opts.ProxyEnabled {
-		timeout := time.Duration(opts.InferenceTimeoutSeconds) * time.Second
-		infClient := inference.New(opts.ProxyBackend, opts.ProxyAPIKey, timeout)
-		charonClient := charonpkg.New(opts.ProxyCharonURL, timeout)
-		proxyH := proxy.NewHandler(charonClient, infClient, log)
-		proxyMux := http.NewServeMux()
-		proxy.RegisterHandlers(proxyMux, proxyH)
-		proxySrv = api.NewServerFromMux(opts.ProxyListen, proxyMux, log, proxyTP)
-	}
+	h := server.NewHandler(svc, log).WithMaxBodyBytes(int64(opts.MaxPayload))
+	srv := server.NewServerWithRegistry(opts.CharonListen, h, log, reg, tp)
 
 	go func() {
-		log.Info("starting charon internal API", "addr", opts.CharonListen)
-		if err := charonSrv.Start(); err != nil && err != http.ErrServerClosed {
+		log.Info("starting charon", "addr", opts.CharonListen)
+		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
 			log.Error("charon server error", "err", err)
 		}
 	}()
-	if opts.ProxyEnabled {
-		go func() {
-			log.Info("starting proxy server", "addr", opts.ProxyListen)
-			if err := proxySrv.Start(); err != nil && err != http.ErrServerClosed {
-				log.Error("proxy server error", "err", err)
-			}
-		}()
-	} else {
-		log.Info("proxy layer disabled — set proxy.enabled: true to enable")
-	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
@@ -138,13 +94,8 @@ func run() error {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-	if err := charonSrv.Shutdown(shutdownCtx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("charon shutdown error", "err", err)
-	}
-	if opts.ProxyEnabled {
-		if err := proxySrv.Shutdown(shutdownCtx); err != nil {
-			log.Error("proxy shutdown error", "err", err)
-		}
 	}
 	return nil
 }

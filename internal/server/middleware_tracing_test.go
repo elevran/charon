@@ -1,4 +1,4 @@
-package api_test
+package server_test
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
-	"github.com/elevran/charon/internal/api"
+	api "github.com/elevran/charon/internal/server"
 )
 
 func TestTracingMiddlewareCreatesSpan(t *testing.T) {
