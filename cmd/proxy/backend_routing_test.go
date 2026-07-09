@@ -44,10 +44,11 @@ func (r *routingRecorder) snapshot() []string {
 
 // newRoutingStack builds a testStack whose Charon mux is wrapped in a
 // routingRecorder, so tests can inspect which endpoints were called.
-func newRoutingStack(t *testing.T) (*testStack, *routingRecorder) {
+func newRoutingStack(t *testing.T, opts ...stackOption) (*testStack, *routingRecorder) {
 	t.Helper()
 	rec := &routingRecorder{}
-	s := newTestStack(t, withCharonMiddleware(rec.middleware()))
+	allOpts := append([]stackOption{withCharonMiddleware(rec.middleware())}, opts...)
+	s := newTestStack(t, allOpts...)
 	return s, rec
 }
 
@@ -226,8 +227,7 @@ func TestProxyStreamedStoreTrueNoChainFetches(t *testing.T) {
 // TestBufferedProxySingleChunk verifies that a small buffered response produces
 // exactly 1 chunk PUT and 1 complete (default 1 MiB cap is not exceeded).
 func TestBufferedProxySingleChunk(t *testing.T) {
-	rec := &routingRecorder{}
-	s := newTestStack(t, withCharonMiddleware(rec.middleware()))
+	s, rec := newRoutingStack(t)
 
 	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
 		"model": "test",
@@ -245,8 +245,7 @@ func TestBufferedProxySingleChunk(t *testing.T) {
 // TestStreamedProxySingleChunk verifies that a small streamed response produces
 // exactly 1 chunk PUT and 1 complete.
 func TestStreamedProxySingleChunk(t *testing.T) {
-	rec := &routingRecorder{}
-	s := newTestStack(t, withCharonMiddleware(rec.middleware()))
+	s, rec := newRoutingStack(t)
 
 	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxyURL+"/responses",
 		strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
@@ -266,8 +265,7 @@ func TestStreamedProxySingleChunk(t *testing.T) {
 // TestBufferedProxyMultipleChunks verifies that a tiny chunk cap splits the
 // buffered response blob into multiple chunk PUTs.
 func TestBufferedProxyMultipleChunks(t *testing.T) {
-	rec := &routingRecorder{}
-	s := newTestStack(t, withMaxChunkBytes(64), withCharonMiddleware(rec.middleware()))
+	s, rec := newRoutingStack(t, withMaxChunkBytes(64))
 
 	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
 		"model": "test",
@@ -286,8 +284,7 @@ func TestBufferedProxyMultipleChunks(t *testing.T) {
 // turn issues no Charon staging calls at all — neither AppendChunk, Complete,
 // nor Abort. The empty-response abort path is covered by disruptive_test.go.
 func TestBufferedProxyStoreFalseNoStagingCalls(t *testing.T) {
-	rec := &routingRecorder{}
-	s := newTestStack(t, withCharonMiddleware(rec.middleware()))
+	s, rec := newRoutingStack(t)
 
 	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
 		"model": "test",

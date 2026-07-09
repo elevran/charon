@@ -162,9 +162,7 @@ func TestStoreTrueContinuation(t *testing.T) {
 // TestBufferedCapConfigurable verifies that a tiny MaxChunkBytes forces the
 // buffered path to split a response blob into multiple AppendChunk calls.
 func TestBufferedCapConfigurable(t *testing.T) {
-	rec := &routingRecorder{}
-	// 64-byte cap forces chunking: a typical storedResponse blob is >64 bytes.
-	s := newTestStack(t, withMaxChunkBytes(64), withCharonMiddleware(rec.middleware()))
+	s, rec := newRoutingStack(t, withMaxChunkBytes(64))
 
 	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
 		"model": "test",
