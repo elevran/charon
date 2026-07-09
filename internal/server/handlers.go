@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/elevran/charon/internal/bytesize"
 	"github.com/elevran/charon/internal/chainstore"
 )
 
@@ -18,8 +19,8 @@ import (
 // enough to stay under typical 256 MB per-process caps with 50+ concurrent
 // inferences, large enough that per-batch HTTP framing overhead is small.
 const (
-	defaultMaxChunkBytes = 1 << 20
-	maxChunkBytes        = 4 << 20
+	defaultMaxChunkBytes = bytesize.MiB
+	maxChunkBytes        = 4 * bytesize.MiB
 )
 
 // Handler wires chainstore.Store to HTTP endpoints.

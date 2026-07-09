@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/elevran/charon/cmd/proxy/inference"
+	"github.com/elevran/charon/internal/bytesize"
 	"github.com/elevran/charon/internal/server"
 	"github.com/elevran/charon/pkg/charon"
 )
@@ -24,7 +25,7 @@ type Handler struct {
 
 // NewHandler creates a Handler with the default MaxChunkBytes cap (1 MiB).
 func NewHandler(ch charon.Backend, inf inference.Backend, log *slog.Logger) *Handler {
-	return &Handler{charon: ch, inf: inf, log: log, maxChunkBytes: 1 << 20}
+	return &Handler{charon: ch, inf: inf, log: log, maxChunkBytes: bytesize.MiB}
 }
 
 // WithMaxChunkBytes sets the per-response chunk cap and returns h for chaining.

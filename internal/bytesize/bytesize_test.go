@@ -1,14 +1,13 @@
-package charonconfig_test
+package bytesize_test
 
 import (
 	"encoding/json"
-	"flag"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/elevran/charon/internal/charonconfig"
+	"github.com/elevran/charon/internal/bytesize"
 )
 
 func TestByteSizeUnmarshal(t *testing.T) {
@@ -36,9 +35,9 @@ func TestByteSizeUnmarshal(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
-			var b charonconfig.ByteSize
+			var b bytesize.ByteSize
 			require.NoError(t, json.Unmarshal([]byte(tc.input), &b))
-			assert.Equal(t, charonconfig.ByteSize(tc.want), b)
+			assert.Equal(t, bytesize.ByteSize(tc.want), b)
 		})
 	}
 }
@@ -57,21 +56,10 @@ func TestByteSizeUnmarshalErrors(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
-			var b charonconfig.ByteSize
+			var b bytesize.ByteSize
 			err := json.Unmarshal([]byte(tc.input), &b)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.errFrag)
 		})
 	}
-}
-
-func TestByteSizeInConfig(t *testing.T) {
-	yaml := []byte("charon:\n  storage:\n    max_payload: \"10MB\"\n")
-	cfg := configFromBytes(t, yaml)
-	opts := charonconfig.NewOptions()
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	opts.AddFlags(fs)
-	require.NoError(t, fs.Parse([]string{"--config", cfg}))
-	require.NoError(t, opts.Complete(fs))
-	assert.Equal(t, charonconfig.ByteSize(10*1024*1024), opts.MaxPayload)
 }

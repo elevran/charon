@@ -1,10 +1,22 @@
-package charonconfig
+// Package bytesize provides a configurable byte-size type that unmarshals
+// from either a plain integer (bytes) or a string with an optional unit suffix
+// (B, KB, MB, GB), plus named binary multipliers (KiB, MiB, GiB) so call sites
+// can stop writing "1 << 20".
+package bytesize
 
 import (
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
+)
+
+// Binary multipliers. K = 1024 to match the unit parsing below.
+const (
+	KiB int64 = 1 << 10
+	MiB int64 = 1 << 20
+	GiB int64 = 1 << 30
+	TiB int64 = 1 << 40
 )
 
 // ByteSize is an int64 that unmarshals from either a plain integer (bytes) or
@@ -18,6 +30,8 @@ var unitMultipliers = map[string]int64{
 	"gb": 1024 * 1024 * 1024,
 }
 
+// UnmarshalJSON accepts a JSON number (raw bytes) or string (number with
+// optional unit suffix).
 func (b *ByteSize) UnmarshalJSON(data []byte) error {
 	var n int64
 	if err := json.Unmarshal(data, &n); err == nil {

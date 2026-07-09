@@ -8,11 +8,12 @@ import (
 
 	"sigs.k8s.io/yaml"
 
+	"github.com/elevran/charon/internal/bytesize"
 	"github.com/elevran/charon/internal/telemetry"
 )
 
 // defaultMaxChunkBytes is the default cap for chunkedResponseWriter (1 MiB).
-const defaultMaxChunkBytes int64 = 1 << 20
+const defaultMaxChunkBytes int64 = bytesize.MiB
 
 // ProxyOptions holds configuration for the proxy server.
 type ProxyOptions struct {
