@@ -349,6 +349,9 @@ type Backend interface {
 	Resolve(ctx context.Context, previousID, tenantKey string, requestBlob []byte) (string, []ResolveTurn, error)
 	GetChain(ctx context.Context, id, tenantKey string) ([]ResolveTurn, error)
 	Store(ctx context.Context, id, stagingID, tenantKey string, responseBlob []byte) error
+	AppendChunk(ctx context.Context, stagingID string, k uint32, responseID string, body []byte) error
+	Complete(ctx context.Context, stagingID, responseID, tenantKey string, total uint32) (string, error)
+	Abort(ctx context.Context, stagingID string) error
 	Retrieve(ctx context.Context, id, tenantKey string) (*RetrieveResponse, error)
 	Delete(ctx context.Context, id, tenantKey string) error
 }

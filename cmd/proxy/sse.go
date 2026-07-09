@@ -29,21 +29,6 @@ func writeSSE(w http.ResponseWriter, evt sseEvent) {
 	}
 }
 
-// streamBuffer accumulates bare output item JSON (SSE framing already stripped).
-type streamBuffer struct {
-	items []json.RawMessage
-}
-
-func (b *streamBuffer) add(item json.RawMessage) {
-	b.items = append(b.items, item)
-}
-
-func (b *streamBuffer) drain() []json.RawMessage {
-	items := b.items
-	b.items = nil
-	return items
-}
-
 // handleStream implements POST /responses with stream:true.
 //
 // Output items are extracted from response.output_item.done events (bare item
@@ -101,8 +86,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 	var canonicalID string
 	var created bool
 	var finalInfResp *inference.Response
-
-	buf := &streamBuffer{}
+	var outputItems []json.RawMessage // accumulate output items for Charon store
 
 	for evt := range ch {
 		if evt.Response != nil && evt.Response.ID != "" && canonicalID == "" {
@@ -130,7 +114,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 			// Forward to client immediately (no buffering of client events).
 			writeSSE(w, sseEvent{Type: evt.Type, SequenceNumber: seq, OutputIndex: &outIdx, Item: evt.Item})
 			seq++
-			buf.add(evt.Item)
+			outputItems = append(outputItems, evt.Item)
 
 		case "response.completed":
 			finalInfResp = evt.Response
@@ -161,11 +145,17 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 	}
 
 	if req.ShouldStore() && canonicalID != "" {
-		finalInfResp.Output = buf.drain()
+		finalInfResp.Output = outputItems
 		responseBlob := marshalStoredResponse(finalInfResp, req.PreviousResponseID, req.Instructions, req.Background)
-		if err := h.charon.Store(ctx, canonicalID, stagingID, tenantKey, responseBlob); err != nil {
-			h.log.Error("charon store after stream", "id", canonicalID, "err", err)
-			return // do not emit response.completed — client must not believe the response was persisted
+		cw := newChunkedResponseWriter(ctx, h.charon, stagingID, canonicalID, tenantKey, h.maxChunkBytes)
+		if err := cw.Add(responseBlob); err != nil {
+			h.log.Error("stream chunk add", "id", canonicalID, "err", err)
+			_ = cw.Abort()
+			return // do not emit response.completed
+		}
+		if err := cw.Close(); err != nil {
+			h.log.Error("stream chunk close", "id", canonicalID, "err", err)
+			return // do not emit response.completed
 		}
 	}
 

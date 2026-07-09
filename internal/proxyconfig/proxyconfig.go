@@ -11,6 +11,9 @@ import (
 	"github.com/elevran/charon/internal/telemetry"
 )
 
+// defaultMaxChunkBytes is the default cap for chunkedResponseWriter (1 MiB).
+const defaultMaxChunkBytes int64 = 1 << 20
+
 // ProxyOptions holds configuration for the proxy server.
 type ProxyOptions struct {
 	// Config file path — set by --config flag.
@@ -27,6 +30,10 @@ type ProxyOptions struct {
 	// CharonURL is the Charon internal API endpoint the proxy calls.
 	// Auto-derived from config file proxy.charon_url or Charon's listen address.
 	CharonURL string
+
+	// MaxChunkBytes caps the in-memory response buffer before flushing to
+	// Charon as a chunk. 0 or negative applies the default (1 MiB).
+	MaxChunkBytes int64
 
 	Telemetry telemetry.Options
 }
@@ -48,6 +55,8 @@ func (o *ProxyOptions) AddFlags(fs *flag.FlagSet) {
 	fs.StringVar(&o.Listen, "listen", o.Listen, "proxy server listen address")
 	fs.StringVar(&o.Backend, "backend", o.Backend, "inference backend base URL")
 	fs.StringVar(&o.CharonURL, "charon-url", o.CharonURL, "charon internal API base URL")
+	fs.Int64Var(&o.MaxChunkBytes, "max-chunk-bytes", 0,
+		"max response bytes buffered before flushing to Charon as a chunk (0 = default 1 MiB)")
 	o.Telemetry.AddFlags(fs)
 }
 
@@ -87,6 +96,10 @@ func (o *ProxyOptions) Complete(fs *flag.FlagSet) error {
 		o.Telemetry.ExporterURL = fc.Telemetry.ExporterURL
 	}
 	o.Telemetry.ServiceName = fc.Telemetry.ServiceName
+
+	if o.MaxChunkBytes <= 0 {
+		o.MaxChunkBytes = defaultMaxChunkBytes
+	}
 
 	return nil
 }

@@ -159,6 +159,26 @@ func TestStoreTrueContinuation(t *testing.T) {
 	assert.NotEqual(t, anchor.ID, follow.ID)
 }
 
+// TestBufferedCapConfigurable verifies that a tiny MaxChunkBytes forces the
+// buffered path to split a response blob into multiple AppendChunk calls.
+func TestBufferedCapConfigurable(t *testing.T) {
+	rec := &routingRecorder{}
+	// 64-byte cap forces chunking: a typical storedResponse blob is >64 bytes.
+	s := newTestStack(t, withMaxChunkBytes(64), withCharonMiddleware(rec.middleware()))
+
+	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
+		"model": "test",
+		"input": "hello world, this is a test request that should produce a response blob exceeding 64 bytes",
+	})
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	hits := rec.snapshot()
+	assert.GreaterOrEqual(t, hitsContaining(hits, "/chunks/"), 2,
+		"tiny cap must force ≥2 AppendChunk calls for a non-trivial response blob")
+	assert.Equal(t, 1, hitsContaining(hits, "/complete"), "exactly 1 Complete call")
+}
+
 // TestCreateStoreFalseProduces200NoCommit ensures that the proxy
 // doesn't 5xx on a store:false turn — the response is returned to the
 // client and no Charon state is committed.

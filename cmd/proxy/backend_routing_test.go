@@ -222,3 +222,86 @@ func TestProxyStreamedStoreTrueNoChainFetches(t *testing.T) {
 	assert.GreaterOrEqual(t, hitsContaining(hits, "POST /staging"), 1, "store:true must commit via POST /staging")
 	assert.Equal(t, 0, hitsContaining(hits, "GET /chain/"), "store:true first turn has no prev to fetch via GET /chain")
 }
+
+// TestBufferedProxySingleChunk verifies that a small buffered response produces
+// exactly 1 chunk PUT and 1 complete (default 1 MiB cap is not exceeded).
+func TestBufferedProxySingleChunk(t *testing.T) {
+	rec := &routingRecorder{}
+	s := newTestStack(t, withCharonMiddleware(rec.middleware()))
+
+	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
+		"model": "test",
+		"input": "hello",
+	})
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	hits := rec.snapshot()
+	assert.Equal(t, 1, hitsContaining(hits, "/chunks/"), "small response must produce exactly 1 AppendChunk call")
+	assert.Equal(t, 1, hitsContaining(hits, "/complete"), "exactly 1 Complete call")
+	assert.Equal(t, 0, hitsContaining(hits, "/abort"), "no abort on success")
+}
+
+// TestStreamedProxySingleChunk verifies that a small streamed response produces
+// exactly 1 chunk PUT and 1 complete.
+func TestStreamedProxySingleChunk(t *testing.T) {
+	rec := &routingRecorder{}
+	s := newTestStack(t, withCharonMiddleware(rec.middleware()))
+
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxyURL+"/responses",
+		strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	_ = readSSE(t, resp)
+
+	hits := rec.snapshot()
+	assert.Equal(t, 1, hitsContaining(hits, "/chunks/"), "small response must produce exactly 1 AppendChunk call")
+	assert.Equal(t, 1, hitsContaining(hits, "/complete"), "exactly 1 Complete call")
+	assert.Equal(t, 0, hitsContaining(hits, "/abort"), "no abort on success")
+}
+
+// TestBufferedProxyMultipleChunks verifies that a tiny chunk cap splits the
+// buffered response blob into multiple chunk PUTs.
+func TestBufferedProxyMultipleChunks(t *testing.T) {
+	rec := &routingRecorder{}
+	s := newTestStack(t, withMaxChunkBytes(64), withCharonMiddleware(rec.middleware()))
+
+	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
+		"model": "test",
+		"input": "hello world, this request should produce a response blob that exceeds 64 bytes after marshaling",
+	})
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	hits := rec.snapshot()
+	assert.GreaterOrEqual(t, hitsContaining(hits, "/chunks/"), 2, "tiny cap must produce ≥2 AppendChunk calls")
+	assert.Equal(t, 1, hitsContaining(hits, "/complete"), "exactly 1 Complete call")
+	assert.Equal(t, 0, hitsContaining(hits, "/abort"), "no abort on success")
+}
+
+// TestBufferedProxyAbortsOnEmptyResponse verifies that a buffered path
+// with an empty response issues an abort rather than committing empty bytes.
+// The mock always returns a non-empty output, so we simulate emptiness by
+// injecting a store:false request that never calls Charon at all — instead
+// we confirm the abort path via the disruptive test in disruptive_test.go.
+// This test simply pins that store:false first turns make no /staging calls.
+func TestBufferedProxyStoreFalseNoStagingCalls(t *testing.T) {
+	rec := &routingRecorder{}
+	s := newTestStack(t, withCharonMiddleware(rec.middleware()))
+
+	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
+		"model": "test",
+		"input": "hello",
+		"store": false,
+	})
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	hits := rec.snapshot()
+	assert.Equal(t, 0, hitsContaining(hits, "/chunks/"), "store:false must not call AppendChunk")
+	assert.Equal(t, 0, hitsContaining(hits, "/complete"), "store:false must not call Complete")
+	assert.Equal(t, 0, hitsContaining(hits, "/abort"), "store:false must not call Abort")
+}

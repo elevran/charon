@@ -16,14 +16,23 @@ import (
 
 // Handler is the client-facing Responses API proxy handler.
 type Handler struct {
-	charon charon.Backend
-	inf    inference.Backend
-	log    *slog.Logger
+	charon        charon.Backend
+	inf           inference.Backend
+	log           *slog.Logger
+	maxChunkBytes int64
 }
 
-// NewHandler creates a Handler.
+// NewHandler creates a Handler with the default MaxChunkBytes cap (1 MiB).
 func NewHandler(ch charon.Backend, inf inference.Backend, log *slog.Logger) *Handler {
-	return &Handler{charon: ch, inf: inf, log: log}
+	return &Handler{charon: ch, inf: inf, log: log, maxChunkBytes: 1 << 20}
+}
+
+// WithMaxChunkBytes sets the per-response chunk cap and returns h for chaining.
+func (h *Handler) WithMaxChunkBytes(n int64) *Handler {
+	if n > 0 {
+		h.maxChunkBytes = n
+	}
+	return h
 }
 
 // RegisterHandlers mounts Responses API routes on mux.
@@ -109,8 +118,15 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 
 	if req.ShouldStore() {
 		responseBlob := marshalStoredResponse(infResp, req.PreviousResponseID, req.Instructions, req.Background)
-		if err := h.charon.Store(ctx, infResp.ID, stagingID, tenantKey, responseBlob); err != nil {
-			h.log.Error("charon store", "id", infResp.ID, "err", err)
+		cw := newChunkedResponseWriter(ctx, h.charon, stagingID, infResp.ID, tenantKey, h.maxChunkBytes)
+		if err := cw.Add(responseBlob); err != nil {
+			h.log.Error("chunk add", "id", infResp.ID, "err", err)
+			_ = cw.Abort()
+			server.WriteError(w, http.StatusInternalServerError, "storage error")
+			return
+		}
+		if err := cw.Close(); err != nil {
+			h.log.Error("chunk close", "id", infResp.ID, "err", err)
 			server.WriteError(w, http.StatusInternalServerError, "storage error")
 			return
 		}
