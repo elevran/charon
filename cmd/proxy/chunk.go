@@ -109,9 +109,14 @@ func (w *chunkedResponseWriter) Close() error {
 
 	if w.closed {
 		ch := w.closedCh
-		err := w.closedErr
 		w.mu.Unlock()
 		<-ch
+		// Read closedErr only after <-ch returns: the original Close writes
+		// it under mu *after* its unlocked I/O, so reading it before the
+		// channel close races with that write.
+		w.mu.Lock()
+		err := w.closedErr
+		w.mu.Unlock()
 		return err
 	}
 	w.closed = true

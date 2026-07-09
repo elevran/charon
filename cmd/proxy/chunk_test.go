@@ -211,6 +211,31 @@ func TestWriterCloseIdempotent(t *testing.T) {
 	assert.Len(t, completes, 1, "terminal flush must execute exactly once")
 }
 
+// TestWriterCloseIdempotentOnError pins that concurrent Close calls return the
+// same non-nil error when Complete fails. Without the closedCh-aware read in
+// Close, a second caller can read a stale nil closedErr before the first
+// caller's deferred close(closedCh) fires, masking the failure.
+func TestWriterCloseIdempotentOnError(t *testing.T) {
+	sentinel := errors.New("complete failed")
+	b := &recordingBackend{completeErr: sentinel}
+	w := newWriter(b, 1024)
+	require.NoError(t, w.Add([]byte(`{"id":"r1"}`)))
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = w.Close()
+		}(i)
+	}
+	wg.Wait()
+
+	assert.ErrorIs(t, errs[0], sentinel, "first Close must propagate Complete error")
+	assert.ErrorIs(t, errs[1], sentinel, "second Close must also propagate the same error, not a stale nil")
+}
+
 func TestWriterAbortSkipsComplete(t *testing.T) {
 	b := &recordingBackend{}
 	w := newWriter(b, 1024)

@@ -282,7 +282,8 @@ func TestBufferedProxyMultipleChunks(t *testing.T) {
 
 // TestBufferedProxyStoreFalseNoStagingCalls pins that a buffered store:false
 // turn issues no Charon staging calls at all — neither AppendChunk, Complete,
-// nor Abort. The empty-response abort path is covered by disruptive_test.go.
+// nor Abort. The empty-response abort path itself is exercised by the unit
+// tests in chunk_test.go (TestWriterZeroBytesAborts).
 func TestBufferedProxyStoreFalseNoStagingCalls(t *testing.T) {
 	s, rec := newRoutingStack(t)
 
