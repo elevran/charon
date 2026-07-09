@@ -99,6 +99,12 @@ type resolveResponse struct {
 	Turns     []resolveResponseTurn `json:"turns"`
 }
 
+// chainResponse is the JSON body returned by GET /chain/{id}.
+// Turns are root-first, matching the order returned by POST /staging.
+type chainResponse struct {
+	Turns []resolveResponseTurn `json:"turns"`
+}
+
 // bufferedStoreRequest is the JSON body accepted by POST /responses.
 type bufferedStoreRequest struct {
 	PrevID       string          `json:"prev_id"`
@@ -160,6 +166,39 @@ func (h *Handler) HandleBufferedStore(w http.ResponseWriter, r *http.Request) {
 		ResponseID: responseID,
 		Turns:      respTurns,
 	})
+}
+
+// HandleGetChain handles GET /chain/{id}.
+//
+// Read-only chain fetch: walks the chain rooted at id (root-first) and
+// returns each turn's (request_blob, response_blob) without creating or
+// committing any staging state. The chain itself is unchanged from the
+// caller's perspective — no new turn is persisted.
+//
+// Used by the proxy for store:false turns: returns the chain without
+// creating a staging record or committing the current turn's request blob.
+//
+// Side effects on the chainstore are limited to LRU metadata updates
+// (LastAccessUnix, bucket promotion) — these are internal to eviction
+// and do not affect the chain's content or shape.
+func (h *Handler) HandleGetChain(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	tenantKey := r.Header.Get("X-Tenant-Key")
+
+	turns, err := h.svc.Resolve(r.Context(), id, tenantKey)
+	if err != nil {
+		h.writeErr(w, "get-chain", id, err)
+		return
+	}
+
+	respTurns := make([]resolveResponseTurn, len(turns))
+	for i, t := range turns {
+		respTurns[i] = resolveResponseTurn{
+			RequestBlob:  blobToRaw(t.RequestBlob),
+			ResponseBlob: blobToRaw(t.ResponseBlob),
+		}
+	}
+	WriteJSON(w, http.StatusOK, chainResponse{Turns: respTurns})
 }
 
 // HandleOpenStaging handles POST /staging?prev={id}.

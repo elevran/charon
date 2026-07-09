@@ -129,3 +129,49 @@ func TestStoreEquality(t *testing.T) {
 	defer getResp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, getResp.StatusCode)
 }
+
+// TestStoreTrueContinuation verifies that a store:true turn can be
+// continued with another store:true turn that chains to it via
+// previous_response_id. The proxy hits Charon's POST /staging path on
+// the continuation, which commits the request blob alongside the
+// previous turn. The store:false -> store:true chaining pattern is
+// pinned separately in backend_routing_test.go.
+func TestStoreTrueContinuation(t *testing.T) {
+	s := newTestStack(t)
+
+	storeTrue := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
+		"model": "test",
+		"input": "anchor",
+	})
+	anchor := decodeJSON[ResponseResource](t, storeTrue)
+	require.Equal(t, http.StatusOK, storeTrue.StatusCode)
+
+	// Continue from a stored turn; this exercises the proxy→Charon
+	// POST /staging path which commits the request blob.
+	cont := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
+		"model":                "test",
+		"input":                "follow",
+		"previous_response_id": anchor.ID,
+	})
+	follow := decodeJSON[ResponseResource](t, cont)
+	require.Equal(t, http.StatusOK, cont.StatusCode)
+	assert.Equal(t, "completed", follow.Status)
+	assert.NotEqual(t, anchor.ID, follow.ID)
+}
+
+// TestCreateStoreFalseProduces200NoCommit ensures that the proxy
+// doesn't 5xx on a store:false turn — the response is returned to the
+// client and no Charon state is committed.
+func TestCreateStoreFalseProduces200NoCommit(t *testing.T) {
+	s := newTestStack(t)
+	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
+		"model": "test",
+		"input": "hello",
+		"store": false,
+	})
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var r ResponseResource
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&r))
+	assert.False(t, r.Store)
+}
