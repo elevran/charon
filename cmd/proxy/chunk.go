@@ -122,10 +122,12 @@ func (w *chunkedResponseWriter) Close() error {
 	w.closed = true
 	defer close(w.closedCh)
 
-	// Flush remaining bytes.
+	// Flush remaining bytes. flush() marks the writer closed on AppendChunk
+	// failure (so callers see the same error from any later Add/Close), but
+	// since we just set closed=true above, the gated !w.closed branch in
+	// flush will not re-close closedCh — the defer here handles that.
 	if len(w.pending) > 0 {
 		if err := w.flush(); err != nil {
-			w.closedErr = err
 			w.mu.Unlock()
 			return err
 		}
@@ -180,6 +182,14 @@ func (w *chunkedResponseWriter) flush() error {
 	w.mu.Lock()
 
 	if err != nil {
+		// Flush failure is terminal: mark the writer closed and signal any
+		// concurrent Close/Abort callers via closedCh. The !w.closed gate
+		// avoids double-closing the channel when this flush is invoked from
+		// inside Close (which sets closed=true and closes via defer).
+		if !w.closed {
+			w.closed = true
+			close(w.closedCh)
+		}
 		w.closedErr = err
 		return err
 	}

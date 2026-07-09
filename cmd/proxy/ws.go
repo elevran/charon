@@ -263,15 +263,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 	if msg.ShouldStore() {
 		finalInfResp.Output = outputItems
 		responseBlob := marshalStoredResponse(finalInfResp, msg.PreviousResponseID, msg.Instructions, msg.Background)
-		cw := newChunkedResponseWriter(ctx, h.charon, stagingID, canonicalID, tenantKey, h.maxChunkBytes)
-		if err := cw.Add(responseBlob); err != nil {
-			h.log.Error("ws chunk add", "id", canonicalID, "err", err)
-			_ = cw.Abort()
-			h.wsSendError(conn, 500, "storage_error", "response not persisted")
-			return
-		}
-		if err := cw.Close(); err != nil {
-			h.log.Error("ws chunk close", "id", canonicalID, "err", err)
+		if err := h.commitStoredResponse(ctx, stagingID, canonicalID, tenantKey, responseBlob); err != nil {
 			h.wsSendError(conn, 500, "storage_error", "response not persisted")
 			return
 		}

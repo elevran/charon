@@ -147,15 +147,8 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 	if req.ShouldStore() && canonicalID != "" {
 		finalInfResp.Output = outputItems
 		responseBlob := marshalStoredResponse(finalInfResp, req.PreviousResponseID, req.Instructions, req.Background)
-		cw := newChunkedResponseWriter(ctx, h.charon, stagingID, canonicalID, tenantKey, h.maxChunkBytes)
-		if err := cw.Add(responseBlob); err != nil {
-			h.log.Error("stream chunk add", "id", canonicalID, "err", err)
-			_ = cw.Abort()
-			return // do not emit response.completed
-		}
-		if err := cw.Close(); err != nil {
-			h.log.Error("stream chunk close", "id", canonicalID, "err", err)
-			return // do not emit response.completed
+		if err := h.commitStoredResponse(ctx, stagingID, canonicalID, tenantKey, responseBlob); err != nil {
+			return // do not emit response.completed — staging was aborted
 		}
 	}
 

@@ -23,6 +23,31 @@ type Handler struct {
 	maxChunkBytes int64
 }
 
+// commitStoredResponse persists blob to Charon via the staging protocol
+// (POST /staging → PUT /staging/{sid}/chunks/{k} → PUT /staging/{sid}/complete).
+// On either Add or Close failure it explicitly aborts the staging record so
+// partial chunks are not left orphaned; abort failures are logged at warn
+// level but do not mask the original error. Returns the underlying storage
+// error so the caller can map it to its surface (HTTP / SSE / WS).
+func (h *Handler) commitStoredResponse(ctx context.Context, stagingID, id, tenantKey string, blob []byte) error {
+	cw := newChunkedResponseWriter(ctx, h.charon, stagingID, id, tenantKey, h.maxChunkBytes)
+	if err := cw.Add(blob); err != nil {
+		h.log.Error("chunk add", "id", id, "err", err)
+		if abortErr := cw.Abort(); abortErr != nil {
+			h.log.Warn("chunk abort", "id", id, "err", abortErr)
+		}
+		return err
+	}
+	if err := cw.Close(); err != nil {
+		h.log.Error("chunk close", "id", id, "err", err)
+		if abortErr := cw.Abort(); abortErr != nil {
+			h.log.Warn("chunk abort", "id", id, "err", abortErr)
+		}
+		return err
+	}
+	return nil
+}
+
 // NewHandler creates a Handler with the default MaxChunkBytes cap (1 MiB).
 func NewHandler(ch charon.Backend, inf inference.Backend, log *slog.Logger) *Handler {
 	return &Handler{charon: ch, inf: inf, log: log, maxChunkBytes: bytesize.MiB}
@@ -119,15 +144,7 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 
 	if req.ShouldStore() {
 		responseBlob := marshalStoredResponse(infResp, req.PreviousResponseID, req.Instructions, req.Background)
-		cw := newChunkedResponseWriter(ctx, h.charon, stagingID, infResp.ID, tenantKey, h.maxChunkBytes)
-		if err := cw.Add(responseBlob); err != nil {
-			h.log.Error("chunk add", "id", infResp.ID, "err", err)
-			_ = cw.Abort()
-			server.WriteError(w, http.StatusInternalServerError, "storage error")
-			return
-		}
-		if err := cw.Close(); err != nil {
-			h.log.Error("chunk close", "id", infResp.ID, "err", err)
+		if err := h.commitStoredResponse(ctx, stagingID, infResp.ID, tenantKey, responseBlob); err != nil {
 			server.WriteError(w, http.StatusInternalServerError, "storage error")
 			return
 		}

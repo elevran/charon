@@ -12,8 +12,16 @@ import (
 	"github.com/elevran/charon/internal/telemetry"
 )
 
-// defaultMaxChunkBytes is the default cap for chunkedResponseWriter (1 MiB).
+// defaultMaxChunkBytes is the default cap for chunkedResponseWriter when
+// --max-chunk-bytes is unset (1 MiB).
 const defaultMaxChunkBytes int64 = bytesize.MiB
+
+// maxMaxChunkBytes is the upper bound the proxy accepts for --max-chunk-bytes.
+// Hardcoded rather than imported from internal/server to avoid a config→server
+// import edge — keep this in sync with server.defaultChunkBodyBytes
+// (internal/server/handlers.go). Charon enforces the body cap on incoming
+// chunk PUTs and rejects oversize bodies with 400.
+const maxMaxChunkBytes int64 = bytesize.MiB
 
 // ProxyOptions holds configuration for the proxy server.
 type ProxyOptions struct {
@@ -57,7 +65,7 @@ func (o *ProxyOptions) AddFlags(fs *flag.FlagSet) {
 	fs.StringVar(&o.Backend, "backend", o.Backend, "inference backend base URL")
 	fs.StringVar(&o.CharonURL, "charon-url", o.CharonURL, "charon internal API base URL")
 	fs.Int64Var(&o.MaxChunkBytes, "max-chunk-bytes", 0,
-		"max response bytes buffered before flushing to Charon as a chunk (0 = default 1 MiB)")
+		"max response bytes buffered before flushing to Charon as a chunk (0 = default 1 MiB, max 1 MiB)")
 	o.Telemetry.AddFlags(fs)
 }
 
@@ -109,6 +117,9 @@ func (o *ProxyOptions) Complete(fs *flag.FlagSet) error {
 func (o *ProxyOptions) Validate() error {
 	if o.Backend == "" {
 		return fmt.Errorf("proxy backend (inference base URL) is empty")
+	}
+	if o.MaxChunkBytes > maxMaxChunkBytes {
+		return fmt.Errorf("--max-chunk-bytes=%d exceeds server chunk body cap %d", o.MaxChunkBytes, maxMaxChunkBytes)
 	}
 	return nil
 }
