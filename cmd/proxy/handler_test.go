@@ -130,23 +130,13 @@ func TestStoreEquality(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, getResp.StatusCode)
 }
 
-// TestStoreFalseContinuation verifies that a store:false turn can be
-// continued with a store:true turn that chains to it via
-// previous_response_id.
-//
-// The store:false turn must return an HTTP 200 with a response object
-// whose id the client can supply as previous_response_id on the next
-// turn. Since the response was not persisted, the proxy must NOT be
-// able to retrieve it via GET /responses/{id} — that path returns 404
-// from the proxy's passthrough to Charon. (Independently covered by
-// TestStoreEquality.)
-//
-// This test pins the store:false path's resolution semantics: the
-// proxy returns a successful 200 response and never tries to look up
-// the previous_response_id server-side for store:false turns it didn't
-// itself write — the assumption is that subsequent store:true turns
-// refer to store:true turns, not to store:false ones.
-func TestStoreFalseContinuation(t *testing.T) {
+// TestStoreTrueContinuation verifies that a store:true turn can be
+// continued with another store:true turn that chains to it via
+// previous_response_id. The proxy hits Charon's POST /staging path on
+// the continuation, which commits the request blob alongside the
+// previous turn. The store:false -> store:true chaining pattern is
+// pinned separately in backend_routing_test.go.
+func TestStoreTrueContinuation(t *testing.T) {
 	s := newTestStack(t)
 
 	storeTrue := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{

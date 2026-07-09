@@ -173,10 +173,10 @@ func (h *Handler) HandleBufferedStore(w http.ResponseWriter, r *http.Request) {
 // Read-only chain fetch: walks the chain rooted at id (root-first) and
 // returns each turn's (request_blob, response_blob) without creating or
 // committing any staging state. The chain itself is unchanged from the
-// caller's perspective — no new turn is persisted. Used by the proxy for
-// store:false turns (and for buffered store:true turns, where the proxy
-// wants context but intends to commit the request blob atomically via
-// POST /responses rather than opening a staging record here).
+// caller's perspective — no new turn is persisted.
+//
+// Used by the proxy for store:false turns: returns the chain without
+// creating a staging record or committing the current turn's request blob.
 //
 // Side effects on the chainstore are limited to LRU metadata updates
 // (LastAccessUnix, bucket promotion) — these are internal to eviction

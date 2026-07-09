@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -220,12 +219,6 @@ func TestProxyStreamedStoreTrueNoChainFetches(t *testing.T) {
 	_ = readSSE(t, resp)
 
 	hits := rec.snapshot()
-	stagingHits := hitsContaining(hits, "POST /staging")
-	chainHits := hitsContaining(hits, "GET /chain/")
-	assert.GreaterOrEqual(t, stagingHits, 1, "store:true must commit via POST /staging")
-	assert.Equal(t, 0, chainHits, "store:true first turn has no prev to fetch via GET /chain")
-	// unused locals keep the helper compile path live if readSSE changes
-	_ = stagingHits
-	_ = chainHits
-	_ = json.RawMessage{}
+	assert.GreaterOrEqual(t, hitsContaining(hits, "POST /staging"), 1, "store:true must commit via POST /staging")
+	assert.Equal(t, 0, hitsContaining(hits, "GET /chain/"), "store:true first turn has no prev to fetch via GET /chain")
 }
