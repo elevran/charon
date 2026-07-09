@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"sync"
 
 	"github.com/elevran/charon/pkg/charon"
@@ -36,8 +35,6 @@ type chunkedResponseWriter struct {
 	closedCh  chan struct{}
 	closedErr error
 }
-
-var errWriterClosed = errors.New("chunkedResponseWriter: already closed")
 
 // newChunkedResponseWriter constructs a writer targeting the given staging record.
 func newChunkedResponseWriter(
@@ -159,10 +156,7 @@ func (w *chunkedResponseWriter) Abort() error {
 
 	err := w.backend.Abort(w.ctx, w.stagingID)
 	w.mu.Lock()
-	w.closedErr = errWriterClosed
-	if err != nil {
-		w.closedErr = err
-	}
+	w.closedErr = err
 	w.mu.Unlock()
 	return err
 }

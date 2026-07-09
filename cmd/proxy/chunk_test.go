@@ -133,7 +133,7 @@ func TestWriterCapFlush(t *testing.T) {
 	assert.Len(t, completes, 1)
 	assert.Empty(t, aborts)
 
-	// chunk indices must be 0,1,2
+	// chunk indices must be 0,1
 	for i, c := range chunks {
 		assert.Equal(t, uint32(i), c.k)
 	}

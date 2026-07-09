@@ -282,12 +282,9 @@ func TestBufferedProxyMultipleChunks(t *testing.T) {
 	assert.Equal(t, 0, hitsContaining(hits, "/abort"), "no abort on success")
 }
 
-// TestBufferedProxyAbortsOnEmptyResponse verifies that a buffered path
-// with an empty response issues an abort rather than committing empty bytes.
-// The mock always returns a non-empty output, so we simulate emptiness by
-// injecting a store:false request that never calls Charon at all — instead
-// we confirm the abort path via the disruptive test in disruptive_test.go.
-// This test simply pins that store:false first turns make no /staging calls.
+// TestBufferedProxyStoreFalseNoStagingCalls pins that a buffered store:false
+// turn issues no Charon staging calls at all — neither AppendChunk, Complete,
+// nor Abort. The empty-response abort path is covered by disruptive_test.go.
 func TestBufferedProxyStoreFalseNoStagingCalls(t *testing.T) {
 	rec := &routingRecorder{}
 	s := newTestStack(t, withCharonMiddleware(rec.middleware()))
