@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -86,15 +87,15 @@ func (h *Handler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.PreviousResponseID != nil {
 		prevID = *req.PreviousResponseID
 	}
-	requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
-	var turns []charon.ResolveTurn
-	var stagingID string
-	stagingID, turns, err = h.charon.Resolve(ctx, prevID, tenantKey, requestBlob)
+	// store:false turns hydrate context via GET /chain (no commit of the
+	// current turn's request blob); store:true turns open a staging record
+	// via POST /staging (commits the request blob, returns staging_id).
+	// The shared helper handles both branches.
+	flatCtx, stagingID, err := h.hydrateContext(ctx, prevID, tenantKey, inputItems, req.ShouldStore())
 	if err != nil {
 		h.mapCharonError(w, err, "previous_response_not_found")
 		return
 	}
-	flatCtx := turnsToFlatCtx(turns)
 
 	infMap := buildInferenceMap(rawReq, flatCtx, inputItems)
 	createdAt := time.Now()
@@ -192,6 +193,45 @@ func (h *Handler) HandleCompact(w http.ResponseWriter, r *http.Request) {
 // handleStream delegates to sse.go.
 
 // --- helpers ---
+
+// hydrateContext fetches the prior-context items for a turn, choosing the
+// Charon entry call based on whether the current turn will be persisted.
+//
+//   - shouldStore == true → POST /staging?prev=<id> (carries the request
+//     blob as the body and returns a staging_id for the subsequent
+//     PutChunks + Complete sequence). The returned staging_id is "" when
+//     prevID is empty (first turn still gets a staging id, but callers
+//     that don't need a stage-only response can ignore it).
+//   - shouldStore == false → GET /chain/<id> (read-only, no commit). The
+//     returned staging_id is always "" — store:false turns never produce
+//     a staging record.
+//
+// In both branches the returned flatCtx is a JSON-flat projection of the
+// chain rooted at prevID, ready to be merged with the current turn's
+// inputItems and forwarded to the inference backend.
+func (h *Handler) hydrateContext(ctx context.Context, prevID, tenantKey string, inputItems []json.RawMessage, shouldStore bool) (flatCtx []json.RawMessage, stagingID string, err error) {
+	if shouldStore {
+		requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
+		var turns []charon.ResolveTurn
+		stagingID, turns, err = h.charon.Resolve(ctx, prevID, tenantKey, requestBlob)
+		if err != nil {
+			return nil, "", err
+		}
+		flatCtx = turnsToFlatCtx(turns)
+		return flatCtx, stagingID, nil
+	}
+
+	if prevID == "" {
+		// First turn, store:false: nothing to fetch.
+		return nil, "", nil
+	}
+	turns, err := h.charon.GetChain(ctx, prevID, tenantKey)
+	if err != nil {
+		return nil, "", err
+	}
+	flatCtx = turnsToFlatCtx(turns)
+	return flatCtx, "", nil
+}
 
 func (h *Handler) mapCharonError(w http.ResponseWriter, err error, notFoundCode string) {
 	switch {

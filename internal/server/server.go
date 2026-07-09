@@ -38,6 +38,10 @@ func RegisterHandlers(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("POST /responses", h.HandleBufferedStore)
 	mux.HandleFunc("GET /responses/{id}", h.HandleRetrieve)
 	mux.HandleFunc("DELETE /responses/{id}", h.HandleDelete)
+	// Read-only chain fetch (root-first turns, no commit). Used by the proxy
+	// to rehydrate context without opening a staging record or otherwise
+	// committing the current turn's request blob.
+	mux.HandleFunc("GET /chain/{id}", h.HandleGetChain)
 	// In-flight staging — intentionally under a separate prefix so authZ
 	// policies for /responses/* do not inadvertently reach staging ops.
 	mux.HandleFunc("POST /staging", h.HandleOpenStaging)

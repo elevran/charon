@@ -9,7 +9,6 @@ import (
 
 	"github.com/elevran/charon/cmd/proxy/inference"
 	"github.com/elevran/charon/internal/server"
-	"github.com/elevran/charon/pkg/charon"
 )
 
 // sseEvent is the wire format of a single SSE event.
@@ -74,15 +73,14 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req Creat
 	if req.PreviousResponseID != nil {
 		prevID = *req.PreviousResponseID
 	}
-	requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
-	var turns []charon.ResolveTurn
-	var stagingID string
-	stagingID, turns, err = h.charon.Resolve(ctx, prevID, tenantKey, requestBlob)
+	// store:false turns use GET /chain (no commit); store:true turns use
+	// POST /staging (commits request blob, returns staging_id for later
+	// chunked writes). See handler.hydrateContext for details.
+	flatCtx, stagingID, err := h.hydrateContext(ctx, prevID, tenantKey, inputItems, req.ShouldStore())
 	if err != nil {
 		h.mapCharonError(w, err, "previous_response_not_found")
 		return
 	}
-	flatCtx := turnsToFlatCtx(turns)
 
 	infMap := buildInferenceMap(rawReq, flatCtx, inputItems)
 	infMap["stream"] = json.RawMessage("true")

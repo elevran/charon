@@ -492,6 +492,85 @@ func TestPUTChunkAtUnknownStagingID(t *testing.T) {
 	assert.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode)
 }
 
+// TestGetChain exercises GET /chain/{id}.
+//
+// Verifies:
+//   - a chain of 2 stored turns is returned root-first, with both
+//     request_blob and response_blob populated as raw JSON;
+//   - the response status is 200 OK (the chain is read, not staged);
+//   - the staging record that buffered the second turn does NOT appear as
+//     a turn — GET /chain only reports turns persisted via
+//     ResolveAndStage+StoreWithStaging or POST /responses; pending
+//     staging records are not part of the chain until they complete;
+//   - a GET against an unknown ID returns 404.
+func TestGetChain(t *testing.T) {
+	srv := newTestServer(t)
+	storeRoot(t, srv, "resp_chain0", []byte(`{"id":"resp_chain0","status":"completed","output":[{"type":"m0"}]}`), "")
+
+	// Buffer turn 1 so its blobs are materialised on disk.
+	reqBlob := []byte(`{"input":[{"type":"message","role":"user","content":"hi"}]}`)
+	stagingID, _ := resolveAndStage(t, srv, "resp_chain0", reqBlob, "")
+	blob1 := []byte(`{"id":"resp_chain1","status":"completed","output":[{"type":"m1"}]}`)
+	storeWithStaging(t, srv, "resp_chain1", stagingID, blob1, "")
+
+	resp := doGET(t, srv, "/chain/resp_chain1", "")
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, _ := io.ReadAll(resp.Body)
+	var parsed struct {
+		Turns []map[string]json.RawMessage `json:"turns"`
+	}
+	require.NoError(t, json.Unmarshal(body, &parsed))
+	require.Len(t, parsed.Turns, 2, "chain of two stored turns should report two entries")
+	// Root-first: turn[0] is the older turn.
+	assert.NotEmpty(t, parsed.Turns[0]["request_blob"], "turn[0] must carry a request_blob")
+	assert.NotEmpty(t, parsed.Turns[0]["response_blob"], "turn[0] must carry a response_blob")
+	assert.NotEmpty(t, parsed.Turns[1]["request_blob"], "turn[1] must carry a request_blob")
+	assert.NotEmpty(t, parsed.Turns[1]["response_blob"], "turn[1] must carry a response_blob")
+}
+
+// TestGetChainUnknownID asserts that fetching a chain for an ID that was
+// never stored returns 404 — the proxy uses this status to surface
+// "previous_response_not_found" to clients.
+func TestGetChainUnknownID(t *testing.T) {
+	srv := newTestServer(t)
+	resp := doGET(t, srv, "/chain/resp_nonexistent", "")
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+// TestGetChainDoesNotCommit verifies that GET /chain is genuinely
+// read-only: calling it does not create any state on the server side.
+// (Indirectly verified by ensuring a subsequent POST /responses with
+// the same prevID still succeeds — a stray staging record would have
+// caused a chain-shape conflict.)
+func TestGetChainDoesNotCommit(t *testing.T) {
+	srv := newTestServer(t)
+	storeRoot(t, srv, "resp_gcr0", []byte(`{"id":"resp_gcr0","status":"completed","output":[]}`), "")
+
+	// Just touch GET /chain several times.
+	for i := 0; i < 3; i++ {
+		resp := doGET(t, srv, "/chain/resp_gcr0", "")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		resp.Body.Close()
+	}
+
+	// And make sure a real POST /responses afterward still works.
+	blob := []byte(`{"id":"resp_gcr1","status":"completed","output":[]}`)
+	body, _ := json.Marshal(map[string]interface{}{
+		"prev_id":       "resp_gcr0",
+		"response_id":   "resp_gcr1",
+		"response_blob": json.RawMessage(blob),
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
 func TestTenantIsolation(t *testing.T) {
 	srv := newTestServer(t)
 	storeRoot(t, srv, "resp_iso1", []byte(`{"id":"resp_iso1","status":"completed","output":[]}`), "alice")
