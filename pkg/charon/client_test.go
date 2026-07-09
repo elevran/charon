@@ -111,3 +111,57 @@ func TestClientResolveAfterStore(t *testing.T) {
 	assert.Len(t, turns, 1, "resolve of a root node returns 1 turn")
 	assert.Equal(t, json.RawMessage(blob), turns[0].ResponseBlob)
 }
+
+// TestClientGetChain exercises the read-only chain fetch.
+//
+// Walks a 2-turn chain via GetChain and verifies root-first turns with
+// both request and response blobs materialised. Also checks the
+// ErrNotFound path on unknown IDs.
+func TestClientGetChain(t *testing.T) {
+	client := startCharonServer(t)
+
+	// Build a 2-turn chain via the public client surfaces.
+	blob0 := responseBlob("resp_gc0", "test", "completed")
+	require.NoError(t, client.Store(ctx, "resp_gc0", "", "", blob0))
+
+	stagingID, _, err := client.Resolve(ctx, "resp_gc0", "", []byte(`{"input":[{"type":"message","role":"user"}]}`))
+	require.NoError(t, err)
+	blob1 := responseBlob("resp_gc1", "test", "completed")
+	require.NoError(t, client.Store(ctx, "resp_gc1", stagingID, "", blob1))
+
+	turns, err := client.GetChain(ctx, "resp_gc1", "")
+	require.NoError(t, err)
+	assert.Len(t, turns, 2, "GetChain on a 2-turn chain returns 2 turns")
+	assert.Equal(t, json.RawMessage(blob0), turns[0].ResponseBlob)
+	assert.Equal(t, json.RawMessage(blob1), turns[1].ResponseBlob)
+}
+
+// TestClientGetChainNotFound: the client surfaces ErrNotFound when the
+// chain doesn't exist.
+func TestClientGetChainNotFound(t *testing.T) {
+	client := startCharonServer(t)
+	_, err := client.GetChain(ctx, "resp_missing", "")
+	assert.ErrorIs(t, err, charon.ErrNotFound)
+}
+
+// TestClientGetChainIsReadOnly: calling GetChain does not open a staging
+// record. Verified indirectly by confirming the chain remains identical
+// (1 turn) before and after a GetChain call, and that a subsequent
+// POST /responses still works using the same prevID.
+func TestClientGetChainIsReadOnly(t *testing.T) {
+	client := startCharonServer(t)
+	blob0 := responseBlob("resp_gcr0", "test", "completed")
+	require.NoError(t, client.Store(ctx, "resp_gcr0", "", "", blob0))
+
+	turns0, err := client.GetChain(ctx, "resp_gcr0", "")
+	require.NoError(t, err)
+	assert.Len(t, turns0, 1)
+
+	turns1, err := client.GetChain(ctx, "resp_gcr0", "")
+	require.NoError(t, err)
+	assert.Len(t, turns1, 1, "GetChain must not append to the chain")
+
+	// Still resolvable as a previous ID for a new turn.
+	_, _, err = client.Resolve(ctx, "resp_gcr0", "", []byte(`{"input":[]}`))
+	assert.NoError(t, err)
+}

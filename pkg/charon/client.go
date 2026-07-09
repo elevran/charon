@@ -223,6 +223,43 @@ func (c *Client) Abort(ctx context.Context, stagingID string) error {
 	return c.checkStatus(resp)
 }
 
+// GetChain calls GET /chain/{id}.
+//
+// Read-only: returns the chain rooted at id (root-first turns) without
+// opening a staging record or otherwise committing a new turn. The wire
+// shape mirrors the turns[] portion of POST /staging; the difference is
+// purely that no staging side-effect occurs. Used by the proxy for
+// store:false turns, or when the proxy intends to commit the request blob
+// later via the atomic POST /responses endpoint rather than via the
+// streaming staging pipeline.
+//
+// tenantKey is forwarded as X-Tenant-Key (empty string sends an empty
+// header, treated as no tenant).
+func (c *Client) GetChain(ctx context.Context, id, tenantKey string) ([]ResolveTurn, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.baseURL+"/chain/"+id, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Tenant-Key", tenantKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if err := c.checkStatus(resp); err != nil {
+		return nil, err
+	}
+	var r struct {
+		Turns []ResolveTurn `json:"turns"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return nil, fmt.Errorf("decode get-chain response: %w", err)
+	}
+	return r.Turns, nil
+}
+
 // Retrieve calls GET /responses/{id}.
 // Returns the raw response blob and public node metadata from response headers.
 // tenantKey is forwarded as X-Tenant-Key (empty string sends an empty header, treated as no tenant).
@@ -310,6 +347,7 @@ func (c *Client) checkStatus(resp *http.Response) error {
 // Backend is the interface proxy.Handler requires from the Charon client.
 type Backend interface {
 	Resolve(ctx context.Context, previousID, tenantKey string, requestBlob []byte) (string, []ResolveTurn, error)
+	GetChain(ctx context.Context, id, tenantKey string) ([]ResolveTurn, error)
 	Store(ctx context.Context, id, stagingID, tenantKey string, responseBlob []byte) error
 	Retrieve(ctx context.Context, id, tenantKey string) (*RetrieveResponse, error)
 	Delete(ctx context.Context, id, tenantKey string) error

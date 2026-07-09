@@ -155,27 +155,30 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 				}
 			}
 		} else {
-			requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
-			var turns []charon.ResolveTurn
-			stagingID, turns, err = h.charon.Resolve(ctx, *msg.PreviousResponseID, tenantKey, requestBlob)
+			// No cache hit — fall back to Charon. Entry call depends on store:
+			//   store:false → GET /chain/{prev} (read-only, no commit)
+			//   store:true  → POST /staging?prev={prev} (commits request blob)
+			flatCtx, stagingID, err = h.hydrateContext(ctx, *msg.PreviousResponseID, tenantKey, inputItems, msg.ShouldStore())
 			if err != nil {
-				h.wsSendError(conn, 400, "previous_response_not_found",
-					"previous response not found")
+				h.wsSendError(conn, 400, "previous_response_not_found", "previous response not found")
 				return
 			}
-			flatCtx = turnsToFlatCtx(turns)
 		}
 	} else {
-		// First turn: stage the request blob so its input is preserved for
-		// future flat context reconstruction.
-		requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
-		var turns []charon.ResolveTurn
-		stagingID, turns, err = h.charon.Resolve(ctx, "", tenantKey, requestBlob)
-		if err != nil {
-			h.wsSendError(conn, 502, "staging_error", "failed to stage request")
-			return
+		// First turn.
+		if msg.ShouldStore() {
+			// store:true first turn: open a staging record so the request
+			// blob is persisted.
+			requestBlob, _ := json.Marshal(storedRequest{Input: inputItems})
+			var turns []charon.ResolveTurn
+			stagingID, turns, err = h.charon.Resolve(ctx, "", tenantKey, requestBlob)
+			if err != nil {
+				h.wsSendError(conn, 502, "staging_error", "failed to stage request")
+				return
+			}
+			flatCtx = turnsToFlatCtx(turns) // always empty for first turn
 		}
-		flatCtx = turnsToFlatCtx(turns) // always empty for first turn
+		// store:false first turn: nothing to fetch, nothing to stage.
 	}
 
 	// Validate: function_call_output without a matching function_call is invalid.
