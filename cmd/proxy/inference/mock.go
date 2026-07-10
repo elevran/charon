@@ -3,8 +3,10 @@ package inference
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 )
 
@@ -19,6 +21,9 @@ import (
 type MockServer struct {
 	*httptest.Server
 	counter atomic.Int64
+
+	mu     sync.Mutex
+	bodies [][]byte // captured request bodies, in arrival order
 }
 
 // NewMockServer starts a mock inference server. The caller must call Close().
@@ -33,6 +38,17 @@ func NewMockServer() *MockServer {
 // Calls returns the total number of inference requests handled.
 func (m *MockServer) Calls() int64 { return m.counter.Load() }
 
+// RequestBodies returns a snapshot of every request body the mock has
+// received, in arrival order. Tests use this to assert what the proxy
+// actually forwarded to the inference backend.
+func (m *MockServer) RequestBodies() [][]byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([][]byte, len(m.bodies))
+	copy(out, m.bodies)
+	return out
+}
+
 // BaseURL returns the mock server's base URL (no trailing slash), satisfying
 // the inference.Backend interface.
 func (m *MockServer) BaseURL() string { return m.URL }
@@ -43,11 +59,12 @@ func (m *MockServer) nextID() string {
 }
 
 func (m *MockServer) handle(w http.ResponseWriter, r *http.Request) {
+	body, _ := readAndRecord(r, m)
+
 	var req struct {
 		Stream bool `json:"stream"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	_ = r.Body.Close()
+	_ = json.Unmarshal(body, &req)
 
 	id := m.nextID()
 	outputItem := json.RawMessage(`{"type":"message","id":"msg_ok","role":"assistant","status":"completed","content":[{"type":"output_text","text":"OK."}]}`)
@@ -58,6 +75,21 @@ func (m *MockServer) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.writeComplete(w, id, outputItem, usage)
+}
+
+// readAndRecord reads the request body, appends a copy to m.bodies under
+// the mutex, and returns the bytes for further decoding.
+func readAndRecord(r *http.Request, m *MockServer) ([]byte, error) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	cp := make([]byte, len(body))
+	copy(cp, body)
+	m.mu.Lock()
+	m.bodies = append(m.bodies, cp)
+	m.mu.Unlock()
+	return body, nil
 }
 
 func (m *MockServer) writeComplete(w http.ResponseWriter, id string, item json.RawMessage, usage *UsageInfo) {
