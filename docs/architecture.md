@@ -96,7 +96,7 @@ The inference backend is similarly stateless. It always receives the complete fl
 
 ### 2. Single embedded storage backend
 
-The storage layer uses [Pebble](https://github.com/cockroachdb/pebble), an embedded key-value store. All data — chain node metadata, payload blobs, LRU accounting, and staging records — lives in a single Pebble database directory. There are no external processes (no SQL server, no object store).
+The storage layer uses [Pebble](https://github.com/cockroachdb/pebble), an embedded key-value store. All data — chain node metadata, payload blobs, LRU accounting, and staging records — lives in a single Pebble database directory. There are no external processes.
 
 | Deployment level | Storage |
 |-----------------|---------|
@@ -257,7 +257,7 @@ For testing and development, proxy and Charon may be colocated in the same binar
 
 ### Access patterns
 
-Charon's workload is append-only point-lookup and sequential parent-pointer walk — no joins, no predicate scans over payload content. These patterns fit an embedded key-value store far better than a relational database.
+Charon's workload is append-only point-lookup and sequential parent-pointer walk — no joins, no predicate scans over payload content.
 
 ### Single-server throughput expectations
 
