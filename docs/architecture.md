@@ -21,10 +21,11 @@ client surface (e.g., `/v1/responses/` API).
 Client
   ↓  OpenAI Responses API (HTTP / SSE / WebSocket)
 Proxy ──────────────────────────────────────► Charon
-  │  GET /responses/{id} (resolve chain)        (context resolution + storage)
-  │  POST /responses/{id} (buffered store)
-  │  POST /staging (open streaming staging)
+  │  POST /staging (open staging, resolve chain)   (context resolution + storage)
+  │  PUT /staging/{id}/chunks/{k} (append chunk)
   │  PUT /staging/{id}/complete (commit)
+  │  GET /chain/{id} (read-only chain fetch, no commit)
+  │  GET /responses/{id} (point retrieve)
   │
   ↓  stateless Responses API (full flat_context as input)
 Inference Backend (OpenAI-compatible)
@@ -64,25 +65,24 @@ Charon owns storage and resolution:
 
 ### Proxy–Charon interaction
 
-The proxy calls Charon differently depending on whether this is a new chain or a continuation, and whether the response is streamed.
+The proxy calls Charon differently depending on whether the response will be stored and whether the turn has a prior context to fetch.
 
-**New chain** (no `previous_response_id`):
-- No Charon resolve call. Proxy calls inference with `flat_context=[]` + `input[]`.
-- The inference server assigns the canonical response ID, returned in the first streaming chunk or response body.
-- If `store: true`: proxy calls `POST /responses/{canonical_id}` with the request and response blobs.
+**New chain** (`store: true`, no `previous_response_id`):
+1. **Open staging**: `POST /staging` (no `prev` param) — Charon creates a staging record and returns a `staging_id`; `flat_context` is empty.
+2. **Inference**: proxy calls inference with `flat_context=[]` + `input[]`. The inference server assigns the canonical response ID.
+3. **Append chunks**: proxy delivers response bytes via `PUT /staging/{staging_id}/chunks/{k}`.
+4. **Complete**: `PUT /staging/{staging_id}/complete?response_id={canonical_id}&total={N}` — Charon commits the node.
 
-**Continuation — buffered path** (`store: true`, no streaming):
-1. Proxy calls `GET /responses/{previous_response_id}` — Charon returns the resolved flat context.
-2. Proxy appends new `input[]` and forwards to the inference server.
-3. Proxy calls `POST /responses/{canonical_id}` with the complete request and response blobs.
-
-**Continuation — streaming path** (`store: true`, streaming):
+**Continuation** (`store: true`, `previous_response_id` present):
 1. **Open staging**: `POST /staging?prev={previous_response_id}` — Charon resolves the prior chain, creates a staging record, returns `{staging_id, flat_context[]}`.
-2. **Inference**: proxy appends new `input[]` to `flat_context` and forwards to the inference server. The first streaming chunk carries the canonical response ID.
-3. **Append chunks**: proxy delivers response bytes incrementally via `PUT /staging/{staging_id}/chunks/{k}`.
+2. **Inference**: proxy appends new `input[]` to `flat_context` and forwards to the inference server. The inference server assigns the canonical response ID.
+3. **Append chunks**: proxy delivers response bytes via `PUT /staging/{staging_id}/chunks/{k}`.
 4. **Complete**: `PUT /staging/{staging_id}/complete?response_id={canonical_id}&total={N}` — Charon seals the staging record and commits the node atomically.
 
-If `store: false` is set, the proxy skips all Charon store calls. The `store: false` flag is a proxy-level concern; Charon is unaware of it.
+**`store: false`** (no persistence):
+- The proxy skips the staging open call entirely.
+- If `previous_response_id` is present, the proxy fetches context via `GET /chain/{previous_response_id}` (read-only, no staging record opened).
+- No chunks are written and no commit is issued.
 
 ---
 
@@ -136,47 +136,48 @@ Charon uses an entry-per-turn strategy: each response stores only its own turn, 
 
 Charon exposes an internal HTTP API consumed only by the proxy. It is **not** required to conform to the OpenAI Responses API specification — it is designed for operational efficiency as an internal service.
 
-### Buffered store: `POST /responses/{id}`
+### Staging protocol: `POST /staging` → chunks → complete
 
-The non-streaming path. The proxy first calls `GET /responses/{previous_response_id}` to resolve the prior chain, forwards to inference, then calls `POST /responses/{response_id}` with the complete request and response blobs.
+All store paths (new chain and continuation) use the staging protocol:
 
-> **Open question:** `GET /responses/{id}` currently returns a single turn. A separate subresource (e.g. `GET /resolve/{id}`) may be needed to return the full assembled flat context without requiring N individual GET calls.
+1. **Open staging**: `POST /staging?prev={prevID}` — resolves the prior chain (if `prev` is present), creates a staging record, returns `{staging_id, turns[]}`.
 
-```
-POST /responses/{response_id}
-body: {
-  "previous_response_id": "resp_..." | null,
-  "tenant_key": "",
-  "request_blob": "<base64>",
-  "response_blob": "<base64>"
-}
-Response: 201 Created
-  X-Depth: <chain depth>
-```
+2. **Append chunks**: `PUT /staging/{id}/chunks/{k}` — delivers one batch of response bytes (0-based index `k`). The first chunk call binds the canonical response ID via `?response_id=...`.
 
-### Streaming path: staging protocol
-
-The streaming path separates resolve from store via a three-step staging protocol, allowing the proxy to begin inference immediately after resolve and deliver response chunks incrementally:
-
-1. **Open staging**: `POST /staging?prev={prevID}` — resolves the prior chain, creates a staging record, returns a `staging_id`. The `flat_context` assembled here is included in the response for the proxy to use when building the inference request.
-
-2. **Append chunks**: `PUT /staging/{id}/chunks/{k}` — delivers one batch of response bytes (0-based offset `k`). Returns next expected offset. Chunks may arrive out of order; Charon sorts at commit time.
-
-3. **Complete staging**: `PUT /staging/{id}/complete?response_id=...&total=...` — seals the staging record and commits the node into the chain store. `total` is the total chunk count.
+3. **Complete staging**: `PUT /staging/{id}/complete?response_id=...&total=...` — seals the staging record and commits the node into the chain store. `total` is the total number of chunks.
 
 Additional staging endpoints:
 - `PUT /staging/{id}/abort` — marks the staging record as aborted; no node is committed. *(under review — may be removed if the TTL reaper provides sufficient cleanup)*
 - `GET /staging/{id}` — returns staging status (in-progress, complete, or aborted).
 
+### Read-only chain fetch: `GET /chain/{id}`
+
+Returns the full assembled flat context for the chain rooted at `{id}` without opening a staging record or committing the current turn's request blob. Used by the proxy for `store: false` continuations.
+
 ### Retrieve: `GET /responses/{id}`
 
-Returns the full stored record for one response — request blob, response blob, depth. No chain walk.
-
-> **Note:** This endpoint returns a single turn's data. Resolving a full chain for inference requires either N sequential calls or a dedicated resolve endpoint (see open question above).
+Returns the stored record for one response — request blob, response blob, depth. No chain walk.
 
 ### Delete: `DELETE /responses/{id}`
 
 Point delete — removes the node and its blobs. No effect on other responses in the chain. Background TTL expiry handles bulk eviction.
+
+### Buffered store: `POST /responses`
+
+Commits a complete turn (both request and response blobs) in a single call. Used in tests; in production the proxy uses the staging protocol for all paths.
+
+```
+POST /responses
+X-Tenant-Key: <tenant>
+body: {
+  "prev_id":       "resp_..." | <absent>,
+  "response_id":   "resp_..." | <absent>,
+  "request_blob":  "<base64>",
+  "response_blob": "<base64>"
+}
+Response: 201 Created
+  X-Depth: <chain depth>
+```
 
 ---
 
@@ -188,26 +189,18 @@ Response IDs visible to clients are assigned by the inference server, not pre-mi
 
 **Staging ID**: A 128-bit random UUID minted by Charon at `POST /staging` time and returned to the proxy. It is never exposed to clients. It ties the resolved chain context to the subsequent chunk writes and commit. The proxy binds the canonical response ID to the staging ID on the first chunk write (`PUT /staging/{id}/chunks/0?response_id=...`).
 
-**ID flow — continuation (streaming):**
+**ID flow — new chain or continuation (store: true):**
 ```
-POST /staging?prev={prev_response_id}  → Charon returns staging_id + flat_context
+POST /staging[?prev={prev_response_id}]  → Charon returns staging_id + flat_context
 inference → server assigns canonical_id
 PUT /staging/{staging_id}/chunks/{k}?response_id={canonical_id}  (first chunk binds the ID)
 PUT /staging/{staging_id}/complete?response_id={canonical_id}&total={N}  → committed
 ```
 
-**ID flow — continuation (buffered):**
+**ID flow — store: false continuation:**
 ```
-GET /responses/{prev_response_id}  → Charon returns flat_context
-inference → server assigns canonical_id
-POST /responses/{canonical_id}  body: { previous_response_id, request_blob, response_blob }
-                                → 201 Created; node committed atomically
-```
-
-**ID flow — new chain:**
-```
-POST /responses/{canonical_id}  body: { previous_response_id=null, request_blob, response_blob }
-                                → 201 Created; node committed atomically
+GET /chain/{prev_response_id}  → Charon returns flat_context (no staging record)
+inference → server assigns canonical_id (not stored)
 ```
 
 ---
@@ -242,11 +235,13 @@ The proxy is responsible for constructing the blobs sent to Charon — Charon st
 
 ## `store: false` Semantics
 
-When the client sets `store: false`, the proxy skips the store call to Charon after inference. The response is never written to durable storage. When `store: false`, the proxy also skips the staging open call — there is no `/staging` interaction, only the prior-chain resolve (if a `previous_response_id` is present).
+When the client sets `store: false`, the proxy skips all Charon store calls — no staging record is opened, no chunks are written, and no commit is issued. The response is never written to durable storage.
+
+For continuations with `store: false`, the proxy fetches prior context via `GET /chain/{previous_response_id}` (read-only, no staging record). For first turns with `store: false`, no Charon call is made at all.
 
 For WebSocket connections, the proxy maintains a connection-local in-memory cache of `store: false` responses so that `previous_response_id` lookups within the same connection still work. On disconnect, this cache is lost. A reconnecting client that references a `store: false` response ID receives `previous_response_not_found` and must start a new chain.
 
-Charon has no knowledge of `store: false`. Because write-intents are created only at store time (not at resolve time), a minted response_id that never receives a store call leaves no orphaned state in Charon — there is nothing to clean up.
+Charon has no knowledge of `store: false`; the proxy simply omits the store calls.
 
 ---
 
@@ -270,13 +265,13 @@ The in-memory LRU blob cache (`chainCache`, default 64 MiB) keeps recently acces
 
 These are order-of-magnitude estimates for a single Charon instance on commodity server hardware (8–32 cores, NVMe SSD). They are not benchmarks; actual numbers depend on blob size, chain depth, and hardware.
 
-**Write throughput — new response (`POST /responses/{id}` buffered path or `PUT /staging/{id}/complete`):**
-Dominated by the Pebble write batch (WAL append + memtable insert). A single atomic commit writes one node record and one or two blob values. With Pebble's default write options, expect low thousands of commits per second at blob sizes of 10–100 KB. The staging flush path (`ResolveAndStage` + `StoreWithStaging`) issues two Pebble commits per turn — one for the staging node, one for the final node — which roughly halves peak write throughput versus the buffered path.
+**Write throughput — new response (`PUT /staging/{id}/complete`):**
+Dominated by the Pebble write batch (WAL append + memtable insert). A single atomic commit writes one node record and one or two blob values. With Pebble's default write options, expect low thousands of commits per second at blob sizes of 10–100 KB. The staging flush path issues two Pebble commits per turn — one for the staging node, one for the final node — which roughly halves peak write throughput versus a single-commit path.
 
 **Read throughput — `GET /responses/{id}`:**
 `Retrieve` issues a single `GetNode` and `GetBlobs` call. No chain walk, no LRU touch. On a warm block cache, expect sub-millisecond p50 latency and tens of thousands of reads per second for typical blob sizes.
 
-**Chain resolution latency — `POST /staging?prev=...` or `GET /responses/{id}` (full chain):**
+**Chain resolution latency — `POST /staging?prev=...` or `GET /chain/{id}`:**
 `walkAndTouch` calls `backend.LoadChain` (N sequential `GetNode` reads from leaf to root) followed by up to N `GetBlobs` calls for nodes not in the in-memory cache. Latency scales approximately linearly with chain depth N:
 
 - Cache-cold path: ~N Pebble key reads + ~N blob fetches. At 100 µs per Pebble read, a depth-10 chain resolves in roughly 2–5 ms; depth-100 in 20–50 ms.
