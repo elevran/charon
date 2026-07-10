@@ -25,18 +25,6 @@ There are no range scans over content. The hot path is: node lookup → chain wa
 
 ---
 
-## Why a Key-Value Store?
-
-Charon's access patterns are:
-- **Append-only writes**: one new node per turn, committed atomically
-- **Point lookups**: fetch a node by its response ID
-- **Sequential parent-pointer walks**: N sequential node reads from leaf to root during resolve
-- **Background eviction**: scan LRU-ordered keys to drop the oldest entries
-
-These patterns — no joins, no predicate scans over content — fit a key-value store far better than a relational database. An embedded KV store (Pebble) also removes the operational overhead of an external database process and allows the binary to run with no external dependencies.
-
----
-
 ## Chain Reconstruction Strategy
 
 | Strategy | Write cost | Read cost | Storage cost |
@@ -56,7 +44,7 @@ When `storage.data_dir` is empty or omitted, Charon opens an in-memory Pebble in
 
 ### What Is Stored
 
-Charon stores four categories of objects in the KV database: **node metadata** (per-turn chain linkage and timestamps), **payload blobs** (the request and response content for each turn), an **LRU ordering index** (bucket-ordered keys used for capacity eviction), and **staging records** (transient in-flight streaming nodes that are invisible to chain walks and promoted to full nodes on stream commit).
+Charon stores four categories of objects in the database: **node metadata** (per-turn chain linkage and timestamps), **payload blobs** (the request and response content for each turn), an **LRU ordering index** (bucket-ordered keys used for capacity eviction), and **staging records** (transient in-flight streaming nodes that are invisible to chain walks and promoted to full nodes on stream commit).
 
 ---
 
