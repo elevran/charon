@@ -206,8 +206,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 	var canonicalID string
 	var sentCreated bool
 	var finalInfResp *inference.Response
-
-	buf := &streamBuffer{}
+	var outputItems []json.RawMessage // accumulate output items for store:true and wsCache
 
 	for evt := range ch {
 		if evt.Response != nil && evt.Response.ID != "" && canonicalID == "" {
@@ -233,7 +232,7 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 		case "response.output_item.done":
 			h.wsSend(conn, sseEvent{Type: evt.Type, SequenceNumber: seq, OutputIndex: &outIdx, Item: evt.Item})
 			seq++
-			buf.add(evt.Item)
+			outputItems = append(outputItems, evt.Item)
 		case "response.completed":
 			finalInfResp = evt.Response
 
@@ -262,12 +261,11 @@ func (h *Handler) wsTurn(ctx context.Context, conn *websocket.Conn, cache *wsCac
 	}
 
 	if msg.ShouldStore() {
-		finalInfResp.Output = buf.drain()
+		finalInfResp.Output = outputItems
 		responseBlob := marshalStoredResponse(finalInfResp, msg.PreviousResponseID, msg.Instructions, msg.Background)
-		if err := h.charon.Store(ctx, canonicalID, stagingID, tenantKey, responseBlob); err != nil {
-			h.log.Error("ws charon store", "id", canonicalID, "err", err)
+		if err := h.commitStoredResponse(ctx, stagingID, canonicalID, tenantKey, responseBlob); err != nil {
 			h.wsSendError(conn, 500, "storage_error", "response not persisted")
-			return // do not emit response.completed — client must not believe the response was persisted
+			return
 		}
 	} else {
 		// store:false — cache assembled flat_context for subsequent turns.

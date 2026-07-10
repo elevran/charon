@@ -56,7 +56,7 @@ func run() error {
 	infClient := inference.New(opts.Backend, opts.APIKey, timeout)
 	charonClient := charon.New(opts.CharonURL, timeout)
 
-	h := NewHandler(charonClient, infClient, log)
+	h := NewHandler(charonClient, infClient, log).WithMaxChunkBytes(opts.MaxChunkBytes)
 	mux := http.NewServeMux()
 	RegisterHandlers(mux, h)
 	srv := server.NewServerFromMux(opts.Listen, mux, log, tp)

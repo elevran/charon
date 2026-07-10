@@ -44,10 +44,11 @@ func (r *routingRecorder) snapshot() []string {
 
 // newRoutingStack builds a testStack whose Charon mux is wrapped in a
 // routingRecorder, so tests can inspect which endpoints were called.
-func newRoutingStack(t *testing.T) (*testStack, *routingRecorder) {
+func newRoutingStack(t *testing.T, opts ...stackOption) (*testStack, *routingRecorder) {
 	t.Helper()
 	rec := &routingRecorder{}
-	s := newTestStack(t, withCharonMiddleware(rec.middleware()))
+	allOpts := append([]stackOption{withCharonMiddleware(rec.middleware())}, opts...)
+	s := newTestStack(t, allOpts...)
 	return s, rec
 }
 
@@ -221,4 +222,81 @@ func TestProxyStreamedStoreTrueNoChainFetches(t *testing.T) {
 	hits := rec.snapshot()
 	assert.GreaterOrEqual(t, hitsContaining(hits, "POST /staging"), 1, "store:true must commit via POST /staging")
 	assert.Equal(t, 0, hitsContaining(hits, "GET /chain/"), "store:true first turn has no prev to fetch via GET /chain")
+}
+
+// TestBufferedProxySingleChunk verifies that a small buffered response produces
+// exactly 1 chunk PUT and 1 complete (default 1 MiB cap is not exceeded).
+func TestBufferedProxySingleChunk(t *testing.T) {
+	s, rec := newRoutingStack(t)
+
+	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
+		"model": "test",
+		"input": "hello",
+	})
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	hits := rec.snapshot()
+	assert.Equal(t, 1, hitsContaining(hits, "/chunks/"), "small response must produce exactly 1 AppendChunk call")
+	assert.Equal(t, 1, hitsContaining(hits, "/complete"), "exactly 1 Complete call")
+	assert.Equal(t, 0, hitsContaining(hits, "/abort"), "no abort on success")
+}
+
+// TestStreamedProxySingleChunk verifies that a small streamed response produces
+// exactly 1 chunk PUT and 1 complete.
+func TestStreamedProxySingleChunk(t *testing.T) {
+	s, rec := newRoutingStack(t)
+
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", s.proxyURL+"/responses",
+		strings.NewReader(`{"model":"test","input":"hello","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	_ = readSSE(t, resp)
+
+	hits := rec.snapshot()
+	assert.Equal(t, 1, hitsContaining(hits, "/chunks/"), "small response must produce exactly 1 AppendChunk call")
+	assert.Equal(t, 1, hitsContaining(hits, "/complete"), "exactly 1 Complete call")
+	assert.Equal(t, 0, hitsContaining(hits, "/abort"), "no abort on success")
+}
+
+// TestBufferedProxyMultipleChunks verifies that a tiny chunk cap splits the
+// buffered response blob into multiple chunk PUTs.
+func TestBufferedProxyMultipleChunks(t *testing.T) {
+	s, rec := newRoutingStack(t, withMaxChunkBytes(64))
+
+	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
+		"model": "test",
+		"input": "hello world, this request should produce a response blob that exceeds 64 bytes after marshaling",
+	})
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	hits := rec.snapshot()
+	assert.GreaterOrEqual(t, hitsContaining(hits, "/chunks/"), 2, "tiny cap must produce ≥2 AppendChunk calls")
+	assert.Equal(t, 1, hitsContaining(hits, "/complete"), "exactly 1 Complete call")
+	assert.Equal(t, 0, hitsContaining(hits, "/abort"), "no abort on success")
+}
+
+// TestBufferedProxyStoreFalseNoStagingCalls pins that a buffered store:false
+// turn issues no Charon staging calls at all — neither AppendChunk, Complete,
+// nor Abort. The empty-response abort path itself is exercised by the unit
+// tests in chunk_test.go (TestWriterZeroBytesAborts).
+func TestBufferedProxyStoreFalseNoStagingCalls(t *testing.T) {
+	s, rec := newRoutingStack(t)
+
+	resp := doRequest(t, s.proxyURL, "POST", "/responses", map[string]interface{}{
+		"model": "test",
+		"input": "hello",
+		"store": false,
+	})
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	hits := rec.snapshot()
+	assert.Equal(t, 0, hitsContaining(hits, "/chunks/"), "store:false must not call AppendChunk")
+	assert.Equal(t, 0, hitsContaining(hits, "/complete"), "store:false must not call Complete")
+	assert.Equal(t, 0, hitsContaining(hits, "/abort"), "store:false must not call Abort")
 }

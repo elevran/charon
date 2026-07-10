@@ -47,6 +47,7 @@ type stackConfig struct {
 	infURL           string // non-empty → use this URL instead of a fresh MockServer
 	realListeners    bool
 	timeout          time.Duration
+	maxChunkBytes    int64 // 0 → use Handler default (1 MiB)
 }
 
 // stackOption is a functional option for newTestStack.
@@ -62,6 +63,11 @@ func withCharonMiddleware(mw func(http.Handler) http.Handler) stackOption {
 // instead of starting a fresh MockServer.
 func withInferenceURL(u string) stackOption {
 	return func(c *stackConfig) { c.infURL = u }
+}
+
+// withMaxChunkBytes sets the per-chunk byte cap on the proxy Handler.
+func withMaxChunkBytes(n int64) stackOption {
+	return func(c *stackConfig) { c.maxChunkBytes = n }
 }
 
 // withRealListeners uses real OS-assigned TCP ports instead of httptest servers.
@@ -117,6 +123,9 @@ func newTestStack(t testing.TB, opts ...stackOption) *testStack {
 
 	buildProxy := func(charonURL string) http.Handler {
 		proxyH := NewHandler(charon.New(charonURL, cfg.timeout), infClient, log)
+		if cfg.maxChunkBytes > 0 {
+			proxyH.WithMaxChunkBytes(cfg.maxChunkBytes)
+		}
 		mux := http.NewServeMux()
 		RegisterHandlers(mux, proxyH)
 		return mux

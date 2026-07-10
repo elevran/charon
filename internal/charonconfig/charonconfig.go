@@ -8,6 +8,7 @@ import (
 
 	"sigs.k8s.io/yaml"
 
+	"github.com/elevran/charon/internal/bytesize"
 	"github.com/elevran/charon/internal/telemetry"
 )
 
@@ -24,9 +25,9 @@ type CharonOptions struct {
 	// TTLDays is the maximum age of a stored response.
 	TTLDays         int
 	MaxResponses    int64
-	MaxPayload      ByteSize
+	MaxPayload      bytesize.ByteSize
 	MaxChainDepth   int
-	MaxContextBytes ByteSize
+	MaxContextBytes bytesize.ByteSize
 
 	// WorkerTTLInterval is how often the background TTL reaper runs (not the TTL itself).
 	WorkerTTLInterval time.Duration
@@ -116,12 +117,12 @@ type fileCharonConfig struct {
 }
 
 type fileStorageConfig struct {
-	DataDir         string   `json:"data_dir"`
-	TTLDays         int      `json:"ttl_days"`
-	MaxResponses    int64    `json:"max_responses"`
-	MaxPayload      ByteSize `json:"max_payload"`
-	MaxChainDepth   int      `json:"max_chain_depth"`
-	MaxContextBytes ByteSize `json:"max_context_bytes"`
+	DataDir         string            `json:"data_dir"`
+	TTLDays         int               `json:"ttl_days"`
+	MaxResponses    int64             `json:"max_responses"`
+	MaxPayload      bytesize.ByteSize `json:"max_payload"`
+	MaxChainDepth   int               `json:"max_chain_depth"`
+	MaxContextBytes bytesize.ByteSize `json:"max_context_bytes"`
 }
 
 type fileWorkerConfig struct {

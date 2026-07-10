@@ -151,3 +151,36 @@ func TestStreamingStoreFailureIsFatal(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, getResp.StatusCode,
 		"response must not be accessible via GET after a store failure")
 }
+
+// TestStreamingInferenceFailureEmitsFailedNotCompleted verifies that a
+// mid-stream inference failure results in no chunk/complete calls reaching
+// Charon — the staging record must remain uncommitted (abort via TTL).
+func TestStreamingInferenceFailureEmitsFailedNotCompleted(t *testing.T) {
+	partialSrv := inference.NewPartialMockServer()
+	t.Cleanup(partialSrv.Close)
+
+	rec := &routingRecorder{}
+	s := newTestStack(t, withInferenceURL(partialSrv.URL), withCharonMiddleware(rec.middleware()))
+
+	body, _ := json.Marshal(map[string]any{
+		"model":  "mock",
+		"stream": true,
+		"input":  []map[string]string{{"type": "message", "role": "user", "content": "hi"}},
+	})
+	resp, err := http.Post(s.proxyURL+"/responses", "application/json", bytes.NewReader(body))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	sse := readSSE(t, resp)
+	canonicalID := sse.createdID()
+
+	assert.NotEmpty(t, canonicalID, "proxy must emit response.created")
+	assert.NotContains(t, sse.EventTypes, "response.completed",
+		"proxy must NOT emit response.completed when inference truncated")
+
+	hits := rec.snapshot()
+	assert.Equal(t, 0, hitsContaining(hits, "/chunks/"),
+		"no AppendChunk calls when inference stream was truncated before response.completed")
+	assert.Equal(t, 0, hitsContaining(hits, "/complete"),
+		"no Complete call when inference stream was truncated")
+}

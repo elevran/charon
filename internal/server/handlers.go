@@ -10,17 +10,17 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/elevran/charon/internal/bytesize"
 	"github.com/elevran/charon/internal/chainstore"
 )
 
-// maxChunkBytes is the hard upper bound on a streaming-chunk PUT body.
-// 1 MB default / 4 MB cap keeps the proxy→Charon ingest path bounded: small
-// enough to stay under typical 256 MB per-process caps with 50+ concurrent
-// inferences, large enough that per-batch HTTP framing overhead is small.
-const (
-	defaultMaxChunkBytes = 1 << 20
-	maxChunkBytes        = 4 << 20
-)
+// defaultChunkBodyBytes caps the HTTP body of a streaming-chunk PUT
+// (PUT /staging/{sid}/chunks/{k}). Distinct from defaultMaxChunkBytes
+// in internal/proxyconfig — that const is the proxy's *flush* size;
+// this const is the server's *body-read* cap. The two must stay in sync
+// because the proxy emits chunks sized at the flush cap, and Charon
+// rejects anything larger.
+const defaultChunkBodyBytes = bytesize.MiB
 
 // Handler wires chainstore.Store to HTTP endpoints.
 type Handler struct {
@@ -351,7 +351,7 @@ func (h *Handler) HandleAppendChunk(w http.ResponseWriter, r *http.Request) {
 
 	// Cap per-chunk reads independently of the global maxBodyBytes. Default
 	// 1 MB; configurable up to 4 MB via WithMaxChunkBytes.
-	r.Body = http.MaxBytesReader(w, r.Body, defaultMaxChunkBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, defaultChunkBodyBytes)
 	chunkBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "failed to read chunk body")
