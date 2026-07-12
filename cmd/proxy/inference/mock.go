@@ -1,10 +1,13 @@
 package inference
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 )
 
@@ -19,6 +22,9 @@ import (
 type MockServer struct {
 	*httptest.Server
 	counter atomic.Int64
+
+	mu     sync.Mutex
+	bodies [][]byte // captured request bodies, in arrival order
 }
 
 // NewMockServer starts a mock inference server. The caller must call Close().
@@ -33,6 +39,21 @@ func NewMockServer() *MockServer {
 // Calls returns the total number of inference requests handled.
 func (m *MockServer) Calls() int64 { return m.counter.Load() }
 
+// RequestBodies returns a snapshot of every request body the mock has
+// received, in arrival order. Each returned byte slice is a deep copy of
+// the stored body, so callers may mutate the slices without affecting
+// future snapshots or each other. Tests use this to assert what the
+// proxy actually forwarded to the inference backend.
+func (m *MockServer) RequestBodies() [][]byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([][]byte, len(m.bodies))
+	for i, b := range m.bodies {
+		out[i] = append([]byte(nil), b...)
+	}
+	return out
+}
+
 // BaseURL returns the mock server's base URL (no trailing slash), satisfying
 // the inference.Backend interface.
 func (m *MockServer) BaseURL() string { return m.URL }
@@ -43,11 +64,17 @@ func (m *MockServer) nextID() string {
 }
 
 func (m *MockServer) handle(w http.ResponseWriter, r *http.Request) {
+	// recordAndReplaceBody MUST run before any JSON decode of r.Body — it
+	// drains r.Body and re-installs a fresh reader so subsequent decoding
+	// observes the same bytes we captured. If a future change decodes
+	// r.Body directly before this call, stream=false would be observed
+	// for every request, regardless of what the client sent.
+	recordAndReplaceBody(r, m)
+
 	var req struct {
 		Stream bool `json:"stream"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	_ = r.Body.Close()
 
 	id := m.nextID()
 	outputItem := json.RawMessage(`{"type":"message","id":"msg_ok","role":"assistant","status":"completed","content":[{"type":"output_text","text":"OK."}]}`)
@@ -58,6 +85,23 @@ func (m *MockServer) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.writeComplete(w, id, outputItem, usage)
+}
+
+// recordAndReplaceBody reads r.Body fully, stores a copy in m.bodies, and
+// re-installs a fresh reader on r.Body so subsequent decoders in the handler
+// see the same bytes. On read error the body may be partial or empty —
+// either way we still replace r.Body so the handler decodes a deterministic
+// (possibly empty) payload rather than re-draining an unknown state.
+func recordAndReplaceBody(r *http.Request, m *MockServer) {
+	body, _ := io.ReadAll(r.Body)
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	cp := make([]byte, len(body))
+	copy(cp, body)
+	m.mu.Lock()
+	m.bodies = append(m.bodies, cp)
+	m.mu.Unlock()
 }
 
 func (m *MockServer) writeComplete(w http.ResponseWriter, id string, item json.RawMessage, usage *UsageInfo) {
